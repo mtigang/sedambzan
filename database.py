@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,11 +19,7 @@ from config import (
 class Database:
     def __init__(self, path: str | Path = DATABASE_PATH):
         self.path = str(path)
-
-        Path(self.path).parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        self.lock = threading.RLock()
 
         self.conn = sqlite3.connect(
             self.path,
@@ -32,193 +29,34 @@ class Database:
 
         self.conn.row_factory = sqlite3.Row
 
-        self._configure()
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=30000")
+
         self._create_tables()
         self._migrate()
         self._load_initial_owners()
         self._load_defaults()
 
-    def _configure(self):
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA synchronous = NORMAL")
-        self.conn.execute("PRAGMA busy_timeout = 30000")
-        self.conn.commit()
+    # =====================================================
+    # BASIC
+    # =====================================================
 
-    def close(self):
-        try:
-            self.conn.close()
-        except Exception:
-            pass
-
-    def _create_tables(self):
-        self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS owners (
-                user_id INTEGER PRIMARY KEY,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS admins (
-                user_id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1,
-                notifications_enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                blocked INTEGER NOT NULL DEFAULT 0,
-                started INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                last_seen TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS shifts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                weekday INTEGER NOT NULL DEFAULT -1,
-                start_time TEXT NOT NULL,
-                end_time TEXT NOT NULL,
-                admin_id INTEGER NOT NULL,
-                permanent INTEGER NOT NULL DEFAULT 1,
-                specific_date TEXT,
-                created_at TEXT NOT NULL,
-
-                FOREIGN KEY(admin_id)
-                    REFERENCES admins(user_id)
-                    ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                entities_json TEXT,
-                status TEXT NOT NULL DEFAULT 'pending',
-                admin_id INTEGER,
-                admin_message_id INTEGER,
-                channel_message_id INTEGER,
-                reject_reason TEXT,
-                submitted_at TEXT NOT NULL,
-                reviewed_at TEXT,
-
-                FOREIGN KEY(user_id)
-                    REFERENCES users(user_id)
-                    ON DELETE CASCADE,
-
-                FOREIGN KEY(admin_id)
-                    REFERENCES admins(user_id)
-                    ON DELETE SET NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS rate_limits (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                actor_id INTEGER,
-                action TEXT NOT NULL,
-                details TEXT,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS shift_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_id INTEGER NOT NULL,
-                message TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                created_at TEXT NOT NULL,
-
-                FOREIGN KEY(admin_id)
-                    REFERENCES admins(user_id)
-                    ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_messages_status
-            ON messages(status);
-
-            CREATE INDEX IF NOT EXISTS idx_messages_admin
-            ON messages(admin_id);
-
-            CREATE INDEX IF NOT EXISTS idx_messages_submitted
-            ON messages(submitted_at);
-
-            CREATE INDEX IF NOT EXISTS idx_rate_user_time
-            ON rate_limits(user_id, created_at);
-
-            CREATE INDEX IF NOT EXISTS idx_logs_time
-            ON activity_logs(created_at);
-
-            CREATE INDEX IF NOT EXISTS idx_shifts_weekday
-            ON shifts(weekday);
-
-            CREATE INDEX IF NOT EXISTS idx_shifts_date
-            ON shifts(specific_date);
-            """
+    def now(self) -> str:
+        return datetime.utcnow().isoformat(
+            timespec="seconds"
         )
 
+    def _commit(self):
         self.conn.commit()
 
-    def _migrate(self):
-        """
-        مهاجرت‌های سازگار با دیتابیس نسخه‌های قبلی.
-        """
-        try:
-            columns = {
-                row["name"]
-                for row in self.conn.execute(
-                    "PRAGMA table_info(users)"
-                ).fetchall()
-            }
+    def _json_dump(self, value: Any) -> str:
+        return json.dumps(
+            value if value is not None else [],
+            ensure_ascii=False,
+        )
 
-            if "started" not in columns:
-                self.conn.execute(
-                    "ALTER TABLE users ADD COLUMN started INTEGER NOT NULL DEFAULT 0"
-                )
-
-            self.conn.execute(
-                """
-                UPDATE shifts
-                SET weekday = -1
-                WHERE permanent = 1
-                """
-            )
-
-            self.conn.commit()
-        except Exception:
-            pass
-
-    @staticmethod
-    def now() -> str:
-        return datetime.utcnow().isoformat(timespec="seconds")
-
-    @staticmethod
-    def _json(value: Any) -> str | None:
-        if value is None:
-            return None
-
-        try:
-            return json.dumps(
-                value,
-                ensure_ascii=False,
-            )
-        except Exception:
-            return None
-
-    @staticmethod
-    def _load_json(value: str | None):
+    def _json_load(self, value: str | None):
         if not value:
             return []
 
@@ -227,27 +65,294 @@ class Database:
         except Exception:
             return []
 
-    # ---------------------------------------------------------
-    # Owners
-    # ---------------------------------------------------------
+    # =====================================================
+    # TABLES
+    # =====================================================
 
-    def _load_initial_owners(self):
-        for user_id in OWNER_IDS:
+    def _create_tables(self):
+        with self.lock:
+            self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS owners (
+                    user_id INTEGER PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id INTEGER PRIMARY KEY,
+                    name TEXT,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    notifications_enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    started INTEGER NOT NULL DEFAULT 0,
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    last_seen TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS shifts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    weekday INTEGER NOT NULL DEFAULT -1,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    admin_id INTEGER NOT NULL,
+                    permanent INTEGER NOT NULL DEFAULT 1,
+                    specific_date TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(admin_id)
+                        REFERENCES admins(user_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    entities_json TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    admin_id INTEGER,
+                    shift_id INTEGER,
+                    admin_message_id INTEGER,
+                    channel_message_id INTEGER,
+                    reject_reason TEXT,
+                    submitted_at TEXT NOT NULL,
+                    reviewed_at TEXT,
+                    assigned_at TEXT,
+                    queued_at TEXT,
+                    FOREIGN KEY(user_id)
+                        REFERENCES users(user_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(admin_id)
+                        REFERENCES admins(user_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(shift_id)
+                        REFERENCES shifts(id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS rate_limits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS shift_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    admin_id INTEGER NOT NULL,
+                    message TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(admin_id)
+                        REFERENCES admins(user_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS admin_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id INTEGER UNIQUE NOT NULL,
+                    title TEXT,
+                    owner_id INTEGER NOT NULL,
+                    confirmed INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    confirmed_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS admin_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL,
+                    admin_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    reason TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(message_id)
+                        REFERENCES messages(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(admin_id)
+                        REFERENCES admins(user_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_messages_status
+                    ON messages(status);
+
+                CREATE INDEX IF NOT EXISTS idx_messages_admin
+                    ON messages(admin_id);
+
+                CREATE INDEX IF NOT EXISTS idx_messages_user
+                    ON messages(user_id);
+
+                CREATE INDEX IF NOT EXISTS idx_messages_submitted
+                    ON messages(submitted_at);
+
+                CREATE INDEX IF NOT EXISTS idx_rate_limits_user
+                    ON rate_limits(user_id, created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_shifts_admin
+                    ON shifts(admin_id);
+
+                CREATE INDEX IF NOT EXISTS idx_shifts_date
+                    ON shifts(specific_date);
+
+                CREATE INDEX IF NOT EXISTS idx_shifts_weekday
+                    ON shifts(weekday);
+
+                CREATE INDEX IF NOT EXISTS idx_admin_actions_admin
+                    ON admin_actions(admin_id);
+
+                CREATE INDEX IF NOT EXISTS idx_admin_actions_message
+                    ON admin_actions(message_id);
+                """
+            )
+
+            self._commit()
+
+    # =====================================================
+    # MIGRATION
+    # =====================================================
+
+    def _column_exists(
+        self,
+        table: str,
+        column: str,
+    ) -> bool:
+        rows = self.conn.execute(
+            f"PRAGMA table_info({table})"
+        ).fetchall()
+
+        return any(
+            row["name"] == column
+            for row in rows
+        )
+
+    def _migrate(self):
+        with self.lock:
+
+            # users.started
+            if not self._column_exists(
+                "users",
+                "started",
+            ):
+                self.conn.execute(
+                    """
+                    ALTER TABLE users
+                    ADD COLUMN started INTEGER
+                    NOT NULL DEFAULT 0
+                    """
+                )
+
+            # messages.shift_id
+            if not self._column_exists(
+                "messages",
+                "shift_id",
+            ):
+                self.conn.execute(
+                    """
+                    ALTER TABLE messages
+                    ADD COLUMN shift_id INTEGER
+                    """
+                )
+
+            # messages.assigned_at
+            if not self._column_exists(
+                "messages",
+                "assigned_at",
+            ):
+                self.conn.execute(
+                    """
+                    ALTER TABLE messages
+                    ADD COLUMN assigned_at TEXT
+                    """
+                )
+
+            # messages.queued_at
+            if not self._column_exists(
+                "messages",
+                "queued_at",
+            ):
+                self.conn.execute(
+                    """
+                    ALTER TABLE messages
+                    ADD COLUMN queued_at TEXT
+                    """
+                )
+
+            # قدیمی‌ها
             self.conn.execute(
                 """
-                INSERT OR IGNORE INTO owners(
-                    user_id,
-                    created_at
+                UPDATE shifts
+                SET weekday = -1
+                WHERE permanent = 1
+                """
+            )
+
+            self._commit()
+
+    # =====================================================
+    # DEFAULTS
+    # =====================================================
+
+    def _load_initial_owners(self):
+        with self.lock:
+            for owner_id in OWNER_IDS:
+                self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO owners
+                    (user_id, created_at)
+                    VALUES (?, ?)
+                    """,
+                    (
+                        int(owner_id),
+                        self.now(),
+                    ),
                 )
-                VALUES (?, ?)
+
+            self._commit()
+
+    def _load_defaults(self):
+        with self.lock:
+
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO settings
+                (key, value)
+                VALUES ('bot_enabled', ?)
                 """,
                 (
-                    int(user_id),
-                    self.now(),
+                    "1"
+                    if BOT_ENABLED_DEFAULT
+                    else "0",
                 ),
             )
 
-        self.conn.commit()
+            if CHANNEL_ID:
+                self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO settings
+                    (key, value)
+                    VALUES ('channel_id', ?)
+                    """,
+                    (
+                        str(CHANNEL_ID),
+                    ),
+                )
+
+            self._commit()
+
+    # =====================================================
+    # OWNERS
+    # =====================================================
 
     def is_owner(self, user_id: int) -> bool:
         row = self.conn.execute(
@@ -266,121 +371,136 @@ class Database:
             """
             SELECT *
             FROM owners
-            ORDER BY user_id
+            ORDER BY created_at
             """
         ).fetchall()
 
     def add_owner(self, user_id: int):
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO owners(
-                user_id,
-                created_at
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO owners
+                (user_id, created_at)
+                VALUES (?, ?)
+                """,
+                (
+                    user_id,
+                    self.now(),
+                ),
             )
-            VALUES (?, ?)
-            """,
-            (
-                user_id,
-                self.now(),
-            ),
-        )
 
-        self.conn.commit()
+            self._commit()
 
     def remove_owner(self, user_id: int):
-        self.conn.execute(
-            """
-            DELETE FROM owners
-            WHERE user_id = ?
-            """,
-            (user_id,),
-        )
+        with self.lock:
+            self.conn.execute(
+                """
+                DELETE FROM owners
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            )
 
-        self.conn.commit()
+            self._commit()
 
-    # ---------------------------------------------------------
-    # Admins
-    # ---------------------------------------------------------
+    # =====================================================
+    # ADMINS
+    # =====================================================
 
     def add_admin(
         self,
         user_id: int,
-        name: str,
+        name: str | None = None,
     ):
-        self.conn.execute(
-            """
-            INSERT INTO admins(
-                user_id,
-                name,
-                active,
-                notifications_enabled,
-                created_at
+        with self.lock:
+
+            self.conn.execute(
+                """
+                INSERT INTO admins
+                (
+                    user_id,
+                    name,
+                    active,
+                    created_at
+                )
+                VALUES (?, ?, 1, ?)
+
+                ON CONFLICT(user_id)
+                DO UPDATE SET
+                    name = COALESCE(
+                        excluded.name,
+                        admins.name
+                    ),
+                    active = 1
+                """,
+                (
+                    user_id,
+                    name,
+                    self.now(),
+                ),
             )
-            VALUES (?, ?, 1, 1, ?)
 
-            ON CONFLICT(user_id)
-            DO UPDATE SET
-                name = excluded.name
-            """,
-            (
-                user_id,
-                name,
-                self.now(),
-            ),
-        )
+            self._commit()
 
-        self.conn.commit()
+    def delete_admin(
+        self,
+        user_id: int,
+    ):
+        with self.lock:
+            self.conn.execute(
+                """
+                DELETE FROM admins
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            )
 
-    def delete_admin(self, user_id: int):
-        self.conn.execute(
-            """
-            DELETE FROM admins
-            WHERE user_id = ?
-            """,
-            (user_id,),
-        )
-
-        self.conn.commit()
+            self._commit()
 
     def set_admin_active(
         self,
         user_id: int,
         active: bool,
     ):
-        self.conn.execute(
-            """
-            UPDATE admins
-            SET active = ?
-            WHERE user_id = ?
-            """,
-            (
-                1 if active else 0,
-                user_id,
-            ),
-        )
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE admins
+                SET active = ?
+                WHERE user_id = ?
+                """,
+                (
+                    1 if active else 0,
+                    user_id,
+                ),
+            )
 
-        self.conn.commit()
+            self._commit()
 
     def set_admin_notifications(
         self,
         user_id: int,
         enabled: bool,
     ):
-        self.conn.execute(
-            """
-            UPDATE admins
-            SET notifications_enabled = ?
-            WHERE user_id = ?
-            """,
-            (
-                1 if enabled else 0,
-                user_id,
-            ),
-        )
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE admins
+                SET notifications_enabled = ?
+                WHERE user_id = ?
+                """,
+                (
+                    1 if enabled else 0,
+                    user_id,
+                ),
+            )
 
-        self.conn.commit()
+            self._commit()
 
-    def get_admin(self, user_id: int):
+    def get_admin(
+        self,
+        user_id: int,
+    ):
         return self.conn.execute(
             """
             SELECT *
@@ -400,7 +520,7 @@ class Database:
                 SELECT *
                 FROM admins
                 WHERE active = 1
-                ORDER BY name COLLATE NOCASE
+                ORDER BY created_at
                 """
             ).fetchall()
 
@@ -408,23 +528,23 @@ class Database:
             """
             SELECT *
             FROM admins
-            ORDER BY name COLLATE NOCASE
+            ORDER BY created_at
             """
         ).fetchall()
 
-    def count_admins(self):
+    def count_admins(self) -> int:
         row = self.conn.execute(
             """
-            SELECT COUNT(*) AS c
+            SELECT COUNT(*) AS count
             FROM admins
             """
         ).fetchone()
 
-        return row["c"]
+        return int(row["count"])
 
-    # ---------------------------------------------------------
-    # Users
-    # ---------------------------------------------------------
+    # =====================================================
+    # USERS
+    # =====================================================
 
     def upsert_user(
         self,
@@ -432,61 +552,96 @@ class Database:
         username: str | None,
         first_name: str | None,
         last_name: str | None,
-        started: bool = False,
+        started: bool | None = None,
     ):
-        now = self.now()
+        with self.lock:
 
-        self.conn.execute(
-            """
-            INSERT INTO users(
-                user_id,
-                username,
-                first_name,
-                last_name,
-                blocked,
-                started,
-                created_at,
-                last_seen
-            )
-            VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+            if started is None:
+                self.conn.execute(
+                    """
+                    INSERT INTO users
+                    (
+                        user_id,
+                        username,
+                        first_name,
+                        last_name,
+                        created_at,
+                        last_seen
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
 
-            ON CONFLICT(user_id)
-            DO UPDATE SET
-                username = excluded.username,
-                first_name = excluded.first_name,
-                last_name = excluded.last_name,
-                started = CASE
-                    WHEN excluded.started = 1 THEN 1
-                    ELSE users.started
-                END,
-                last_seen = excluded.last_seen
-            """,
-            (
-                user_id,
-                username,
-                first_name,
-                last_name,
-                1 if started else 0,
-                now,
-                now,
-            ),
+                    ON CONFLICT(user_id)
+                    DO UPDATE SET
+                        username = excluded.username,
+                        first_name = excluded.first_name,
+                        last_name = excluded.last_name,
+                        last_seen = excluded.last_seen
+                    """,
+                    (
+                        user_id,
+                        username,
+                        first_name,
+                        last_name,
+                        self.now(),
+                        self.now(),
+                    ),
+                )
+
+            else:
+                self.conn.execute(
+                    """
+                    INSERT INTO users
+                    (
+                        user_id,
+                        username,
+                        first_name,
+                        last_name,
+                        started,
+                        created_at,
+                        last_seen
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+
+                    ON CONFLICT(user_id)
+                    DO UPDATE SET
+                        username = excluded.username,
+                        first_name = excluded.first_name,
+                        last_name = excluded.last_name,
+                        started = excluded.started,
+                        last_seen = excluded.last_seen
+                    """,
+                    (
+                        user_id,
+                        username,
+                        first_name,
+                        last_name,
+                        1 if started else 0,
+                        self.now(),
+                        self.now(),
+                    ),
+                )
+
+            self._commit()
+
+    def mark_user_started(
+        self,
+        user_id: int,
+        username: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+    ):
+        self.upsert_user(
+            user_id,
+            username,
+            first_name,
+            last_name,
+            started=True,
         )
 
-        self.conn.commit()
-
-    def mark_user_started(self, user_id: int):
-        self.conn.execute(
-            """
-            UPDATE users
-            SET started = 1,
-                last_seen = ?
-            WHERE user_id = ?
-            """,
-            (self.now(), user_id),
-        )
-        self.conn.commit()
-
-    def has_started(self, user_id: int) -> bool:
+    def has_started(
+        self,
+        user_id: int,
+    ) -> bool:
         row = self.conn.execute(
             """
             SELECT started
@@ -495,33 +650,15 @@ class Database:
             """,
             (user_id,),
         ).fetchone()
-        return bool(row and row["started"])
 
-    def get_user_by_username(self, username: str):
-        username = username.lstrip("@").strip().lower()
-        return self.conn.execute(
-            """
-            SELECT *
-            FROM users
-            WHERE lower(username) = ?
-            LIMIT 1
-            """,
-            (username,),
-        ).fetchone()
+        return bool(
+            row and row["started"]
+        )
 
-    def get_started_users(self, limit: int = 200):
-        return self.conn.execute(
-            """
-            SELECT *
-            FROM users
-            WHERE started = 1
-            ORDER BY last_seen DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-
-    def get_user(self, user_id: int):
+    def get_user(
+        self,
+        user_id: int,
+    ):
         return self.conn.execute(
             """
             SELECT *
@@ -531,7 +668,84 @@ class Database:
             (user_id,),
         ).fetchone()
 
-    def is_blocked(self, user_id: int) -> bool:
+    def find_user_by_username(
+        self,
+        username: str,
+    ):
+        username = username.strip().lstrip("@")
+
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE LOWER(username) = LOWER(?)
+            LIMIT 1
+            """,
+            (username,),
+        ).fetchone()
+
+    def find_admin_by_username(
+        self,
+        username: str,
+    ):
+        username = username.strip().lstrip("@")
+
+        return self.conn.execute(
+            """
+            SELECT
+                admins.*,
+                users.username,
+                users.first_name,
+                users.last_name,
+                users.started
+            FROM admins
+            LEFT JOIN users
+                ON users.user_id = admins.user_id
+            WHERE
+                LOWER(
+                    COALESCE(
+                        users.username,
+                        ''
+                    )
+                ) = LOWER(?)
+            LIMIT 1
+            """,
+            (username,),
+        ).fetchone()
+
+    def get_started_users(
+        self,
+        limit: int | None = None,
+    ):
+        query = """
+            SELECT *
+            FROM users
+            WHERE started = 1
+            ORDER BY last_seen DESC
+        """
+
+        if limit is not None:
+            query += f" LIMIT {int(limit)}"
+
+        return self.conn.execute(
+            query
+        ).fetchall()
+
+    def count_started_users(self) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM users
+            WHERE started = 1
+            """
+        ).fetchone()
+
+        return int(row["count"])
+
+    def is_blocked(
+        self,
+        user_id: int,
+    ) -> bool:
         row = self.conn.execute(
             """
             SELECT blocked
@@ -550,40 +764,44 @@ class Database:
         user_id: int,
         blocked: bool,
     ):
-        self.conn.execute(
-            """
-            UPDATE users
-            SET blocked = ?
-            WHERE user_id = ?
-            """,
-            (
-                1 if blocked else 0,
-                user_id,
-            ),
-        )
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE users
+                SET blocked = ?
+                WHERE user_id = ?
+                """,
+                (
+                    1 if blocked else 0,
+                    user_id,
+                ),
+            )
 
-        self.conn.commit()
+            self._commit()
 
-    def count_active_users(self):
-        cutoff = (
+    def count_active_users(self) -> int:
+        since = (
             datetime.utcnow()
             - timedelta(hours=24)
-        ).isoformat(timespec="seconds")
+        ).isoformat(
+            timespec="seconds"
+        )
 
         row = self.conn.execute(
             """
-            SELECT COUNT(*) AS c
+            SELECT COUNT(*) AS count
             FROM users
-            WHERE last_seen >= ?
+            WHERE started = 1
+            AND last_seen >= ?
             """,
-            (cutoff,),
+            (since,),
         ).fetchone()
 
-        return row["c"]
+        return int(row["count"])
 
-    # ---------------------------------------------------------
-    # Shifts
-    # ---------------------------------------------------------
+    # =====================================================
+    # SHIFTS
+    # =====================================================
 
     def create_shift(
         self,
@@ -592,63 +810,65 @@ class Database:
         admin_id: int,
         permanent: bool = True,
         specific_date: str | None = None,
-    ):
-        # weekday دیگر برای permanent استفاده نمی‌شود.
-        weekday = -1
+        weekday: int = -1,
+    ) -> int:
 
-        if permanent:
-            specific_date = None
-        else:
-            if not specific_date:
-                raise ValueError(
-                    "specific_date is required for date-specific shift"
+        with self.lock:
+
+            cursor = self.conn.execute(
+                """
+                INSERT INTO shifts
+                (
+                    weekday,
+                    start_time,
+                    end_time,
+                    admin_id,
+                    permanent,
+                    specific_date,
+                    created_at
                 )
-
-        cur = self.conn.execute(
-            """
-            INSERT INTO shifts(
-                weekday,
-                start_time,
-                end_time,
-                admin_id,
-                permanent,
-                specific_date,
-                created_at
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    weekday,
+                    start_time,
+                    end_time,
+                    admin_id,
+                    1 if permanent else 0,
+                    specific_date,
+                    self.now(),
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                weekday,
-                start_time,
-                end_time,
-                admin_id,
-                1 if permanent else 0,
-                specific_date,
-                self.now(),
-            ),
-        )
 
-        self.conn.commit()
+            self._commit()
 
-        return cur.lastrowid
+            return int(cursor.lastrowid)
 
-    def delete_shift(self, shift_id: int):
-        self.conn.execute(
-            """
-            DELETE FROM shifts
-            WHERE id = ?
-            """,
-            (shift_id,),
-        )
+    def delete_shift(
+        self,
+        shift_id: int,
+    ):
+        with self.lock:
+            self.conn.execute(
+                """
+                DELETE FROM shifts
+                WHERE id = ?
+                """,
+                (shift_id,),
+            )
 
-        self.conn.commit()
+            self._commit()
 
-    def get_shift(self, shift_id: int):
+    def get_shift(
+        self,
+        shift_id: int,
+    ):
         return self.conn.execute(
             """
             SELECT
                 shifts.*,
-                admins.name AS admin_name
+                admins.name AS admin_name,
+                admins.notifications_enabled
             FROM shifts
             LEFT JOIN admins
                 ON admins.user_id = shifts.admin_id
@@ -657,45 +877,32 @@ class Database:
             (shift_id,),
         ).fetchone()
 
+    def _shift_matches_date(
+        self,
+        row,
+        date_string: str,
+        weekday: int,
+    ) -> bool:
+
+        if not row["permanent"]:
+            return (
+                row["specific_date"]
+                == date_string
+            )
+
+        row_weekday = row["weekday"]
+
+        if row_weekday == -1:
+            return True
+
+        return row_weekday == weekday
+
     def get_today_shifts(
         self,
         weekday: int,
         specific_date: str,
     ):
-        return self.conn.execute(
-            """
-            SELECT
-                shifts.*,
-                admins.name AS admin_name
-            FROM shifts
-            JOIN admins
-                ON admins.user_id = shifts.admin_id
-            WHERE admins.active = 1
-              AND (
-                    shifts.permanent = 1
-                    OR (
-                        shifts.permanent = 0
-                        AND shifts.specific_date = ?
-                    )
-                  )
-            ORDER BY
-                CASE
-                    WHEN shifts.permanent = 0
-                    THEN 0
-                    ELSE 1
-                END,
-                shifts.start_time
-            """,
-            (specific_date,),
-        ).fetchall()
-
-    def get_current_shift(
-        self,
-        weekday: int,
-        current_time: str,
-        specific_date: str,
-    ):
-        return self.conn.execute(
+        rows = self.conn.execute(
             """
             SELECT
                 shifts.*,
@@ -705,81 +912,89 @@ class Database:
             JOIN admins
                 ON admins.user_id = shifts.admin_id
             WHERE admins.active = 1
-              AND shifts.start_time <= ?
-              AND shifts.end_time > ?
-              AND (
-                    shifts.permanent = 1
-                    OR (
-                        shifts.permanent = 0
-                        AND shifts.specific_date = ?
-                    )
-                  )
-            ORDER BY
-                CASE
-                    WHEN shifts.permanent = 0
-                    THEN 0
-                    ELSE 1
-                END,
-                shifts.start_time DESC
-            LIMIT 1
-            """,
-            (
-                current_time,
-                current_time,
+            ORDER BY start_time
+            """
+        ).fetchall()
+
+        return [
+            row
+            for row in rows
+            if self._shift_matches_date(
+                row,
                 specific_date,
-            ),
-        ).fetchone()
+                weekday,
+            )
+        ]
+
+    def get_current_shift(
+        self,
+        weekday: int,
+        current_time: str,
+        specific_date: str,
+    ):
+        rows = self.get_today_shifts(
+            weekday,
+            specific_date,
+        )
+
+        for row in rows:
+            start = row["start_time"]
+            end = row["end_time"]
+
+            # شیفت معمولی
+            if start < end:
+                if start <= current_time < end:
+                    return row
+
+            # شیفت عبوری از نیمه‌شب
+            else:
+                if (
+                    current_time >= start
+                    or current_time < end
+                ):
+                    return row
+
+        return None
 
     def get_admin_today_shifts(
         self,
         admin_id: int,
         specific_date: str,
     ):
-        return self.conn.execute(
+        weekday = datetime.strptime(
+            specific_date,
+            "%Y-%m-%d",
+        ).weekday()
+
+        rows = self.conn.execute(
             """
-            SELECT *
+            SELECT
+                shifts.*,
+                admins.name AS admin_name,
+                admins.notifications_enabled
             FROM shifts
-            WHERE admin_id = ?
-              AND (
-                    permanent = 1
-                    OR (
-                        permanent = 0
-                        AND specific_date = ?
-                    )
-                  )
-            ORDER BY
-                CASE
-                    WHEN permanent = 0
-                    THEN 0
-                    ELSE 1
-                END,
-                start_time
+            JOIN admins
+                ON admins.user_id = shifts.admin_id
+            WHERE shifts.admin_id = ?
+            ORDER BY start_time
             """,
-            (
-                admin_id,
-                specific_date,
-            ),
+            (admin_id,),
         ).fetchall()
+
+        return [
+            row
+            for row in rows
+            if self._shift_matches_date(
+                row,
+                specific_date,
+                weekday,
+            )
+        ]
 
     def get_permanent_shifts(
         self,
-        admin_id: int | None = None,
+        admin_id: int,
     ):
-        if admin_id is None:
-            return self.conn.execute(
-                """
-                SELECT
-                    shifts.*,
-                    admins.name AS admin_name
-                FROM shifts
-                JOIN admins
-                    ON admins.user_id = shifts.admin_id
-                WHERE shifts.permanent = 1
-                ORDER BY
-                    shifts.start_time
-                """
-            ).fetchall()
-
         return self.conn.execute(
             """
             SELECT
@@ -788,34 +1003,18 @@ class Database:
             FROM shifts
             JOIN admins
                 ON admins.user_id = shifts.admin_id
-            WHERE shifts.permanent = 1
-              AND shifts.admin_id = ?
-            ORDER BY
-                shifts.start_time
+            WHERE
+                shifts.admin_id = ?
+                AND shifts.permanent = 1
+            ORDER BY start_time
             """,
             (admin_id,),
         ).fetchall()
 
     def get_date_shifts(
         self,
-        admin_id: int | None = None,
+        admin_id: int,
     ):
-        if admin_id is None:
-            return self.conn.execute(
-                """
-                SELECT
-                    shifts.*,
-                    admins.name AS admin_name
-                FROM shifts
-                JOIN admins
-                    ON admins.user_id = shifts.admin_id
-                WHERE shifts.permanent = 0
-                ORDER BY
-                    shifts.specific_date,
-                    shifts.start_time
-                """
-            ).fetchall()
-
         return self.conn.execute(
             """
             SELECT
@@ -824,11 +1023,10 @@ class Database:
             FROM shifts
             JOIN admins
                 ON admins.user_id = shifts.admin_id
-            WHERE shifts.permanent = 0
-              AND shifts.admin_id = ?
-            ORDER BY
-                shifts.specific_date,
-                shifts.start_time
+            WHERE
+                shifts.admin_id = ?
+                AND shifts.permanent = 0
+            ORDER BY specific_date, start_time
             """,
             (admin_id,),
         ).fetchall()
@@ -838,115 +1036,193 @@ class Database:
             """
             SELECT
                 shifts.*,
-                admins.name AS admin_name
+                admins.name AS admin_name,
+                admins.notifications_enabled
             FROM shifts
             LEFT JOIN admins
                 ON admins.user_id = shifts.admin_id
             ORDER BY
-                CASE
-                    WHEN shifts.permanent = 1
-                    THEN 0
-                    ELSE 1
-                END,
-                shifts.specific_date,
-                shifts.start_time
+                specific_date,
+                start_time
             """
         ).fetchall()
 
-    # ---------------------------------------------------------
-    # Messages
-    # ---------------------------------------------------------
+    # =====================================================
+    # NEXT SHIFT
+    # =====================================================
+
+    def get_next_shift(
+        self,
+        after: datetime | None = None,
+    ):
+        """
+        نزدیک‌ترین شیفت آینده را پیدا می‌کند.
+        تا 8 روز آینده بررسی می‌شود.
+        """
+
+        if after is None:
+            after = datetime.utcnow()
+
+        rows = self.conn.execute(
+            """
+            SELECT
+                shifts.*,
+                admins.name AS admin_name,
+                admins.notifications_enabled
+            FROM shifts
+            JOIN admins
+                ON admins.user_id = shifts.admin_id
+            WHERE admins.active = 1
+            """
+        ).fetchall()
+
+        candidates = []
+
+        for row in rows:
+
+            if row["permanent"]:
+                for day_offset in range(0, 8):
+                    date = (
+                        after.date()
+                        + timedelta(
+                            days=day_offset
+                        )
+                    )
+
+                    weekday = date.weekday()
+
+                    if (
+                        row["weekday"] != -1
+                        and row["weekday"] != weekday
+                    ):
+                        continue
+
+                    try:
+                        start_dt = datetime.strptime(
+                            f"{date} {row['start_time']}",
+                            "%Y-%m-%d %H:%M",
+                        )
+                    except ValueError:
+                        continue
+
+                    if start_dt > after:
+                        candidates.append(
+                            (start_dt, row)
+                        )
+
+                    break if False else None
+
+            else:
+                if not row["specific_date"]:
+                    continue
+
+                try:
+                    start_dt = datetime.strptime(
+                        f"{row['specific_date']} "
+                        f"{row['start_time']}",
+                        "%Y-%m-%d %H:%M",
+                    )
+                except ValueError:
+                    continue
+
+                if start_dt > after:
+                    candidates.append(
+                        (start_dt, row)
+                    )
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: item[0]
+        )
+
+        start_dt, row = candidates[0]
+
+        data = dict(row)
+        data["occurrence"] = start_dt.isoformat(
+            timespec="minutes"
+        )
+
+        return data
+
+    # =====================================================
+    # MESSAGES
+    # =====================================================
 
     def create_message(
         self,
         user_id: int,
         content: str,
-        entities: list[dict] | None,
-        admin_id: int,
-    ):
-        cur = self.conn.execute(
-            """
-            INSERT INTO messages(
-                user_id,
-                content,
-                entities_json,
-                status,
-                admin_id,
-                submitted_at
+        entities,
+        admin_id: int | None = None,
+        shift_id: int | None = None,
+    ) -> int:
+
+        with self.lock:
+
+            now = self.now()
+
+            status = (
+                "pending"
+                if admin_id
+                else "queued"
             )
-            VALUES (?, ?, ?, 'pending', ?, ?)
-            """,
-            (
-                user_id,
-                content,
-                self._json(entities),
-                admin_id,
-                self.now(),
-            ),
-        )
 
-        self.conn.commit()
-
-        return cur.lastrowid
-
-    def assign_pending_messages_to_admin(
-        self,
-        admin_id: int,
-        limit: int = 100,
-    ):
-        rows = self.conn.execute(
-            """
-            SELECT *
-            FROM messages
-            WHERE status = 'pending'
-              AND admin_id IS NULL
-            ORDER BY submitted_at
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-
-        assigned = []
-        for row in rows:
-            cur = self.conn.execute(
+            cursor = self.conn.execute(
                 """
-                UPDATE messages
-                SET admin_id = ?
-                WHERE id = ?
-                  AND status = 'pending'
-                  AND admin_id IS NULL
+                INSERT INTO messages
+                (
+                    user_id,
+                    content,
+                    entities_json,
+                    status,
+                    admin_id,
+                    shift_id,
+                    submitted_at,
+                    queued_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (admin_id, row["id"]),
+                (
+                    user_id,
+                    content,
+                    self._json_dump(
+                        entities
+                    ),
+                    status,
+                    admin_id,
+                    shift_id,
+                    now,
+                    now if not admin_id else None,
+                ),
             )
-            if cur.rowcount == 1:
-                data = dict(row)
-                data["admin_id"] = admin_id
-                data["entities"] = self._load_json(data.get("entities_json"))
-                assigned.append(data)
 
-        self.conn.commit()
-        return assigned
+            self._commit()
 
-    def get_message(self, message_id: int):
-        row = self.conn.execute(
+            return int(cursor.lastrowid)
+
+    def get_message(
+        self,
+        message_id: int,
+    ):
+        return self.conn.execute(
             """
-            SELECT *
+            SELECT
+                messages.*,
+                users.username,
+                users.first_name,
+                users.last_name,
+                admins.name AS admin_name
             FROM messages
-            WHERE id = ?
+            LEFT JOIN users
+                ON users.user_id = messages.user_id
+            LEFT JOIN admins
+                ON admins.user_id = messages.admin_id
+            WHERE messages.id = ?
             """,
             (message_id,),
         ).fetchone()
-
-        if row is None:
-            return None
-
-        data = dict(row)
-
-        data["entities"] = self._load_json(
-            data.get("entities_json")
-        )
-
-        return data
 
     def get_all_pending(
         self,
@@ -966,14 +1242,15 @@ class Database:
     def get_pending_for_admin(
         self,
         admin_id: int,
-        limit: int = 10,
+        limit: int = 20,
     ):
         return self.conn.execute(
             """
             SELECT *
             FROM messages
-            WHERE status = 'pending'
-              AND admin_id = ?
+            WHERE
+                status = 'pending'
+                AND admin_id = ?
             ORDER BY submitted_at
             LIMIT ?
             """,
@@ -982,6 +1259,79 @@ class Database:
                 limit,
             ),
         ).fetchall()
+
+    def get_queued_messages(
+        self,
+        limit: int = 100,
+    ):
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM messages
+            WHERE status = 'queued'
+            ORDER BY submitted_at
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    def assign_queued_messages(
+        self,
+        admin_id: int,
+        shift_id: int | None = None,
+        limit: int = 100,
+    ) -> list[int]:
+
+        with self.lock:
+
+            rows = self.conn.execute(
+                """
+                SELECT id
+                FROM messages
+                WHERE status = 'queued'
+                ORDER BY submitted_at
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+            if not rows:
+                return []
+
+            now = self.now()
+
+            ids = [
+                int(row["id"])
+                for row in rows
+            ]
+
+            placeholders = ",".join(
+                "?" for _ in ids
+            )
+
+            self.conn.execute(
+                f"""
+                UPDATE messages
+                SET
+                    status = 'pending',
+                    admin_id = ?,
+                    shift_id = ?,
+                    assigned_at = ?
+                WHERE
+                    id IN ({placeholders})
+                    AND status = 'queued'
+                """,
+                (
+                    admin_id,
+                    shift_id,
+                    now,
+                    *ids,
+                ),
+            )
+
+            self._commit()
+
+            return ids
 
     def get_user_messages(
         self,
@@ -1002,90 +1352,83 @@ class Database:
             ),
         ).fetchall()
 
-    def clear_message_admin_id(self, message_id: int):
-        self.conn.execute(
-            """
-            UPDATE messages
-            SET admin_id = NULL,
-                admin_message_id = NULL
-            WHERE id = ?
-              AND status = 'pending'
-            """,
-            (message_id,),
-        )
-        self.conn.commit()
-
     def set_admin_message_id(
         self,
         message_id: int,
-        telegram_message_id: int,
+        admin_message_id: int,
     ):
-        self.conn.execute(
-            """
-            UPDATE messages
-            SET admin_message_id = ?
-            WHERE id = ?
-            """,
-            (
-                telegram_message_id,
-                message_id,
-            ),
-        )
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE messages
+                SET admin_message_id = ?
+                WHERE id = ?
+                """,
+                (
+                    admin_message_id,
+                    message_id,
+                ),
+            )
 
-        self.conn.commit()
+            self._commit()
 
     def set_channel_message_id(
         self,
         message_id: int,
-        telegram_message_id: int,
+        channel_message_id: int,
     ):
-        self.conn.execute(
-            """
-            UPDATE messages
-            SET channel_message_id = ?
-            WHERE id = ?
-            """,
-            (
-                telegram_message_id,
-                message_id,
-            ),
-        )
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE messages
+                SET channel_message_id = ?
+                WHERE id = ?
+                """,
+                (
+                    channel_message_id,
+                    message_id,
+                ),
+            )
 
-        self.conn.commit()
+            self._commit()
 
     def claim_message(
         self,
         message_id: int,
     ) -> bool:
-        cur = self.conn.execute(
-            """
-            UPDATE messages
-            SET status = 'processing'
-            WHERE id = ?
-              AND status = 'pending'
-            """,
-            (message_id,),
-        )
 
-        self.conn.commit()
+        with self.lock:
 
-        return cur.rowcount == 1
+            cursor = self.conn.execute(
+                """
+                UPDATE messages
+                SET status = 'processing'
+                WHERE
+                    id = ?
+                    AND status = 'pending'
+                """,
+                (message_id,),
+            )
+
+            self._commit()
+
+            return cursor.rowcount == 1
 
     def restore_pending(
         self,
         message_id: int,
     ):
-        self.conn.execute(
-            """
-            UPDATE messages
-            SET status = 'pending'
-            WHERE id = ?
-              AND status = 'processing'
-            """,
-            (message_id,),
-        )
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE messages
+                SET status = 'pending'
+                WHERE id = ?
+                """,
+                (message_id,),
+            )
 
-        self.conn.commit()
+            self._commit()
 
     def set_message_status(
         self,
@@ -1093,120 +1436,171 @@ class Database:
         status: str,
         reject_reason: str | None = None,
     ):
-        self.conn.execute(
-            """
-            UPDATE messages
-            SET
-                status = ?,
-                reject_reason = ?,
-                reviewed_at = ?
-            WHERE id = ?
-            """,
-            (
-                status,
-                reject_reason,
-                self.now(),
-                message_id,
-            ),
-        )
+        with self.lock:
 
-        self.conn.commit()
+            reviewed_at = (
+                self.now()
+                if status
+                in {
+                    "approved",
+                    "rejected",
+                }
+                else None
+            )
 
-    def count_pending(self):
+            self.conn.execute(
+                """
+                UPDATE messages
+                SET
+                    status = ?,
+                    reject_reason = ?,
+                    reviewed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    reject_reason,
+                    reviewed_at,
+                    message_id,
+                ),
+            )
+
+            self._commit()
+
+    def count_pending(self) -> int:
         row = self.conn.execute(
             """
-            SELECT COUNT(*) AS c
+            SELECT COUNT(*) AS count
             FROM messages
-            WHERE status = 'pending'
+            WHERE status IN
+                ('pending', 'queued')
             """
         ).fetchone()
 
-        return row["c"]
+        return int(row["count"])
 
-    # ---------------------------------------------------------
-    # Rate Limit
-    # ---------------------------------------------------------
+    # =====================================================
+    # ADMIN ACTIONS
+    # =====================================================
+
+    def record_admin_action(
+        self,
+        message_id: int,
+        admin_id: int,
+        action: str,
+        reason: str | None = None,
+    ):
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO admin_actions
+                (
+                    message_id,
+                    admin_id,
+                    action,
+                    reason,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    admin_id,
+                    action,
+                    reason,
+                    self.now(),
+                ),
+            )
+
+            self._commit()
+
+    def get_rejected_messages(
+        self,
+        admin_id: int,
+        limit: int = 50,
+    ):
+        return self.conn.execute(
+            """
+            SELECT
+                messages.*,
+                users.username,
+                users.first_name,
+                users.last_name
+            FROM messages
+            WHERE
+                messages.admin_id = ?
+                AND messages.status = 'rejected'
+            ORDER BY messages.reviewed_at DESC
+            LIMIT ?
+            """,
+            (
+                admin_id,
+                limit,
+            ),
+        ).fetchall()
+
+    # =====================================================
+    # RATE LIMIT
+    # =====================================================
 
     def count_recent_attempts(
         self,
         user_id: int,
-        seconds: int,
-    ):
-        cutoff = (
+        window_seconds: int,
+    ) -> int:
+
+        since = (
             datetime.utcnow()
-            - timedelta(seconds=seconds)
-        ).isoformat(timespec="seconds")
+            - timedelta(
+                seconds=window_seconds
+            )
+        ).isoformat(
+            timespec="seconds"
+        )
 
         row = self.conn.execute(
             """
-            SELECT COUNT(*) AS c
+            SELECT COUNT(*) AS count
             FROM rate_limits
-            WHERE user_id = ?
-              AND created_at >= ?
+            WHERE
+                user_id = ?
+                AND created_at >= ?
             """,
             (
                 user_id,
-                cutoff,
+                since,
             ),
         ).fetchone()
 
-        return row["c"]
+        return int(row["count"])
 
     def add_rate_attempt(
         self,
         user_id: int,
     ):
-        self.conn.execute(
-            """
-            INSERT INTO rate_limits(
-                user_id,
-                created_at
-            )
-            VALUES (?, ?)
-            """,
-            (
-                user_id,
-                self.now(),
-            ),
-        )
-
-        self.conn.commit()
-
-    # ---------------------------------------------------------
-    # Settings
-    # ---------------------------------------------------------
-
-    def _load_defaults(self):
-        defaults = {
-            "bot_enabled": (
-                "1"
-                if BOT_ENABLED_DEFAULT
-                else "0"
-            ),
-            "channel_id": str(CHANNEL_ID),
-        }
-
-        for key, value in defaults.items():
+        with self.lock:
             self.conn.execute(
                 """
-                INSERT OR IGNORE INTO settings(
-                    key,
-                    value
-                )
+                INSERT INTO rate_limits
+                (user_id, created_at)
                 VALUES (?, ?)
                 """,
                 (
-                    key,
-                    value,
+                    user_id,
+                    self.now(),
                 ),
             )
 
-        self.conn.commit()
+            self._commit()
+
+    # =====================================================
+    # SETTINGS
+    # =====================================================
 
     def get_setting(
         self,
         key: str,
-        default=None,
+        default: Any = None,
     ):
         row = self.conn.execute(
             """
@@ -1217,7 +1611,7 @@ class Database:
             (key,),
         ).fetchone()
 
-        if row is None:
+        if not row:
             return default
 
         return row["value"]
@@ -1225,36 +1619,34 @@ class Database:
     def set_setting(
         self,
         key: str,
-        value: str,
+        value: Any,
     ):
-        self.conn.execute(
-            """
-            INSERT INTO settings(
-                key,
-                value
-            )
-            VALUES (?, ?)
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO settings
+                (key, value)
+                VALUES (?, ?)
 
-            ON CONFLICT(key)
-            DO UPDATE SET
-                value = excluded.value
-            """,
-            (
-                key,
-                value,
-            ),
+                ON CONFLICT(key)
+                DO UPDATE SET
+                    value = excluded.value
+                """,
+                (
+                    key,
+                    str(value),
+                ),
+            )
+
+            self._commit()
+
+    def is_bot_enabled(self) -> bool:
+        value = self.get_setting(
+            "bot_enabled",
+            "1",
         )
 
-        self.conn.commit()
-
-    def is_bot_enabled(self):
-        return (
-            self.get_setting(
-                "bot_enabled",
-                "1",
-            )
-            == "1"
-        )
+        return str(value) == "1"
 
     def set_bot_enabled(
         self,
@@ -1265,117 +1657,221 @@ class Database:
             "1" if enabled else "0",
         )
 
-    def get_admin_group_id(self) -> int:
-        value = self.get_setting("admin_group_id", "0")
-        try:
-            return int(value)
-        except Exception:
-            return 0
-
-    def set_admin_group_id(self, chat_id: int):
-        self.set_setting("admin_group_id", str(chat_id))
-
-    def clear_admin_group_id(self):
-        self.set_setting("admin_group_id", "0")
-
     def get_channel_id(self):
         value = self.get_setting(
             "channel_id",
-            str(CHANNEL_ID),
+            CHANNEL_ID,
         )
 
         try:
             return int(value)
         except Exception:
-            return 0
+            return value
 
-    # ---------------------------------------------------------
-    # Logs
-    # ---------------------------------------------------------
-
-    def log(
+    def set_channel_id(
         self,
-        actor_id: int | None,
-        action: str,
-        details: str | None = None,
+        channel_id: int,
     ):
-        self.conn.execute(
-            """
-            INSERT INTO activity_logs(
-                actor_id,
-                action,
-                details,
-                created_at
-            )
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                actor_id,
-                action,
-                details,
-                self.now(),
-            ),
+        self.set_setting(
+            "channel_id",
+            channel_id,
         )
 
-        self.conn.commit()
+    # =====================================================
+    # ADMIN GROUP
+    # =====================================================
 
-    def get_recent_logs(
+    def create_group_confirmation(
         self,
-        limit: int = 30,
+        group_id: int,
+        title: str | None,
+        owner_id: int,
+    ):
+        """
+        گروه را به‌صورت pending ذخیره می‌کند.
+        """
+
+        with self.lock:
+
+            self.conn.execute(
+                """
+                INSERT INTO admin_groups
+                (
+                    group_id,
+                    title,
+                    owner_id,
+                    confirmed,
+                    created_at
+                )
+                VALUES (?, ?, ?, 0, ?)
+
+                ON CONFLICT(group_id)
+                DO UPDATE SET
+                    title = excluded.title,
+                    owner_id = excluded.owner_id
+                """,
+                (
+                    group_id,
+                    title,
+                    owner_id,
+                    self.now(),
+                ),
+            )
+
+            self._commit()
+
+    def confirm_admin_group(
+        self,
+        group_id: int,
+        owner_id: int,
+    ) -> bool:
+
+        if not self.is_owner(owner_id):
+            return False
+
+        with self.lock:
+
+            # فقط یک گروه اصلی داشته باشیم
+            self.conn.execute(
+                """
+                UPDATE admin_groups
+                SET
+                    confirmed = 0
+                WHERE confirmed = 1
+                """
+            )
+
+            cursor = self.conn.execute(
+                """
+                UPDATE admin_groups
+                SET
+                    confirmed = 1,
+                    owner_id = ?,
+                    confirmed_at = ?
+                WHERE group_id = ?
+                """,
+                (
+                    owner_id,
+                    self.now(),
+                    group_id,
+                ),
+            )
+
+            self._commit()
+
+            return cursor.rowcount == 1
+
+    def get_admin_group(self):
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM admin_groups
+            WHERE confirmed = 1
+            ORDER BY confirmed_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    def get_pending_group(
+        self,
+        group_id: int,
     ):
         return self.conn.execute(
             """
             SELECT *
-            FROM activity_logs
-            ORDER BY id DESC
-            LIMIT ?
+            FROM admin_groups
+            WHERE group_id = ?
+            LIMIT 1
             """,
-            (limit,),
-        ).fetchall()
+            (group_id,),
+        ).fetchone()
 
-    # ---------------------------------------------------------
-    # Shift Requests
-    # ---------------------------------------------------------
+    def is_admin_group(
+        self,
+        group_id: int,
+    ) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM admin_groups
+            WHERE
+                group_id = ?
+                AND confirmed = 1
+            LIMIT 1
+            """,
+            (group_id,),
+        ).fetchone()
+
+        return row is not None
+
+    def delete_admin_group(self):
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE admin_groups
+                SET confirmed = 0
+                WHERE confirmed = 1
+                """
+            )
+
+            self._commit()
+
+    # =====================================================
+    # SHIFT REQUESTS
+    # =====================================================
 
     def create_shift_request(
         self,
         admin_id: int,
         message: str,
-    ):
-        cur = self.conn.execute(
-            """
-            INSERT INTO shift_requests(
-                admin_id,
-                message,
-                status,
-                created_at
+    ) -> int:
+
+        with self.lock:
+
+            cursor = self.conn.execute(
+                """
+                INSERT INTO shift_requests
+                (
+                    admin_id,
+                    message,
+                    status,
+                    created_at
+                )
+                VALUES (?, ?, 'pending', ?)
+                """,
+                (
+                    admin_id,
+                    message,
+                    self.now(),
+                ),
             )
-            VALUES (?, ?, 'pending', ?)
-            """,
-            (
-                admin_id,
-                message,
-                self.now(),
-            ),
-        )
 
-        self.conn.commit()
+            self._commit()
 
-        return cur.lastrowid
+            return int(cursor.lastrowid)
 
-    def get_pending_shift_requests(self):
+    def get_shift_requests(
+        self,
+        status: str = "pending",
+        limit: int = 50,
+    ):
         return self.conn.execute(
             """
             SELECT
                 shift_requests.*,
                 admins.name AS admin_name
             FROM shift_requests
-            JOIN admins
+            LEFT JOIN admins
                 ON admins.user_id =
-                   shift_requests.admin_id
-            WHERE shift_requests.status = 'pending'
-            ORDER BY shift_requests.created_at
-            """
+                    shift_requests.admin_id
+            WHERE shift_requests.status = ?
+            ORDER BY shift_requests.created_at DESC
+            LIMIT ?
+            """,
+            (
+                status,
+                limit,
+            ),
         ).fetchall()
 
     def set_shift_request_status(
@@ -1383,46 +1879,66 @@ class Database:
         request_id: int,
         status: str,
     ):
-        self.conn.execute(
-            """
-            UPDATE shift_requests
-            SET status = ?
-            WHERE id = ?
-            """,
-            (
-                status,
-                request_id,
-            ),
-        )
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE shift_requests
+                SET status = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    request_id,
+                ),
+            )
 
-        self.conn.commit()
+            self._commit()
 
-    # ---------------------------------------------------------
-    # Statistics
-    # ---------------------------------------------------------
+    # =====================================================
+    # STATS
+    # =====================================================
 
     def owner_stats(self):
-        result = {}
+        row = self.conn.execute(
+            """
+            SELECT
+                SUM(
+                    CASE
+                        WHEN status IN
+                        ('pending', 'processing', 'queued')
+                        THEN 1 ELSE 0
+                    END
+                ) AS pending,
 
-        for status in (
-            "pending",
-            "approved",
-            "rejected",
-        ):
-            row = self.conn.execute(
-                """
-                SELECT COUNT(*) AS c
-                FROM messages
-                WHERE status = ?
-                """,
-                (status,),
-            ).fetchone()
+                SUM(
+                    CASE
+                        WHEN status = 'approved'
+                        THEN 1 ELSE 0
+                    END
+                ) AS approved,
 
-            result[status] = row["c"]
+                SUM(
+                    CASE
+                        WHEN status = 'rejected'
+                        THEN 1 ELSE 0
+                    END
+                ) AS rejected
+            FROM messages
+            """
+        ).fetchone()
 
-        result["users"] = self.count_active_users()
-
-        return result
+        return {
+            "pending": int(
+                row["pending"] or 0
+            ),
+            "approved": int(
+                row["approved"] or 0
+            ),
+            "rejected": int(
+                row["rejected"] or 0
+            ),
+            "users": self.count_active_users(),
+        }
 
     def admin_stats(
         self,
@@ -1431,70 +1947,71 @@ class Database:
         row = self.conn.execute(
             """
             SELECT
-                COUNT(*) AS reviewed,
-
-                SUM(
+                COUNT(
                     CASE
-                        WHEN status = 'approved'
+                        WHEN action IN
+                        ('approved', 'rejected')
                         THEN 1
-                        ELSE 0
+                    END
+                ) AS reviewed,
+
+                COUNT(
+                    CASE
+                        WHEN action = 'approved'
+                        THEN 1
                     END
                 ) AS approved,
 
-                SUM(
+                COUNT(
                     CASE
-                        WHEN status = 'rejected'
+                        WHEN action = 'rejected'
                         THEN 1
-                        ELSE 0
                     END
                 ) AS rejected
-
-            FROM messages
-
+            FROM admin_actions
             WHERE admin_id = ?
-
-              AND status IN (
-                  'approved',
-                  'rejected'
-              )
             """,
             (admin_id,),
         ).fetchone()
-
-        reviewed = row["reviewed"] or 0
-        approved = row["approved"] or 0
-        rejected = row["rejected"] or 0
 
         avg_row = self.conn.execute(
             """
             SELECT AVG(
                 (
-                    julianday(reviewed_at)
+                    julianday(messages.reviewed_at)
                     -
-                    julianday(submitted_at)
+                    julianday(messages.submitted_at)
                 ) * 86400
             ) AS avg_seconds
-
             FROM messages
-
-            WHERE admin_id = ?
-              AND reviewed_at IS NOT NULL
-              AND submitted_at IS NOT NULL
+            WHERE
+                messages.admin_id = ?
+                AND messages.reviewed_at IS NOT NULL
+                AND messages.status IN
+                    ('approved', 'rejected')
             """,
             (admin_id,),
         ).fetchone()
 
         return {
-            "reviewed": reviewed,
-            "approved": approved,
-            "rejected": rejected,
-            "avg_seconds": (
-                avg_row["avg_seconds"]
-                or 0
+            "reviewed": int(
+                row["reviewed"] or 0
+            ),
+            "approved": int(
+                row["approved"] or 0
+            ),
+            "rejected": int(
+                row["rejected"] or 0
+            ),
+            "avg_seconds": float(
+                avg_row["avg_seconds"] or 0
             ),
         }
 
-    def user_message_stats(self, limit: int = 200):
+    def get_user_message_stats(
+        self,
+        limit: int = 100,
+    ):
         return self.conn.execute(
             """
             SELECT
@@ -1506,129 +2023,113 @@ class Database:
             FROM users
             LEFT JOIN messages
                 ON messages.user_id = users.user_id
+            WHERE users.started = 1
             GROUP BY users.user_id
-            HAVING COUNT(messages.id) > 0
-            ORDER BY message_count DESC, users.user_id
+            ORDER BY message_count DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
 
-    def admin_review_details(self, admin_id: int, limit: int = 100):
-        return self.conn.execute(
-            """
-            SELECT id, user_id, content, status, reject_reason,
-                   submitted_at, reviewed_at
-            FROM messages
-            WHERE admin_id = ?
-              AND status IN ('approved', 'rejected')
-            ORDER BY reviewed_at DESC, id DESC
-            LIMIT ?
-            """,
-            (admin_id, limit),
-        ).fetchall()
-
-    def all_admin_stats(self):
+    def get_admin_message_stats(
+        self,
+        limit: int = 100,
+    ):
         return self.conn.execute(
             """
             SELECT
                 admins.user_id,
                 admins.name,
-                admins.active,
-                SUM(
-                    CASE WHEN messages.status = 'approved' THEN 1 ELSE 0 END
+                COUNT(
+                    CASE
+                        WHEN admin_actions.action
+                        IN ('approved', 'rejected')
+                        THEN 1
+                    END
+                ) AS reviewed,
+
+                COUNT(
+                    CASE
+                        WHEN admin_actions.action =
+                        'approved'
+                        THEN 1
+                    END
                 ) AS approved,
-                SUM(
-                    CASE WHEN messages.status = 'rejected' THEN 1 ELSE 0 END
+
+                COUNT(
+                    CASE
+                        WHEN admin_actions.action =
+                        'rejected'
+                        THEN 1
+                    END
                 ) AS rejected
+
             FROM admins
-            LEFT JOIN messages
-                ON messages.admin_id = admins.user_id
+
+            LEFT JOIN admin_actions
+                ON admin_actions.admin_id =
+                    admins.user_id
+
             GROUP BY admins.user_id
-            ORDER BY admins.name COLLATE NOCASE
-            """
+
+            ORDER BY reviewed DESC
+
+            LIMIT ?
+            """,
+            (limit,),
         ).fetchall()
 
-    # ---------------------------------------------------------
-    # Cleanup
-    # ---------------------------------------------------------
+    # =====================================================
+    # CLEANUP
+    # =====================================================
 
     def cleanup_old_data(self):
-        cutoff = (
-            datetime.utcnow()
-            - timedelta(
-                hours=DATA_RETENTION_HOURS
+        with self.lock:
+
+            cutoff = (
+                datetime.utcnow()
+                - timedelta(
+                    hours=DATA_RETENTION_HOURS
+                )
+            ).isoformat(
+                timespec="seconds"
             )
-        ).isoformat(timespec="seconds")
 
-        counts = {}
+            self.conn.execute(
+                """
+                DELETE FROM messages
+                WHERE
+                    submitted_at < ?
+                    AND status IN
+                    ('approved', 'rejected')
+                """,
+                (cutoff,),
+            )
 
-        cur = self.conn.execute(
-            """
-            DELETE FROM messages
-            WHERE submitted_at < ?
-            """,
-            (cutoff,),
-        )
+            self.conn.execute(
+                """
+                DELETE FROM rate_limits
+                WHERE created_at < ?
+                """,
+                (cutoff,),
+            )
 
-        counts["messages"] = cur.rowcount
+            self.conn.execute(
+                """
+                DELETE FROM shift_requests
+                WHERE created_at < ?
+                AND status != 'pending'
+                """,
+                (cutoff,),
+            )
 
-        cur = self.conn.execute(
-            """
-            DELETE FROM rate_limits
-            WHERE created_at < ?
-            """,
-            (cutoff,),
-        )
+            self._commit()
 
-        counts["rate_limits"] = cur.rowcount
+    # =====================================================
+    # HEALTH
+    # =====================================================
 
-        cur = self.conn.execute(
-            """
-            DELETE FROM activity_logs
-            WHERE created_at < ?
-            """,
-            (cutoff,),
-        )
-
-        counts["logs"] = cur.rowcount
-
-        cur = self.conn.execute(
-            """
-            DELETE FROM shift_requests
-            WHERE created_at < ?
-            """,
-            (cutoff,),
-        )
-
-        counts["shift_requests"] = cur.rowcount
-
-        cur = self.conn.execute(
-            """
-            DELETE FROM users
-            WHERE last_seen < ?
-              AND started = 0
-              AND user_id NOT IN (
-                  SELECT DISTINCT user_id
-                  FROM messages
-              )
-            """,
-            (cutoff,),
-        )
-
-        counts["users"] = cur.rowcount
-
-        self.conn.commit()
-
-        counts["temporary"] = (
-            counts["rate_limits"]
-            + counts["users"]
-            + counts["shift_requests"]
-        )
-
-        return counts
-
-    def health_check(self):
+    def health_check(self) -> bool:
         try:
             self.conn.execute(
                 "SELECT 1"
@@ -1638,3 +2139,14 @@ class Database:
 
         except Exception:
             return False
+
+    # =====================================================
+    # CLOSE
+    # =====================================================
+
+    def close(self):
+        with self.lock:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
