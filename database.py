@@ -925,6 +925,117 @@ class Database:
                 weekday,
             )
         ]
+            def check_admin_shift_limit(
+        self,
+        admin_id: int,
+        start_time: str,
+        end_time: str,
+        specific_date: str,
+    ) -> tuple[bool, str]:
+        """
+        محدودیت شیفت ادمین:
+
+        - حداکثر ۲ شیفت در یک روز
+        - مجموع زمان شیفت‌ها حداکثر ۲ ساعت
+        - فقط شیفت‌های امروز/تاریخ مشخص‌شده بررسی می‌شوند
+        """
+
+        rows = self.conn.execute(
+            """
+            SELECT
+                start_time,
+                end_time
+            FROM shifts
+            WHERE
+                admin_id = ?
+                AND permanent = 0
+                AND specific_date = ?
+            ORDER BY start_time
+            """,
+            (
+                admin_id,
+                specific_date,
+            ),
+        ).fetchall()
+
+        # ---------------------------------------------
+        # حداکثر ۲ شیفت
+        # ---------------------------------------------
+
+        if len(rows) >= 2:
+            return (
+                False,
+                "⛔ شما حداکثر می‌توانید ۲ شیفت برای امروز داشته باشید.",
+            )
+
+        # ---------------------------------------------
+        # محاسبه مدت شیفت
+        # ---------------------------------------------
+
+        def duration_minutes(
+            start: str,
+            end: str,
+        ) -> int:
+
+            start_dt = datetime.strptime(
+                start,
+                "%H:%M",
+            )
+
+            end_dt = datetime.strptime(
+                end,
+                "%H:%M",
+            )
+
+            minutes = int(
+                (
+                    end_dt - start_dt
+                ).total_seconds()
+                / 60
+            )
+
+            # شیفت عبوری از نیمه‌شب
+            if minutes <= 0:
+                minutes += 24 * 60
+
+            return minutes
+
+        # ---------------------------------------------
+        # مجموع زمان شیفت‌های فعلی
+        # ---------------------------------------------
+
+        current_total = sum(
+            duration_minutes(
+                row["start_time"],
+                row["end_time"],
+            )
+            for row in rows
+        )
+
+        # ---------------------------------------------
+        # مدت شیفت جدید
+        # ---------------------------------------------
+
+        new_duration = duration_minutes(
+            start_time,
+            end_time,
+        )
+
+        # ---------------------------------------------
+        # حداکثر مجموع ۲ ساعت
+        # ---------------------------------------------
+
+        if (
+            current_total
+            + new_duration
+            > 120
+        ):
+            return (
+                False,
+                "⛔ مجموع زمان شیفت‌های شما نمی‌تواند بیشتر از ۲ ساعت باشد.",
+            )
+
+        return True, ""
 
     def get_current_shift(
         self,
