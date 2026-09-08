@@ -123,21 +123,7 @@ class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
 
 
 def build_telegram_session() -> AiohttpSession:
-    session = AiohttpSession()
-
-    connector = aiohttp.TCPConnector(
-        resolver=TelegramFixedIPResolver(TELEGRAM_IPS),
-        family=socket.AF_INET,
-        ssl=True,
-        ttl_dns_cache=300,
-        limit=100,
-        enable_cleanup_closed=True,
-    )
-
-    session._connector = connector
-
-    return session
-# =========================================================
+    return AiohttpSession()================================
 # DATABASE COMPATIBILITY / MIGRATION
 # =========================================================
 
