@@ -59,15 +59,15 @@ cleanup_task: asyncio.Task | None = None
 
 BOT_USERNAME = ""
 BOT_ID = 0
-
 # =========================================================
 # FIXED IP RESOLVER (TLS SNI-safe, bypass DNS/SNI blocking)
 # =========================================================
 
 TELEGRAM_IPS = [
+    "149.154.166.110",   # فعلی اصلی (Sep 2026)
     "149.154.167.220",
-    "149.154.175.100",
     "149.154.167.99",
+    "149.154.175.100",
     "149.154.175.50",
     "95.161.64.90",
 ]
@@ -105,9 +105,10 @@ class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
                 for info in infos
             ]
 
+        # فقط IPv4 و با SNI درست
         return [
             {
-                "hostname": host,
+                "hostname": host,          # مهم: برای SNI
                 "host": ip,
                 "port": port,
                 "family": socket.AF_INET,
@@ -124,9 +125,11 @@ class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
 def build_telegram_session() -> AiohttpSession:
     connector = aiohttp.TCPConnector(
         resolver=TelegramFixedIPResolver(TELEGRAM_IPS),
-        ssl=True,       # چک کردن گواهی همچنان فعال است (امن)
+        family=socket.AF_INET,          # فقط IPv4
+        ssl=True,
         ttl_dns_cache=300,
         limit=100,
+        enable_cleanup_closed=True,
     )
 
     return AiohttpSession(connector=connector)
