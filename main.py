@@ -120,7 +120,7 @@ class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
 
     async def close(self):
         pass
-        class PinnedAiohttpSession(AiohttpSession):
+    class PinnedAiohttpSession(AiohttpSession):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
