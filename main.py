@@ -1889,7 +1889,7 @@ async def approve_callback(
             chat_id=channel_id,
             text=row["content"],
             entities=deserialize_entities(
-                row["entities"]
+                row["entities_json"]
             ),
         )
 
