@@ -3980,7 +3980,7 @@ async def handle_state(
 
             return True
 
-    # =====================================================
+       # =====================================================
     # GROUP SHIFT
     # فقط TODAY
     # =====================================================
@@ -3994,9 +3994,15 @@ async def handle_state(
         if message.chat.id != chat_id:
             return True
 
-        if not db.get_admin(
+        # ---------------------------------------------
+        # فقط ادمین‌ها
+        # ---------------------------------------------
+
+        admin = db.get_admin(
             user_id
-        ):
+        )
+
+        if not admin:
 
             clear_state(
                 user_id
@@ -4004,8 +4010,11 @@ async def handle_state(
 
             return True
 
-        # امنیت اضافه:
+        # ---------------------------------------------
+        # امنیت:
         # گروه فقط باید شیفت امروز را ثبت کند.
+        # ---------------------------------------------
+
         if state.get("mode") != "today":
 
             clear_state(
@@ -4022,8 +4031,9 @@ async def handle_state(
             "step"
         )
 
-        # برای حالت today دیگر مرحله date وجود ندارد.
-        # تاریخ همیشه امروز است.
+        # ---------------------------------------------
+        # ادمین اجازه تعیین تاریخ ندارد
+        # ---------------------------------------------
 
         if step == "date":
 
@@ -4032,10 +4042,15 @@ async def handle_state(
             )
 
             await message.answer(
-                "⛔ تعیین تاریخ مجاز نیست. شیفت فقط برای امروز ثبت می‌شود."
+                "⛔ تعیین تاریخ مجاز نیست. "
+                "شیفت فقط برای امروز ثبت می‌شود."
             )
 
             return True
+
+        # ---------------------------------------------
+        # دریافت ساعت شیفت
+        # ---------------------------------------------
 
         if step == "time":
 
@@ -4049,8 +4064,9 @@ async def handle_state(
                     (
                         "❌ بازه زمانی نامعتبر است.\n\n"
                         "مثال:\n"
-                        "09:00-17:00\n"
-                        "23:00-02:00"
+                        "09:00-10:00\n"
+                        "یا\n"
+                        "23:00-01:00"
                     )
                 )
 
@@ -4058,6 +4074,86 @@ async def handle_state(
 
             start, end = parsed
 
+            # -----------------------------------------
+            # همیشه فقط امروز
+            # -----------------------------------------
+
+            permanent = False
+            specific_date = today_string()
+
+            # -----------------------------------------
+            # بررسی محدودیت ادمین
+            #
+            # حداکثر:
+            # ۲ شیفت
+            # ۲ ساعت مجموع
+            # -----------------------------------------
+
+            allowed, reason = (
+                db.check_admin_shift_limit(
+                    admin_id=user_id,
+                    start_time=start,
+                    end_time=end,
+                    specific_date=specific_date,
+                )
+            )
+
+            if not allowed:
+
+                await message.answer(
+                    reason
+                )
+
+                return True
+
+            # -----------------------------------------
+            # ثبت شیفت
+            # -----------------------------------------
+
+            try:
+
+                shift_id = db.create_shift(
+                    start_time=start,
+                    end_time=end,
+                    admin_id=user_id,
+                    permanent=False,
+                    specific_date=specific_date,
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "GROUP CREATE TODAY SHIFT ERROR | "
+                    "admin_id=%s | date=%s",
+                    user_id,
+                    specific_date,
+                )
+
+                await message.answer(
+                    "❌ ثبت شیفت ناموفق بود."
+                )
+
+                return True
+
+            # -----------------------------------------
+            # پایان state
+            # -----------------------------------------
+
+            clear_state(
+                user_id
+            )
+
+            await message.answer(
+                (
+                    "✅ شیفت امروز شما ثبت شد.\n\n"
+                    f"📅 {specific_date}\n"
+                    f"⏰ {start} تا {end}\n\n"
+                    "ℹ️ هر ادمین حداکثر ۲ شیفت "
+                    "و مجموعاً ۲ ساعت در روز می‌تواند داشته باشد."
+                )
+            )
+
+            return True
             # =================================================
             # همیشه امروز
             # هیچ permanent یا date انتخابی از ادمین قبول نمی‌شود
