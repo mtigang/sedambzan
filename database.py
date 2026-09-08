@@ -1110,7 +1110,7 @@ class Database:
                             (start_dt, row)
                         )
 
-                    break if False else None
+                    
 
             else:
                 if not row["specific_date"]:
