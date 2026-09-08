@@ -9,7 +9,7 @@ from pathlib import Path
 # =========================================================
 
 # توکن ربات را اینجا قرار بده
-BOT_TOKEN = "8905573550:AAF3lauJRhKS08kyvP90S_DxF1YtijMTQfo"
+BOT_TOKEN = "8905573550:AAHAiSTQdpUC6gU_nUllDRlRkVVqEkNpwRc"
 
 
 # =========================================================
