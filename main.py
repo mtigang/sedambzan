@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import re
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 import socket
 import aiohttp
+
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
@@ -44,6 +46,18 @@ from database import Database
 
 
 # =========================================================
+# LOGGING
+# =========================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
 # SETUP
 # =========================================================
 
@@ -59,12 +73,15 @@ cleanup_task: asyncio.Task | None = None
 
 BOT_USERNAME = ""
 BOT_ID = 0
+
+
 # =========================================================
-# FIXED IP RESOLVER (TLS SNI-safe, bypass DNS/SNI blocking)
+# FIXED IP RESOLVER
+# TLS SNI-safe / DNS bypass
 # =========================================================
 
 TELEGRAM_IPS = [
-    "149.154.166.110",   # فعلی اصلی (Sep 2026)
+    "149.154.166.110",
     "149.154.167.220",
     "149.154.167.99",
     "149.154.175.100",
@@ -75,40 +92,46 @@ TELEGRAM_IPS = [
 
 class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
     """
-    هاست api.telegram.org را مستقیماً به IP‌های شناخته‌شده
-    resolve می‌کند (DNS را دور می‌زند)، اما SNI/hostname برای
-    TLS handshake همچنان api.telegram.org باقی می‌ماند تا
-    گواهی به‌درستی تأیید شود.
+    api.telegram.org را مستقیماً به IPهای مشخص‌شده resolve می‌کند.
+    hostname همچنان api.telegram.org باقی می‌ماند تا SNI/TLS درست باشد.
     """
 
     def __init__(self, ips: list[str]):
         self._ips = ips
 
-    async def resolve(self, host, port=0, family=socket.AF_INET):
+    async def resolve(
+        self,
+        host,
+        port=0,
+        family=socket.AF_INET,
+    ):
         if host != "api.telegram.org":
-            # برای سایر هاست‌ها از DNS معمولی استفاده کن
             loop = asyncio.get_running_loop()
+
             infos = await loop.getaddrinfo(
-                host, port,
+                host,
+                port,
                 type=socket.SOCK_STREAM,
                 family=family,
             )
+
             return [
                 {
                     "hostname": host,
                     "host": info[4][0],
                     "port": port,
                     "family": info[0],
-                    "proto": info[4][1] if len(info[4]) > 1 else 0,
+                    "proto": info[4][1]
+                    if len(info[4]) > 1
+                    else 0,
                     "flags": 0,
                 }
                 for info in infos
             ]
 
-        # فقط IPv4 و با SNI درست
         return [
             {
-                "hostname": host,          # مهم: برای SNI
+                "hostname": host,
                 "host": ip,
                 "port": port,
                 "family": socket.AF_INET,
@@ -120,15 +143,19 @@ class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
 
     async def close(self):
         pass
-     
+
 
 class PinnedAiohttpSession(AiohttpSession):
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
         self._connector_type = aiohttp.TCPConnector
+
         self._connector_init = {
-            "resolver": TelegramFixedIPResolver(TELEGRAM_IPS),
+            "resolver": TelegramFixedIPResolver(
+                TELEGRAM_IPS
+            ),
             "family": socket.AF_INET,
             "ssl": True,
             "ttl_dns_cache": 300,
@@ -139,6 +166,8 @@ class PinnedAiohttpSession(AiohttpSession):
 
 def build_telegram_session() -> AiohttpSession:
     return PinnedAiohttpSession()
+
+
 # =========================================================
 # DATABASE COMPATIBILITY / MIGRATION
 # =========================================================
@@ -197,7 +226,10 @@ def ensure_runtime_schema():
     conn.commit()
 
 
-def get_setting(key: str, default: str | None = None):
+def get_setting(
+    key: str,
+    default: str | None = None,
+):
     row = db.conn.execute(
         """
         SELECT value
@@ -213,7 +245,10 @@ def get_setting(key: str, default: str | None = None):
     return row["value"]
 
 
-def set_setting(key: str, value: str):
+def set_setting(
+    key: str,
+    value: str,
+):
     db.conn.execute(
         """
         INSERT INTO settings(key, value)
@@ -223,6 +258,7 @@ def set_setting(key: str, value: str):
         """,
         (key, str(value)),
     )
+
     db.conn.commit()
 
 
@@ -269,11 +305,18 @@ def user_started(user_id: int) -> bool:
         (user_id,),
     ).fetchone()
 
-    return bool(row and row["started"])
+    return bool(
+        row and row["started"]
+    )
 
 
 def find_user_by_username(username: str):
-    username = username.strip().lstrip("@").lower()
+    username = (
+        username
+        .strip()
+        .lstrip("@")
+        .lower()
+    )
 
     return db.conn.execute(
         """
@@ -324,16 +367,22 @@ def get_all_admin_stats():
             a.name,
             a.active,
             COUNT(
-                CASE WHEN m.status = 'approved'
-                THEN 1 END
+                CASE
+                    WHEN m.status = 'approved'
+                    THEN 1
+                END
             ) AS approved,
             COUNT(
-                CASE WHEN m.status = 'rejected'
-                THEN 1 END
+                CASE
+                    WHEN m.status = 'rejected'
+                    THEN 1
+                END
             ) AS rejected,
             COUNT(
-                CASE WHEN m.status IN ('approved','rejected')
-                THEN 1 END
+                CASE
+                    WHEN m.status IN ('approved','rejected')
+                    THEN 1
+                END
             ) AS reviewed
         FROM admins a
         LEFT JOIN messages m
@@ -344,7 +393,10 @@ def get_all_admin_stats():
     ).fetchall()
 
 
-def get_admin_rejected_messages(admin_id: int, limit: int = 30):
+def get_admin_rejected_messages(
+    admin_id: int,
+    limit: int = 30,
+):
     return db.conn.execute(
         """
         SELECT *
@@ -363,7 +415,9 @@ def get_admin_rejected_messages(admin_id: int, limit: int = 30):
 # =========================================================
 
 def configured_group_id() -> int | None:
-    value = get_setting("admin_group_id")
+    value = get_setting(
+        "admin_group_id"
+    )
 
     if not value:
         return None
@@ -375,7 +429,9 @@ def configured_group_id() -> int | None:
 
 
 def pending_group_id() -> int | None:
-    value = get_setting("pending_admin_group_id")
+    value = get_setting(
+        "pending_admin_group_id"
+    )
 
     if not value:
         return None
@@ -400,6 +456,7 @@ def clear_pending_group():
         WHERE key = 'pending_admin_group_id'
         """
     )
+
     db.conn.commit()
 
 
@@ -417,7 +474,11 @@ def bot_matches_text(text: str) -> bool:
     value = text.strip()
 
     if BOT_USERNAME:
-        username = BOT_USERNAME.lower().lstrip("@")
+        username = (
+            BOT_USERNAME
+            .lower()
+            .lstrip("@")
+        )
 
         if value.lower() in {
             f"@{username}",
@@ -435,7 +496,11 @@ def bot_matches_text(text: str) -> bool:
 # STATE
 # =========================================================
 
-def set_state(user_id: int, kind: str, **data):
+def set_state(
+    user_id: int,
+    kind: str,
+    **data,
+):
     states[user_id] = {
         "kind": kind,
         **data,
@@ -459,11 +524,15 @@ def local_now() -> datetime:
 
 
 def today_string() -> str:
-    return local_now().strftime("%Y-%m-%d")
+    return local_now().strftime(
+        "%Y-%m-%d"
+    )
 
 
 def current_time_string() -> str:
-    return local_now().strftime("%H:%M")
+    return local_now().strftime(
+        "%H:%M"
+    )
 
 
 def full_name(user: User) -> str:
@@ -486,7 +555,9 @@ def full_name(user: User) -> str:
 
 
 def escape(value: Any) -> str:
-    return html.escape(str(value or ""))
+    return html.escape(
+        str(value or "")
+    )
 
 
 def utf16_length(text: str) -> int:
@@ -544,8 +615,12 @@ def serialize_entities(entities):
 def entity_from_dict(data):
     return MessageEntity(
         type=data.get("type"),
-        offset=int(data.get("offset", 0)),
-        length=int(data.get("length", 0)),
+        offset=int(
+            data.get("offset", 0)
+        ),
+        length=int(
+            data.get("length", 0)
+        ),
         **{
             key: data[key]
             for key in (
@@ -575,7 +650,10 @@ def deserialize_entities(entities):
     return result
 
 
-def shift_entities(entities, prefix: str):
+def shift_entities(
+    entities,
+    prefix: str,
+):
     shift = utf16_length(prefix)
     result = []
 
@@ -587,7 +665,10 @@ def shift_entities(entities, prefix: str):
                     offset=entity.offset + shift,
                     length=entity.length,
                     **{
-                        key: getattr(entity, key)
+                        key: getattr(
+                            entity,
+                            key,
+                        )
                         for key in (
                             "url",
                             "language",
@@ -611,7 +692,10 @@ def shift_entities(entities, prefix: str):
 # USER PROFILE
 # =========================================================
 
-profile_cache: dict[int, tuple[float, str]] = {}
+profile_cache: dict[
+    int,
+    tuple[float, str],
+] = {}
 
 
 async def get_profile_name(
@@ -620,9 +704,15 @@ async def get_profile_name(
     fallback: str | None = None,
 ) -> str:
 
-    now = asyncio.get_running_loop().time()
+    now = (
+        asyncio
+        .get_running_loop()
+        .time()
+    )
 
-    cached = profile_cache.get(user_id)
+    cached = profile_cache.get(
+        user_id
+    )
 
     if cached:
         timestamp, name = cached
@@ -630,27 +720,46 @@ async def get_profile_name(
         if now - timestamp < 300:
             return name
 
-    admin = db.get_admin(user_id)
+    admin = db.get_admin(
+        user_id
+    )
 
     if admin and admin["name"]:
-        name = str(admin["name"])
+        name = str(
+            admin["name"]
+        )
 
         if not name.isdigit():
             profile_cache[user_id] = (
                 now,
                 name,
             )
+
             return name
 
     try:
-        chat = await bot.get_chat(user_id)
+        chat = await bot.get_chat(
+            user_id
+        )
 
         name = (
-            getattr(chat, "full_name", None)
-            or getattr(chat, "title", None)
+            getattr(
+                chat,
+                "full_name",
+                None,
+            )
+            or getattr(
+                chat,
+                "title",
+                None,
+            )
             or (
                 f"@{chat.username}"
-                if getattr(chat, "username", None)
+                if getattr(
+                    chat,
+                    "username",
+                    None,
+                )
                 else None
             )
         )
@@ -660,12 +769,15 @@ async def get_profile_name(
                 now,
                 name,
             )
+
             return name
 
     except Exception:
         pass
 
-    row = db.get_user(user_id)
+    row = db.get_user(
+        user_id
+    )
 
     if row:
         name = " ".join(
@@ -720,7 +832,10 @@ BLOCKED_WORDS = (
 )
 
 
-def normalize_persian(text: str) -> str:
+def normalize_persian(
+    text: str,
+) -> str:
+
     text = text.lower()
 
     replacements = {
@@ -736,26 +851,38 @@ def normalize_persian(text: str) -> str:
     }
 
     for old, new in replacements.items():
-        text = text.replace(old, new)
+        text = text.replace(
+            old,
+            new,
+        )
 
-    # حذف حرکات
     text = re.sub(
         r"[\u064B-\u065F\u0670]",
         "",
         text,
     )
 
-    # حذف نیم‌فاصله و کشیده
-    text = text.replace("\u200c", "")
-    text = text.replace("ـ", "")
+    text = text.replace(
+        "\u200c",
+        "",
+    )
+
+    text = text.replace(
+        "ـ",
+        "",
+    )
 
     return text
 
 
-def contains_blocked_word(text: str) -> bool:
-    normalized = normalize_persian(text)
+def contains_blocked_word(
+    text: str,
+) -> bool:
 
-    # فاصله و علائم بین حروف را حذف می‌کنیم
+    normalized = normalize_persian(
+        text
+    )
+
     compact = re.sub(
         r"[^\u0600-\u06FFa-zA-Z0-9]+",
         "",
@@ -763,10 +890,13 @@ def contains_blocked_word(text: str) -> bool:
     )
 
     for word in BLOCKED_WORDS:
-        # کلمات کوتاه مثل «کس» نباید داخل «کسی» شناسایی شوند.
+
         if word == "کس":
+
             if re.search(
-                rf"(?<![\u0600-\u06FF]){word}(?![\u0600-\u06FF])",
+                rf"(?<![\u0600-\u06FF])"
+                rf"{word}"
+                rf"(?![\u0600-\u06FF])",
                 compact,
             ):
                 return True
@@ -786,15 +916,21 @@ def contains_blocked_word(text: str) -> bool:
 # VALIDATION
 # =========================================================
 
-def is_fully_bold(text, entities):
+def is_fully_bold(
+    text,
+    entities,
+):
     if not text or not entities:
         return False
 
-    total = utf16_length(text)
+    total = utf16_length(
+        text
+    )
 
     intervals = []
 
     for entity in entities:
+
         if entity_type(entity) == "bold":
             intervals.append(
                 (
@@ -811,6 +947,7 @@ def is_fully_bold(text, entities):
     covered = 0
 
     for start, end in intervals:
+
         if start > covered:
             return False
 
@@ -822,8 +959,12 @@ def is_fully_bold(text, entities):
     return covered >= total
 
 
-def contains_link(text, entities):
+def contains_link(
+    text,
+    entities,
+):
     for entity in entities or []:
+
         if entity_type(entity) in {
             "url",
             "text_link",
@@ -838,7 +979,9 @@ def contains_link(text, entities):
     )
 
 
-def validate_submission(message: Message):
+def validate_submission(
+    message: Message,
+):
     text = message.text or ""
     entities = message.entities or []
 
@@ -848,7 +991,9 @@ def validate_submission(message: Message):
             "🚫 این پیام به دلیل استفاده از کلمات غیرمجاز قابل ارسال نیست.",
         )
 
-    if not text.startswith("صدام بزن"):
+    if not text.startswith(
+        "صدام بزن"
+    ):
         return (
             False,
             ERROR_MESSAGES["prefix"],
@@ -902,11 +1047,17 @@ def user_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="📝 ارسال پیام"),
-                KeyboardButton(text="📊 وضعیت پیام من"),
+                KeyboardButton(
+                    text="📝 ارسال پیام"
+                ),
+                KeyboardButton(
+                    text="📊 وضعیت پیام من"
+                ),
             ],
             [
-                KeyboardButton(text="📖 راهنما"),
+                KeyboardButton(
+                    text="📖 راهنما"
+                ),
             ],
         ],
         resize_keyboard=True,
@@ -917,88 +1068,135 @@ def admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="📥 پیام‌های در انتظار"),
-                KeyboardButton(text="⏰ شیفت من"),
-            ],
-            [
-                KeyboardButton(text="📅 برنامه من"),
-                KeyboardButton(text="📊 عملکرد من"),
-            ],
-            [
-                KeyboardButton(text="🔄 درخواست تغییر شیفت"),
-                KeyboardButton(text="🔔 اعلان‌ها"),
-            ],
-            [
-                KeyboardButton(text="❓ راهنما"),
-            ],
-        ],
-        resize_keyboard=True,
-    )
-
-
-def owner_keyboard(enabled: bool):
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="📥 پیام‌های در انتظار"),
-                KeyboardButton(text="👥 ادمین‌ها"),
-            ],
-            [
-                KeyboardButton(text="⏰ شیفت‌ها"),
-                KeyboardButton(text="📅 برنامه کاری/امروز"),
-            ],
-            [
-                KeyboardButton(text="📊 آمار و گزارش‌ها"),
-                KeyboardButton(text="📢 کانال"),
-            ],
-            [
-                KeyboardButton(text="⚙️ تنظیمات ربات"),
-                KeyboardButton(text="🛡️ امنیت و دسترسی"),
+                KeyboardButton(
+                    text="📥 پیام‌های در انتظار"
+                ),
+                KeyboardButton(
+                    text="⏰ شیفت من"
+                ),
             ],
             [
                 KeyboardButton(
-                    text="🔴 خاموش کردن"
-                    if enabled
-                    else "🟢 روشن کردن"
-                )
+                    text="📅 برنامه من"
+                ),
+                KeyboardButton(
+                    text="📊 عملکرد من"
+                ),
             ],
             [
-                KeyboardButton(text="❓ راهنما"),
+                KeyboardButton(
+                    text="🔄 درخواست تغییر شیفت"
+                ),
+                KeyboardButton(
+                    text="🔔 اعلان‌ها"
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text="❓ راهنما"
+                ),
             ],
         ],
         resize_keyboard=True,
     )
 
 
-def review_keyboard(message_id: int):
+def owner_keyboard(
+    enabled: bool,
+):
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text="📥 پیام‌های در انتظار"
+                ),
+                KeyboardButton(
+                    text="👥 ادمین‌ها"
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text="⏰ شیفت‌ها"
+                ),
+                KeyboardButton(
+                    text="📅 برنامه کاری/امروز"
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text="📊 آمار و گزارش‌ها"
+                ),
+                KeyboardButton(
+                    text="📢 کانال"
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text="⚙️ تنظیمات ربات"
+                ),
+                KeyboardButton(
+                    text="🛡️ امنیت و دسترسی"
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text=(
+                        "🔴 خاموش کردن"
+                        if enabled
+                        else "🟢 روشن کردن"
+                    )
+                )
+            ],
+            [
+                KeyboardButton(
+                    text="❓ راهنما"
+                ),
+            ],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def review_keyboard(
+    message_id: int,
+):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="🟢 تأیید و ارسال",
-                    callback_data=f"approve:{message_id}",
+                    callback_data=(
+                        f"approve:{message_id}"
+                    ),
                 ),
                 InlineKeyboardButton(
                     text="🔴 رد",
-                    callback_data=f"reject:{message_id}",
+                    callback_data=(
+                        f"reject:{message_id}"
+                    ),
                 ),
             ]
         ]
     )
 
 
-def reject_keyboard(message_id: int):
+def reject_keyboard(
+    message_id: int,
+):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text=title,
                     callback_data=(
-                        f"reject_reason:{message_id}:{key}"
+                        f"reject_reason:"
+                        f"{message_id}:"
+                        f"{key}"
                     ),
                 )
             ]
-            for key, title in REJECT_REASONS.items()
+            for key, title
+            in REJECT_REASONS.items()
         ]
     )
 
@@ -1014,13 +1212,15 @@ async def show_home(
     user_id = message.from_user.id
 
     if db.is_owner(user_id):
+
         await message.answer(
             (
                 "👑 سلام مالک عزیز\n\n"
                 "به مرکز کنترل ربات صدام بزن خوش آمدی.\n\n"
                 f"🟢 وضعیت ربات: "
                 f"{'فعال' if db.is_bot_enabled() else 'غیرفعال'}\n"
-                f"👥 ادمین‌ها: {db.count_admins()}\n"
+                f"👥 ادمین‌ها: "
+                f"{db.count_admins()}\n"
                 f"📥 پیام‌های در انتظار: "
                 f"{db.count_pending()}"
             ),
@@ -1028,11 +1228,15 @@ async def show_home(
                 db.is_bot_enabled()
             ),
         )
+
         return
 
-    admin = db.get_admin(user_id)
+    admin = db.get_admin(
+        user_id
+    )
 
     if admin:
+
         await message.answer(
             (
                 f"👋 سلام "
@@ -1042,6 +1246,7 @@ async def show_home(
             parse_mode=ParseMode.HTML,
             reply_markup=admin_keyboard(),
         )
+
         return
 
     await message.answer(
@@ -1051,20 +1256,19 @@ async def show_home(
 
 
 # =========================================================
-# START
+# START / GROUP ROUTER
 # =========================================================
 
 @router.message(
-    F.chat.type.in_({"group", "supergroup"})
+    F.chat.type.in_({
+        "group",
+        "supergroup",
+    })
 )
 async def group_router(
     message: Message,
     bot: Bot,
 ):
-    """
-    تمام پیام‌های گروه ابتدا اینجا می‌آیند.
-    بنابراین هیچ handler خصوصی‌ای روی گروه اجرا نمی‌شود.
-    """
 
     text = message.text or ""
     user = message.from_user
@@ -1072,19 +1276,15 @@ async def group_router(
     if not user:
         return
 
-    # -----------------------------------------------------
-    # گروه هنوز تعیین نشده
-    # -----------------------------------------------------
-
     configured = configured_group_id()
 
     if configured is None:
 
-        # فقط Owner اجازه فعال‌سازی گروه را دارد.
         if (
             db.is_owner(user.id)
             and bot_matches_text(text)
         ):
+
             set_pending_group(
                 message.chat.id
             )
@@ -1107,7 +1307,8 @@ async def group_router(
             await message.answer(
                 (
                     "🔐 درخواست تعیین گروه مدیریت شیفت\n\n"
-                    f"🏷 گروه: <b>{escape(message.chat.title or 'بدون نام')}</b>\n\n"
+                    f"🏷 گروه: "
+                    f"<b>{escape(message.chat.title or 'بدون نام')}</b>\n\n"
                     "آیا این گروه به‌عنوان گروه مدیریت شیفت انتخاب شود؟"
                 ),
                 parse_mode=ParseMode.HTML,
@@ -1116,47 +1317,37 @@ async def group_router(
 
         return
 
-    # -----------------------------------------------------
-    # فقط گروه تعیین‌شده
-    # -----------------------------------------------------
-
     if message.chat.id != configured:
         return
 
-    # تا زمانی که ID ربات فرستاده نشده، پاسخ نمی‌دهیم.
     if not bot_matches_text(text):
         return
 
-    # -----------------------------------------------------
-    # اگر Owner باشد
-    # -----------------------------------------------------
-
     if db.is_owner(user.id):
+
         await message.answer(
             (
                 "👑 این گروه در حال حاضر گروه مدیریت شیفت است.\n\n"
                 "مدیریت شیفت ادمین‌ها از همین گروه انجام می‌شود."
             )
         )
+
         return
 
-    # -----------------------------------------------------
-    # کاربر عادی
-    # -----------------------------------------------------
-
-    admin = db.get_admin(user.id)
+    admin = db.get_admin(
+        user.id
+    )
 
     if not admin:
+
         await message.answer(
             WELCOME_MESSAGE
         )
+
         return
 
-    # -----------------------------------------------------
-    # ادمین ربات ولی Start نکرده
-    # -----------------------------------------------------
-
     if not user_started(user.id):
+
         link = (
             f"https://t.me/{BOT_USERNAME}"
             if BOT_USERNAME
@@ -1171,42 +1362,32 @@ async def group_router(
                 "بعد از Start دوباره ID ربات را داخل این گروه بفرست."
             )
         )
+
         return
 
-    # -----------------------------------------------------
-    # ادمین آماده انتخاب شیفت
-    # -----------------------------------------------------
+    # =====================================================
+    # فقط شیفت امروز
+    # =====================================================
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔁 شیفت دائمی",
-                    callback_data="group_shift:daily",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📅 شیفت امروز",
+                    text="📅 تعیین شیفت امروز",
                     callback_data="group_shift:today",
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📆 شیفت تاریخ‌دار",
-                    callback_data="group_shift:date",
-                )
-            ],
+            ]
         ]
     )
 
     await message.answer(
         (
             "👨‍💼 مدیریت شیفت\n\n"
-            "نوع شیفت را انتخاب کن.\n\n"
+            "شیفت فقط برای <b>امروز</b> قابل تعیین است.\n\n"
             "ساعت‌ها کاملاً آزاد هستند؛ حتی شیفت‌هایی مثل "
             "23:00 تا 02:00 هم قابل ثبت هستند."
         ),
+        parse_mode=ParseMode.HTML,
         reply_markup=keyboard,
     )
 
@@ -1237,7 +1418,9 @@ async def start_handler(
     Command("help"),
     F.chat.type == "private",
 )
-async def help_command(message: Message):
+async def help_command(
+    message: Message,
+):
     clear_state(
         message.from_user.id
     )
@@ -1245,23 +1428,28 @@ async def help_command(message: Message):
     user_id = message.from_user.id
 
     if db.is_owner(user_id):
+
         text = (
             "👑 راهنمای مالک\n\n"
             "از منوی مدیریت می‌توانی ادمین‌ها، "
             "شیفت‌ها، آمار، امنیت و تنظیمات را مدیریت کنی."
         )
+
         keyboard = owner_keyboard(
             db.is_bot_enabled()
         )
 
     elif db.get_admin(user_id):
+
         text = (
             "👨‍💼 راهنمای ادمین\n\n"
             "پیام‌ها، شیفت‌ها و عملکرد خودت را مدیریت کن."
         )
+
         keyboard = admin_keyboard()
 
     else:
+
         text = HELP_MESSAGE
         keyboard = user_keyboard()
 
@@ -1281,13 +1469,16 @@ async def help_command(message: Message):
 async def confirm_group(
     callback: CallbackQuery,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ فقط Owner اجازه این کار را دارد.",
             show_alert=True,
         )
+
         return
 
     group_id = pending_group_id()
@@ -1297,15 +1488,18 @@ async def confirm_group(
         or not callback.message
         or callback.message.chat.id != group_id
     ):
+
         await callback.answer(
             "❌ این درخواست دیگر معتبر نیست.",
             show_alert=True,
         )
+
         return
 
     set_configured_group(
         group_id
     )
+
     clear_pending_group()
 
     await callback.answer(
@@ -1326,13 +1520,16 @@ async def confirm_group(
 async def cancel_group(
     callback: CallbackQuery,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ فقط Owner اجازه این کار را دارد.",
             show_alert=True,
         )
+
         return
 
     clear_pending_group()
@@ -1354,19 +1551,26 @@ async def cancel_group(
     F.text == "📝 ارسال پیام",
     F.chat.type == "private",
 )
-async def user_send_start(message: Message):
+async def user_send_start(
+    message: Message,
+):
+
     if db.is_blocked(
         message.from_user.id
     ):
+
         await message.answer(
             ERROR_MESSAGES["blocked"]
         )
+
         return
 
     if not db.is_bot_enabled():
+
         await message.answer(
             ERROR_MESSAGES["bot_disabled"]
         )
+
         return
 
     set_state(
@@ -1394,17 +1598,22 @@ async def user_send_start(message: Message):
     F.text == "📊 وضعیت پیام من",
     F.chat.type == "private",
 )
-async def user_status(message: Message):
+async def user_status(
+    message: Message,
+):
+
     rows = db.get_user_messages(
         message.from_user.id,
         10,
     )
 
     if not rows:
+
         await message.answer(
             "📊 هنوز پیامی ارسال نکرده‌ای.",
             reply_markup=user_keyboard(),
         )
+
         return
 
     status_map = {
@@ -1420,6 +1629,7 @@ async def user_status(message: Message):
     ]
 
     for row in rows:
+
         status = status_map.get(
             row["status"],
             row["status"],
@@ -1433,6 +1643,7 @@ async def user_status(message: Message):
             row["status"] == "rejected"
             and row["reject_reason"]
         ):
+
             lines.append(
                 f"دلیل: {row['reject_reason']}"
             )
@@ -1452,6 +1663,7 @@ async def send_review_message(
     chat_id: int,
     row,
 ):
+
     message_id = row["id"]
 
     sender = await get_profile_name(
@@ -1501,14 +1713,17 @@ async def pending_messages(
     message: Message,
     bot: Bot,
 ):
+
     user_id = message.from_user.id
 
     if db.is_owner(user_id):
+
         rows = db.get_all_pending(
             PENDING_MESSAGES_PAGE_SIZE
         )
 
     elif db.get_admin(user_id):
+
         rows = db.get_pending_for_admin(
             user_id,
             PENDING_MESSAGES_PAGE_SIZE,
@@ -1518,17 +1733,22 @@ async def pending_messages(
         return
 
     if not rows:
+
         await message.answer(
             "📥 فعلاً پیام در انتظاری وجود ندارد.",
             reply_markup=(
-                owner_keyboard(db.is_bot_enabled())
+                owner_keyboard(
+                    db.is_bot_enabled()
+                )
                 if db.is_owner(user_id)
                 else admin_keyboard()
             ),
         )
+
         return
 
     for row in rows:
+
         await send_review_message(
             bot,
             user_id,
@@ -1538,7 +1758,9 @@ async def pending_messages(
     await message.answer(
         f"📥 {len(rows)} پیام نمایش داده شد.",
         reply_markup=(
-            owner_keyboard(db.is_bot_enabled())
+            owner_keyboard(
+                db.is_bot_enabled()
+            )
             if db.is_owner(user_id)
             else admin_keyboard()
         ),
@@ -1549,14 +1771,18 @@ async def can_review(
     user_id: int,
     row,
 ):
+
     if db.is_owner(user_id):
         return True
 
-    admin = db.get_admin(user_id)
+    admin = db.get_admin(
+        user_id
+    )
 
     return bool(
         admin
-        and admin["user_id"] == row["admin_id"]
+        and admin["user_id"]
+        == row["admin_id"]
     )
 
 
@@ -1565,18 +1791,25 @@ async def edit_original_admin_message(
     row,
     text: str,
 ):
+
     if not row["admin_message_id"]:
         return
 
     try:
+
         await bot.edit_message_text(
             chat_id=row["admin_id"],
             message_id=row["admin_message_id"],
             text=text,
         )
+
     except Exception:
         pass
 
+
+# =========================================================
+# APPROVE
+# =========================================================
 
 @router.callback_query(
     F.data.startswith("approve:")
@@ -1585,11 +1818,15 @@ async def approve_callback(
     callback: CallbackQuery,
     bot: Bot,
 ):
+
     try:
+
         message_id = int(
             callback.data.split(":")[1]
         )
+
     except Exception:
+
         await callback.answer()
         return
 
@@ -1598,52 +1835,93 @@ async def approve_callback(
     )
 
     if not row:
+
         await callback.answer(
             "پیام پیدا نشد.",
             show_alert=True,
         )
+
         return
 
     if row["status"] != "pending":
+
         await callback.answer(
             "این پیام قبلاً بررسی شده.",
             show_alert=True,
         )
+
         return
 
     if not await can_review(
         callback.from_user.id,
         row,
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
-    if not db.claim_message(message_id):
+    if not db.claim_message(
+        message_id
+    ):
+
         await callback.answer(
             "این پیام قبلاً بررسی شده.",
             show_alert=True,
         )
+
         return
 
+    channel_id = db.get_channel_id()
+
     try:
+
+        logger.info(
+            "Publishing message #%s to channel %s",
+            message_id,
+            channel_id,
+        )
+
         sent = await bot.send_message(
-            chat_id=db.get_channel_id(),
+            chat_id=channel_id,
             text=row["content"],
             entities=deserialize_entities(
                 row["entities"]
             ),
         )
 
-    except Exception:
-        db.restore_pending(message_id)
+    except Exception as e:
+
+        logger.exception(
+            "CHANNEL PUBLISH ERROR | "
+            "message_id=%s | channel_id=%s | error=%s",
+            message_id,
+            channel_id,
+            e,
+        )
+
+        db.restore_pending(
+            message_id
+        )
+
+        error_text = str(e).strip()
+
+        if not error_text:
+            error_text = (
+                "خطای نامشخص Telegram"
+            )
 
         await callback.answer(
-            "انتشار در کانال ناموفق بود.",
+            (
+                "انتشار ناموفق بود:\n"
+                f"{error_text[:180]}"
+            ),
             show_alert=True,
         )
+
         return
 
     db.set_channel_message_id(
@@ -1672,44 +1950,60 @@ async def approve_callback(
     )
 
 
+# =========================================================
+# REJECT
+# =========================================================
+
 @router.callback_query(
     F.data.startswith("reject:")
 )
 async def reject_callback(
     callback: CallbackQuery,
 ):
+
     try:
+
         message_id = int(
             callback.data.split(":")[1]
         )
+
     except Exception:
+
         await callback.answer()
         return
 
-    row = db.get_message(message_id)
+    row = db.get_message(
+        message_id
+    )
 
     if not row:
+
         await callback.answer(
             "پیام پیدا نشد.",
             show_alert=True,
         )
+
         return
 
     if row["status"] != "pending":
+
         await callback.answer(
             "این پیام قبلاً بررسی شده.",
             show_alert=True,
         )
+
         return
 
     if not await can_review(
         callback.from_user.id,
         row,
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     await callback.answer()
@@ -1728,15 +2022,25 @@ async def reject_reason_callback(
     callback: CallbackQuery,
     bot: Bot,
 ):
-    parts = callback.data.split(":", 2)
+
+    parts = callback.data.split(
+        ":",
+        2,
+    )
 
     if len(parts) != 3:
+
         await callback.answer()
         return
 
     try:
-        message_id = int(parts[1])
+
+        message_id = int(
+            parts[1]
+        )
+
     except Exception:
+
         await callback.answer()
         return
 
@@ -1745,37 +2049,49 @@ async def reject_reason_callback(
         REJECT_REASONS["no_reason"],
     )
 
-    row = db.get_message(message_id)
+    row = db.get_message(
+        message_id
+    )
 
     if not row:
+
         await callback.answer(
             "پیام پیدا نشد.",
             show_alert=True,
         )
+
         return
 
     if row["status"] != "pending":
+
         await callback.answer(
             "این پیام قبلاً بررسی شده.",
             show_alert=True,
         )
+
         return
 
     if not await can_review(
         callback.from_user.id,
         row,
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
-    if not db.claim_message(message_id):
+    if not db.claim_message(
+        message_id
+    ):
+
         await callback.answer(
             "این پیام قبلاً بررسی شده.",
             show_alert=True,
         )
+
         return
 
     db.set_message_status(
@@ -1813,7 +2129,10 @@ async def reject_reason_callback(
     F.text == "⏰ شیفت من",
     F.chat.type == "private",
 )
-async def admin_current_shift(message: Message):
+async def admin_current_shift(
+    message: Message,
+):
+
     user_id = message.from_user.id
 
     if not db.get_admin(user_id):
@@ -1825,10 +2144,12 @@ async def admin_current_shift(message: Message):
     )
 
     if not shifts:
+
         await message.answer(
             "⏰ امروز شیفتی برای شما ثبت نشده.",
             reply_markup=admin_keyboard(),
         )
+
         return
 
     lines = [
@@ -1836,6 +2157,7 @@ async def admin_current_shift(message: Message):
     ]
 
     for shift in shifts:
+
         lines.append(
             f"⏰ {shift['start_time']} تا "
             f"{shift['end_time']}"
@@ -1851,43 +2173,43 @@ async def admin_current_shift(message: Message):
     F.text == "📅 برنامه من",
     F.chat.type == "private",
 )
-async def admin_schedule(message: Message):
+async def admin_schedule(
+    message: Message,
+):
+
     user_id = message.from_user.id
 
     if not db.get_admin(user_id):
         return
 
-    permanent = db.get_permanent_shifts(user_id)
-    dated = db.get_date_shifts(user_id)
+    # =====================================================
+    # ادمین فقط برنامه امروز خودش را می‌بیند
+    # =====================================================
+
+    shifts = db.get_admin_today_shifts(
+        user_id,
+        today_string(),
+    )
 
     lines = [
-        "📅 برنامه کاری من\n"
+        "📅 برنامه کاری امروز\n",
+        f"📆 {today_string()}\n",
     ]
 
-    if permanent:
-        lines.append("🔁 شیفت‌های دائمی")
+    if shifts:
 
-        for shift in permanent:
+        for shift in shifts:
+
             lines.append(
                 f"⏰ {shift['start_time']} تا "
                 f"{shift['end_time']}"
             )
+
     else:
-        lines.append(
-            "🔁 شیفت دائمی ثبت نشده."
-        )
 
-    if dated:
         lines.append(
-            "\n📆 شیفت‌های تاریخ‌دار"
+            "امروز شیفتی برای شما ثبت نشده."
         )
-
-        for shift in dated:
-            lines.append(
-                f"📅 {shift['specific_date']}\n"
-                f"⏰ {shift['start_time']} تا "
-                f"{shift['end_time']}"
-            )
 
     await message.answer(
         "\n".join(lines),
@@ -1899,13 +2221,18 @@ async def admin_schedule(message: Message):
     F.text == "📊 عملکرد من",
     F.chat.type == "private",
 )
-async def admin_stats(message: Message):
+async def admin_stats(
+    message: Message,
+):
+
     user_id = message.from_user.id
 
     if not db.get_admin(user_id):
         return
 
-    stats = db.admin_stats(user_id)
+    stats = db.admin_stats(
+        user_id
+    )
 
     avg_minutes = (
         stats["avg_seconds"] / 60
@@ -1914,9 +2241,12 @@ async def admin_stats(message: Message):
     await message.answer(
         (
             "📊 عملکرد من\n\n"
-            f"📨 بررسی‌شده: {stats['reviewed']}\n"
-            f"🟢 تأییدشده: {stats['approved']}\n"
-            f"🔴 ردشده: {stats['rejected']}\n"
+            f"📨 بررسی‌شده: "
+            f"{stats['reviewed']}\n"
+            f"🟢 تأییدشده: "
+            f"{stats['approved']}\n"
+            f"🔴 ردشده: "
+            f"{stats['rejected']}\n"
             f"⏱ میانگین بررسی: "
             f"{avg_minutes:.1f} دقیقه"
         ),
@@ -1936,6 +2266,7 @@ async def owner_admins(
     message: Message,
     bot: Bot,
 ):
+
     if not db.is_owner(
         message.from_user.id
     ):
@@ -1948,11 +2279,13 @@ async def owner_admins(
     ]
 
     if not admins:
+
         lines.append(
             "هیچ ادمینی ثبت نشده."
         )
 
     for admin in admins:
+
         mention = await mention_user(
             bot,
             admin["user_id"],
@@ -1987,13 +2320,16 @@ async def owner_admins(
 async def owner_add_admin_start(
     callback: CallbackQuery,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     await callback.answer()
@@ -2028,6 +2364,7 @@ async def owner_shifts(
     message: Message,
     bot: Bot,
 ):
+
     if not db.is_owner(
         message.from_user.id
     ):
@@ -2042,6 +2379,7 @@ async def owner_shifts(
     buttons = []
 
     for shift in shifts:
+
         admin_name = (
             shift["admin_name"]
             or await get_profile_name(
@@ -2067,7 +2405,9 @@ async def owner_shifts(
             [
                 InlineKeyboardButton(
                     text=f"🗑 حذف #{shift['id']}",
-                    callback_data=f"delete_shift:{shift['id']}",
+                    callback_data=(
+                        f"delete_shift:{shift['id']}"
+                    ),
                 )
             ]
         )
@@ -2096,33 +2436,45 @@ async def owner_shifts(
 async def delete_shift_callback(
     callback: CallbackQuery,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     try:
+
         shift_id = int(
             callback.data.split(":")[1]
         )
+
     except Exception:
+
         await callback.answer()
         return
 
-    shift = db.get_shift(shift_id)
+    shift = db.get_shift(
+        shift_id
+    )
 
     if not shift:
+
         await callback.answer(
             "شیفت پیدا نشد.",
             show_alert=True,
         )
+
         return
 
-    db.delete_shift(shift_id)
+    db.delete_shift(
+        shift_id
+    )
 
     await callback.answer(
         "شیفت حذف شد."
@@ -2139,13 +2491,16 @@ async def delete_shift_callback(
 async def shift_add_start(
     callback: CallbackQuery,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     await callback.answer()
@@ -2180,13 +2535,16 @@ async def shift_type_callback(
     callback: CallbackQuery,
     bot: Bot,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     shift_type = callback.data.split(
@@ -2199,10 +2557,12 @@ async def shift_type_callback(
     )
 
     if not admins:
+
         await callback.answer(
             "ابتدا یک ادمین اضافه کن.",
             show_alert=True,
         )
+
         return
 
     set_state(
@@ -2216,6 +2576,7 @@ async def shift_type_callback(
     buttons = []
 
     for admin in admins:
+
         name = (
             admin["name"]
             or await get_profile_name(
@@ -2253,13 +2614,16 @@ async def select_shift_admin(
     callback: CallbackQuery,
     bot: Bot,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     state = get_state(
@@ -2267,6 +2631,7 @@ async def select_shift_admin(
     )
 
     if not state:
+
         await callback.answer()
         return
 
@@ -2274,18 +2639,23 @@ async def select_shift_admin(
         callback.data.split(":")[1]
     )
 
-    admin = db.get_admin(admin_id)
+    admin = db.get_admin(
+        admin_id
+    )
 
     if not admin:
+
         await callback.answer(
             "ادمین پیدا نشد.",
             show_alert=True,
         )
+
         return
 
     state["admin_id"] = admin_id
 
     if state["permanent"]:
+
         state["step"] = "time"
 
         await callback.message.answer(
@@ -2300,6 +2670,7 @@ async def select_shift_admin(
         )
 
     else:
+
         state["step"] = "date"
 
         await callback.message.answer(
@@ -2316,9 +2687,13 @@ async def select_shift_admin(
 
 # =========================================================
 # GROUP SHIFT
+# فقط امروز
 # =========================================================
 
-def valid_time(value: str) -> bool:
+def valid_time(
+    value: str,
+) -> bool:
+
     return bool(
         re.fullmatch(
             r"(?:[01]\d|2[0-3]):[0-5]\d",
@@ -2327,7 +2702,10 @@ def valid_time(value: str) -> bool:
     )
 
 
-def parse_time_range(text: str):
+def parse_time_range(
+    text: str,
+):
+
     value = text.strip()
 
     value = re.sub(
@@ -2356,7 +2734,10 @@ def parse_time_range(text: str):
     return start, end
 
 
-def valid_date(value: str) -> bool:
+def valid_date(
+    value: str,
+) -> bool:
+
     if not re.fullmatch(
         r"\d{4}-\d{2}-\d{2}",
         value.strip(),
@@ -2364,12 +2745,16 @@ def valid_date(value: str) -> bool:
         return False
 
     try:
+
         datetime.strptime(
             value.strip(),
             "%Y-%m-%d",
         )
+
         return True
+
     except ValueError:
+
         return False
 
 
@@ -2379,16 +2764,19 @@ def valid_date(value: str) -> bool:
 async def group_shift_callback(
     callback: CallbackQuery,
 ):
+
     group_id = configured_group_id()
 
     if (
         not callback.message
         or callback.message.chat.id != group_id
     ):
+
         await callback.answer(
             "این گروه مجاز نیست.",
             show_alert=True,
         )
+
         return
 
     admin = db.get_admin(
@@ -2396,19 +2784,23 @@ async def group_shift_callback(
     )
 
     if not admin:
+
         await callback.answer(
             "⛔ شما ادمین ربات نیستید.",
             show_alert=True,
         )
+
         return
 
     if not user_started(
         callback.from_user.id
     ):
+
         await callback.answer(
             "ابتدا ربات را Start کن.",
             show_alert=True,
         )
+
         return
 
     mode = callback.data.split(
@@ -2416,54 +2808,36 @@ async def group_shift_callback(
         1,
     )[1]
 
-    if mode == "daily":
-        set_state(
-            callback.from_user.id,
-            "group_shift",
-            chat_id=group_id,
-            mode="daily",
-            step="time",
+    # =====================================================
+    # فقط today مجاز است
+    # =====================================================
+
+    if mode != "today":
+
+        await callback.answer(
+            "⛔ فقط امکان تعیین شیفت امروز وجود دارد.",
+            show_alert=True,
         )
 
-        text = (
-            "🔁 شیفت دائمی\n\n"
-            "بازه زمانی را بفرست.\n\n"
-            "مثال:\n"
-            "09:00-17:00\n"
-            "یا\n"
-            "23:00-02:00"
-        )
+        return
 
-    elif mode == "today":
-        set_state(
-            callback.from_user.id,
-            "group_shift",
-            chat_id=group_id,
-            mode="today",
-            step="time",
-            date=today_string(),
-        )
+    set_state(
+        callback.from_user.id,
+        "group_shift",
+        chat_id=group_id,
+        mode="today",
+        step="time",
+        date=today_string(),
+    )
 
-        text = (
-            "📅 شیفت امروز\n\n"
-            "بازه زمانی را بفرست.\n\n"
-            "مثال: 09:00-17:00"
-        )
-
-    else:
-        set_state(
-            callback.from_user.id,
-            "group_shift",
-            chat_id=group_id,
-            mode="date",
-            step="date",
-        )
-
-        text = (
-            "📆 تاریخ شیفت را بفرست.\n\n"
-            "فرمت:\n"
-            "YYYY-MM-DD"
-        )
+    text = (
+        "📅 شیفت امروز\n\n"
+        "بازه زمانی را بفرست.\n\n"
+        "مثال:\n"
+        "09:00-17:00\n"
+        "یا\n"
+        "23:00-02:00"
+    )
 
     await callback.answer()
 
@@ -2480,7 +2854,10 @@ async def group_shift_callback(
     F.text == "🔔 اعلان‌ها",
     F.chat.type == "private",
 )
-async def admin_notifications(message: Message):
+async def admin_notifications(
+    message: Message,
+):
+
     admin = db.get_admin(
         message.from_user.id
     )
@@ -2530,15 +2907,18 @@ async def admin_notifications(message: Message):
 async def notification_callback(
     callback: CallbackQuery,
 ):
+
     admin = db.get_admin(
         callback.from_user.id
     )
 
     if not admin:
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     enabled = (
@@ -2569,7 +2949,10 @@ async def notification_callback(
     F.text == "🔄 درخواست تغییر شیفت",
     F.chat.type == "private",
 )
-async def shift_request_start(message: Message):
+async def shift_request_start(
+    message: Message,
+):
+
     if not db.get_admin(
         message.from_user.id
     ):
@@ -2591,6 +2974,7 @@ async def shift_request_start(message: Message):
 # =========================================================
 
 def owner_stats_keyboard():
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -2613,7 +2997,10 @@ def owner_stats_keyboard():
     F.text == "📊 آمار و گزارش‌ها",
     F.chat.type == "private",
 )
-async def owner_stats_menu(message: Message):
+async def owner_stats_menu(
+    message: Message,
+):
+
     if not db.is_owner(
         message.from_user.id
     ):
@@ -2635,13 +3022,16 @@ async def stats_users(
     callback: CallbackQuery,
     bot: Bot,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     rows = get_user_message_stats()
@@ -2651,11 +3041,13 @@ async def stats_users(
     ]
 
     if not rows:
+
         lines.append(
             "هنوز کاربری پیامی ارسال نکرده."
         )
 
     for row in rows:
+
         mention = await mention_user(
             bot,
             row["user_id"],
@@ -2691,13 +3083,16 @@ async def stats_admins(
     callback: CallbackQuery,
     bot: Bot,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     rows = get_all_admin_stats()
@@ -2709,6 +3104,7 @@ async def stats_admins(
     buttons = []
 
     for row in rows:
+
         mention = await mention_user(
             bot,
             row["user_id"],
@@ -2763,20 +3159,26 @@ async def stats_rejected(
     callback: CallbackQuery,
     bot: Bot,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     try:
+
         admin_id = int(
             callback.data.split(":")[2]
         )
+
     except Exception:
+
         await callback.answer()
         return
 
@@ -2784,7 +3186,9 @@ async def stats_rejected(
         admin_id
     )
 
-    admin = db.get_admin(admin_id)
+    admin = db.get_admin(
+        admin_id
+    )
 
     lines = [
         f"🔴 پیام‌های ردشده "
@@ -2792,11 +3196,13 @@ async def stats_rejected(
     ]
 
     if not rows:
+
         lines.append(
             "این ادمین هنوز پیامی را رد نکرده."
         )
 
     for row in rows:
+
         sender = await mention_user(
             bot,
             row["user_id"],
@@ -2808,7 +3214,10 @@ async def stats_rejected(
         )
 
         if len(content) > 100:
-            content = content[:100] + "..."
+            content = (
+                content[:100]
+                + "..."
+            )
 
         lines.append(
             f"#{row['id']} — {sender}\n"
@@ -2841,13 +3250,16 @@ async def stats_rejected(
 async def stats_menu_callback(
     callback: CallbackQuery,
 ):
+
     if not db.is_owner(
         callback.from_user.id
     ):
+
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
+
         return
 
     await callback.answer()
@@ -2870,6 +3282,7 @@ async def owner_security(
     message: Message,
     bot: Bot,
 ):
+
     if not db.is_owner(
         message.from_user.id
     ):
@@ -2880,11 +3293,13 @@ async def owner_security(
 
     lines = [
         "🛡️ امنیت و دسترسی\n",
-        "👥 Adminها:"
+        "👥 Adminها:",
     ]
 
     if admins:
+
         for admin in admins:
+
             mention = await mention_user(
                 bot,
                 admin["user_id"],
@@ -2894,7 +3309,9 @@ async def owner_security(
             lines.append(
                 f"• {mention}"
             )
+
     else:
+
         lines.append(
             "• هیچ ادمینی ثبت نشده."
         )
@@ -2904,7 +3321,9 @@ async def owner_security(
     )
 
     if started_users:
+
         for user in started_users:
+
             mention = await mention_user(
                 bot,
                 user["user_id"],
@@ -2913,7 +3332,9 @@ async def owner_security(
             lines.append(
                 f"• {mention}"
             )
+
     else:
+
         lines.append(
             "• هنوز کاربری Start نکرده."
         )
@@ -2939,19 +3360,31 @@ async def owner_channel(
     message: Message,
     bot: Bot,
 ):
+
     if not db.is_owner(
         message.from_user.id
     ):
         return
 
+    channel_id = db.get_channel_id()
+
     try:
+
         chat = await bot.get_chat(
-            db.get_channel_id()
+            channel_id
         )
 
         title = (
-            getattr(chat, "title", None)
-            or getattr(chat, "full_name", None)
+            getattr(
+                chat,
+                "title",
+                None,
+            )
+            or getattr(
+                chat,
+                "full_name",
+                None,
+            )
             or "کانال"
         )
 
@@ -2967,16 +3400,34 @@ async def owner_channel(
             else "🔒 کانال خصوصی"
         )
 
-    except Exception:
+        connection = (
+            "🟢 اتصال Telegram موفق"
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            "CHANNEL GET_CHAT ERROR | "
+            "channel_id=%s | error=%s",
+            channel_id,
+            e,
+        )
+
         title = "کانال تنظیم‌شده"
-        public = "🔒 کانال خصوصی"
+        public = "❌ اتصال کانال ناموفق"
+        connection = (
+            f"🔴 خطا: {str(e)[:180]}"
+        )
 
     await message.answer(
         (
             "📢 تنظیمات کانال\n\n"
-            f"🏷 نام: <b>{escape(title)}</b>\n"
+            f"🏷 نام: "
+            f"<b>{escape(title)}</b>\n"
             f"{public}\n\n"
-            "🟢 اتصال: موفق"
+            f"{connection}\n\n"
+            "⚠️ برای انتشار پیام، ربات باید در کانال "
+            "ادمین و دارای اجازه ارسال پیام باشد."
         ),
         parse_mode=ParseMode.HTML,
         reply_markup=owner_keyboard(
@@ -2989,7 +3440,10 @@ async def owner_channel(
     F.text == "⚙️ تنظیمات ربات",
     F.chat.type == "private",
 )
-async def owner_settings(message: Message):
+async def owner_settings(
+    message: Message,
+):
+
     if not db.is_owner(
         message.from_user.id
     ):
@@ -3026,7 +3480,10 @@ async def owner_settings(message: Message):
     }),
     F.chat.type == "private",
 )
-async def owner_toggle_bot(message: Message):
+async def owner_toggle_bot(
+    message: Message,
+):
+
     if not db.is_owner(
         message.from_user.id
     ):
@@ -3036,7 +3493,9 @@ async def owner_toggle_bot(message: Message):
         message.text == "🟢 روشن کردن"
     )
 
-    db.set_bot_enabled(enabled)
+    db.set_bot_enabled(
+        enabled
+    )
 
     await message.answer(
         (
@@ -3060,7 +3519,10 @@ async def handle_state(
 ) -> bool:
 
     user_id = message.from_user.id
-    state = get_state(user_id)
+
+    state = get_state(
+        user_id
+    )
 
     if not state:
         return False
@@ -3068,9 +3530,9 @@ async def handle_state(
     kind = state["kind"]
     text = message.text or ""
 
-    # -----------------------------------------------------
+    # =====================================================
     # USER MESSAGE
-    # -----------------------------------------------------
+    # =====================================================
 
     if kind == "user_send":
 
@@ -3080,19 +3542,27 @@ async def handle_state(
         )
 
         if attempts >= RATE_LIMIT_MAX_MESSAGES:
+
             await message.answer(
                 "🚫 محدودیت ارسال. کمی بعد دوباره تلاش کن."
             )
+
             return True
 
-        db.add_rate_attempt(user_id)
+        db.add_rate_attempt(
+            user_id
+        )
 
         valid, error = validate_submission(
             message
         )
 
         if not valid:
-            await message.answer(error)
+
+            await message.answer(
+                error
+            )
+
             return True
 
         current = get_current_shift_safe()
@@ -3101,11 +3571,8 @@ async def handle_state(
             message.entities
         )
 
-        # -------------------------------------------------
-        # هیچ شیفت فعالی نیست => صف
-        # -------------------------------------------------
-
         if not current:
+
             message_id = db.create_message(
                 user_id,
                 message.text,
@@ -3128,20 +3595,23 @@ async def handle_state(
             next_shift = get_next_shift()
 
             if next_shift:
+
                 shift, start_dt = next_shift
 
                 await message.answer(
                     (
                         "✅ پیام ذخیره شد.\n\n"
                         "🕐 در حال حاضر شیفت فعالی وجود ندارد.\n"
-                        f"پیامت در صف قرار گرفت و در شروع شیفت بعدی "
-                        f"برای ادمین ارسال می‌شود.\n\n"
+                        "پیامت در صف قرار گرفت و در شروع شیفت بعدی "
+                        "برای ادمین ارسال می‌شود.\n\n"
                         f"⏰ شروع شیفت بعدی: "
                         f"{start_dt.strftime('%Y-%m-%d %H:%M')}"
                     ),
                     reply_markup=user_keyboard(),
                 )
+
             else:
+
                 await message.answer(
                     (
                         "✅ پیام ذخیره شد.\n\n"
@@ -3151,12 +3621,11 @@ async def handle_state(
                     reply_markup=user_keyboard(),
                 )
 
-            clear_state(user_id)
-            return True
+            clear_state(
+                user_id
+            )
 
-        # -------------------------------------------------
-        # شیفت فعال
-        # -------------------------------------------------
+            return True
 
         shift = current[0]
         admin_id = shift["admin_id"]
@@ -3173,6 +3642,7 @@ async def handle_state(
         )
 
         try:
+
             sent = await send_review_message(
                 bot,
                 admin_id,
@@ -3192,9 +3662,19 @@ async def handle_state(
                 reply_markup=user_keyboard(),
             )
 
-            clear_state(user_id)
+            clear_state(
+                user_id
+            )
 
         except Exception:
+
+            logger.exception(
+                "SEND REVIEW MESSAGE ERROR | "
+                "message_id=%s | admin_id=%s",
+                message_id,
+                admin_id,
+            )
+
             db.set_message_status(
                 message_id,
                 "queued",
@@ -3206,9 +3686,9 @@ async def handle_state(
 
         return True
 
-    # -----------------------------------------------------
+    # =====================================================
     # ADD ADMIN
-    # -----------------------------------------------------
+    # =====================================================
 
     if kind == "add_admin":
 
@@ -3217,7 +3697,6 @@ async def handle_state(
         admin_id = None
         name = None
 
-        # username
         if value.startswith("@"):
 
             row = find_user_by_username(
@@ -3225,18 +3704,22 @@ async def handle_state(
             )
 
             if not row:
+
                 await message.answer(
                     (
                         "❌ این username در دیتابیس پیدا نشد.\n\n"
                         "کاربر باید ابتدا ربات را Start کند."
                     )
                 )
+
                 return True
 
             if not row["started"]:
+
                 await message.answer(
                     "❌ این کاربر هنوز ربات را Start نکرده."
                 )
+
                 return True
 
             admin_id = row["user_id"]
@@ -3251,16 +3734,22 @@ async def handle_state(
             ).strip()
 
             if not name:
-                name = f"@{row['username']}"
+                name = (
+                    f"@{row['username']}"
+                )
 
-        # numeric ID
         elif value.isdigit():
 
-            admin_id = int(value)
+            admin_id = int(
+                value
+            )
 
-            row = db.get_user(admin_id)
+            row = db.get_user(
+                admin_id
+            )
 
             if row:
+
                 name = " ".join(
                     x
                     for x in (
@@ -3270,17 +3759,29 @@ async def handle_state(
                     if x
                 ).strip()
 
-                if not name and row["username"]:
-                    name = f"@{row['username']}"
+                if (
+                    not name
+                    and row["username"]
+                ):
+
+                    name = (
+                        f"@{row['username']}"
+                    )
 
             if not name:
+
                 try:
+
                     chat = await bot.get_chat(
                         admin_id
                     )
 
                     name = (
-                        getattr(chat, "full_name", None)
+                        getattr(
+                            chat,
+                            "full_name",
+                            None,
+                        )
                         or (
                             f"@{chat.username}"
                             if getattr(
@@ -3299,6 +3800,7 @@ async def handle_state(
                 name = "ادمین"
 
         else:
+
             await message.answer(
                 (
                     "❌ مقدار نامعتبر است.\n\n"
@@ -3307,20 +3809,31 @@ async def handle_state(
                     "@sixiren"
                 )
             )
+
             return True
 
         try:
+
             db.add_admin(
                 admin_id,
                 name,
             )
+
         except Exception:
+
+            logger.exception(
+                "ADD ADMIN ERROR"
+            )
+
             await message.answer(
                 "❌ افزودن ادمین ناموفق بود."
             )
+
             return True
 
-        clear_state(user_id)
+        clear_state(
+            user_id
+        )
 
         mention = await mention_user(
             bot,
@@ -3341,16 +3854,18 @@ async def handle_state(
 
         return True
 
-    # -----------------------------------------------------
+    # =====================================================
     # SHIFT REQUEST
-    # -----------------------------------------------------
+    # =====================================================
 
     if kind == "shift_request":
 
         if not text.strip():
+
             await message.answer(
                 "❌ متن درخواست خالی است."
             )
+
             return True
 
         db.create_shift_request(
@@ -3358,31 +3873,35 @@ async def handle_state(
             text.strip(),
         )
 
-        clear_state(user_id)
+        clear_state(
+            user_id
+        )
 
         await message.answer(
-            (
-                "✅ درخواست تغییر شیفت ثبت شد."
-            ),
+            "✅ درخواست تغییر شیفت ثبت شد.",
             reply_markup=admin_keyboard(),
         )
 
         return True
 
-    # -----------------------------------------------------
+    # =====================================================
     # OWNER SHIFT
-    # -----------------------------------------------------
+    # =====================================================
 
     if kind == "create_shift":
 
-        step = state.get("step")
+        step = state.get(
+            "step"
+        )
 
         if step == "date":
 
             if not valid_date(text):
+
                 await message.answer(
                     "❌ تاریخ معتبر نیست."
                 )
+
                 return True
 
             state["specific_date"] = text
@@ -3402,9 +3921,12 @@ async def handle_state(
 
         if step == "time":
 
-            parsed = parse_time_range(text)
+            parsed = parse_time_range(
+                text
+            )
 
             if not parsed:
+
                 await message.answer(
                     (
                         "❌ فرمت زمان درست نیست.\n\n"
@@ -3413,11 +3935,13 @@ async def handle_state(
                         "23:00-02:00"
                     )
                 )
+
                 return True
 
             start, end = parsed
 
             try:
+
                 shift_id = db.create_shift(
                     start_time=start,
                     end_time=end,
@@ -3429,12 +3953,20 @@ async def handle_state(
                 )
 
             except Exception:
+
+                logger.exception(
+                    "OWNER CREATE SHIFT ERROR"
+                )
+
                 await message.answer(
                     "❌ ایجاد شیفت ناموفق بود."
                 )
+
                 return True
 
-            clear_state(user_id)
+            clear_state(
+                user_id
+            )
 
             await message.answer(
                 (
@@ -3448,61 +3980,71 @@ async def handle_state(
 
             return True
 
-    # -----------------------------------------------------
+    # =====================================================
     # GROUP SHIFT
-    # -----------------------------------------------------
+    # فقط TODAY
+    # =====================================================
 
     if kind == "group_shift":
 
-        chat_id = state.get("chat_id")
+        chat_id = state.get(
+            "chat_id"
+        )
 
         if message.chat.id != chat_id:
             return True
 
-        if not db.get_admin(user_id):
-            clear_state(user_id)
+        if not db.get_admin(
+            user_id
+        ):
+
+            clear_state(
+                user_id
+            )
+
             return True
 
-        step = state.get("step")
+        # امنیت اضافه:
+        # گروه فقط باید شیفت امروز را ثبت کند.
+        if state.get("mode") != "today":
+
+            clear_state(
+                user_id
+            )
+
+            await message.answer(
+                "⛔ فقط امکان تعیین شیفت امروز وجود دارد."
+            )
+
+            return True
+
+        step = state.get(
+            "step"
+        )
+
+        # برای حالت today دیگر مرحله date وجود ندارد.
+        # تاریخ همیشه امروز است.
 
         if step == "date":
 
-            if not valid_date(text):
-                await message.answer(
-                    "❌ تاریخ معتبر نیست. مثال: 2026-09-08"
-                )
-                return True
-
-            selected = datetime.strptime(
-                text,
-                "%Y-%m-%d",
-            ).date()
-
-            if selected < local_now().date():
-                await message.answer(
-                    "❌ نمی‌توان برای تاریخ گذشته شیفت ساخت."
-                )
-                return True
-
-            state["date"] = text
-            state["step"] = "time"
+            clear_state(
+                user_id
+            )
 
             await message.answer(
-                (
-                    "⏰ حالا بازه زمانی را بفرست.\n\n"
-                    "مثال:\n"
-                    "09:00-17:00\n"
-                    "23:00-02:00"
-                )
+                "⛔ تعیین تاریخ مجاز نیست. شیفت فقط برای امروز ثبت می‌شود."
             )
 
             return True
 
         if step == "time":
 
-            parsed = parse_time_range(text)
+            parsed = parse_time_range(
+                text
+            )
 
             if not parsed:
+
                 await message.answer(
                     (
                         "❌ بازه زمانی نامعتبر است.\n\n"
@@ -3511,44 +4053,53 @@ async def handle_state(
                         "23:00-02:00"
                     )
                 )
+
                 return True
 
             start, end = parsed
 
-            mode = state["mode"]
+            # =================================================
+            # همیشه امروز
+            # هیچ permanent یا date انتخابی از ادمین قبول نمی‌شود
+            # =================================================
 
-            if mode == "daily":
-                permanent = True
-                specific_date = None
-            else:
-                permanent = False
-                specific_date = state.get(
-                    "date",
-                    today_string(),
-                )
+            permanent = False
+            specific_date = today_string()
 
             try:
+
                 shift_id = db.create_shift(
                     start_time=start,
                     end_time=end,
                     admin_id=user_id,
-                    permanent=permanent,
+                    permanent=False,
                     specific_date=specific_date,
                 )
 
             except Exception:
+
+                logger.exception(
+                    "GROUP CREATE TODAY SHIFT ERROR | "
+                    "admin_id=%s | date=%s",
+                    user_id,
+                    specific_date,
+                )
+
                 await message.answer(
                     "❌ ثبت شیفت ناموفق بود."
                 )
+
                 return True
 
-            clear_state(user_id)
+            clear_state(
+                user_id
+            )
 
             await message.answer(
                 (
-                    "✅ شیفت شما ثبت شد.\n\n"
-                    f"⏰ {start} تا {end}\n"
-                    f"{'🔁 دائمی' if permanent else f'📅 {specific_date}'}"
+                    "✅ شیفت امروز شما ثبت شد.\n\n"
+                    f"📅 {specific_date}\n"
+                    f"⏰ {start} تا {end}"
                 )
             )
 
@@ -3568,11 +4119,13 @@ async def back_handler(
     message: Message,
     bot: Bot,
 ):
+
     clear_state(
         message.from_user.id
     )
 
     if message.chat.type == "private":
+
         await show_home(
             message,
             bot,
@@ -3590,11 +4143,14 @@ async def back_handler(
     }),
     F.chat.type == "private",
 )
-async def help_button(message: Message):
+async def help_button(
+    message: Message,
+):
 
     user_id = message.from_user.id
 
     if db.is_owner(user_id):
+
         await message.answer(
             (
                 "👑 راهنمای مالک\n\n"
@@ -3607,16 +4163,18 @@ async def help_button(message: Message):
         )
 
     elif db.get_admin(user_id):
+
         await message.answer(
             (
                 "👨‍💼 راهنمای ادمین\n\n"
-                "پیام‌های در انتظار، شیفت‌ها و عملکرد خودت "
+                "پیام‌های در انتظار، شیفت امروز و عملکرد خودت "
                 "را مدیریت کن."
             ),
             reply_markup=admin_keyboard(),
         )
 
     else:
+
         await message.answer(
             HELP_MESSAGE,
             reply_markup=user_keyboard(),
@@ -3635,10 +4193,13 @@ async def text_router(
     message: Message,
     bot: Bot,
 ):
+
     user = message.from_user
     text = message.text
 
-    touch_user(user)
+    touch_user(
+        user
+    )
 
     if await handle_state(
         message,
@@ -3647,95 +4208,151 @@ async def text_router(
         return
 
     if text == "📝 ارسال پیام":
-        await user_send_start(message)
+
+        await user_send_start(
+            message
+        )
+
         return
 
     if text == "📊 وضعیت پیام من":
-        await user_status(message)
+
+        await user_status(
+            message
+        )
+
         return
 
     if text == "📥 پیام‌های در انتظار":
+
         await pending_messages(
             message,
             bot,
         )
+
         return
 
     if text == "⏰ شیفت من":
-        await admin_current_shift(message)
+
+        await admin_current_shift(
+            message
+        )
+
         return
 
     if text == "📅 برنامه من":
-        await admin_schedule(message)
+
+        await admin_schedule(
+            message
+        )
+
         return
 
     if text == "📊 عملکرد من":
-        await admin_stats(message)
+
+        await admin_stats(
+            message
+        )
+
         return
 
     if text == "🔄 درخواست تغییر شیفت":
-        await shift_request_start(message)
+
+        await shift_request_start(
+            message
+        )
+
         return
 
     if text == "🔔 اعلان‌ها":
-        await admin_notifications(message)
+
+        await admin_notifications(
+            message
+        )
+
         return
 
     if text == "👥 ادمین‌ها":
+
         await owner_admins(
             message,
             bot,
         )
+
         return
 
     if text == "⏰ شیفت‌ها":
+
         await owner_shifts(
             message,
             bot,
         )
+
         return
 
     if text == "📅 برنامه کاری/امروز":
+
         await owner_today_schedule(
             message,
             bot,
         )
+
         return
 
     if text == "📊 آمار و گزارش‌ها":
-        await owner_stats_menu(message)
+
+        await owner_stats_menu(
+            message
+        )
+
         return
 
     if text == "📢 کانال":
+
         await owner_channel(
             message,
             bot,
         )
+
         return
 
     if text == "⚙️ تنظیمات ربات":
-        await owner_settings(message)
+
+        await owner_settings(
+            message
+        )
+
         return
 
     if text == "🛡️ امنیت و دسترسی":
+
         await owner_security(
             message,
             bot,
         )
+
         return
 
     if text in {
         "🔴 خاموش کردن",
         "🟢 روشن کردن",
     }:
-        await owner_toggle_bot(message)
+
+        await owner_toggle_bot(
+            message
+        )
+
         return
 
     if text in {
         "📖 راهنما",
         "❓ راهنما",
     }:
-        await help_button(message)
+
+        await help_button(
+            message
+        )
+
         return
 
 
@@ -3743,7 +4360,10 @@ async def text_router(
 # SAFE SHIFT ENGINE
 # =========================================================
 
-def parse_hm(value: str):
+def parse_hm(
+    value: str,
+):
+
     hour, minute = map(
         int,
         value.split(":"),
@@ -3756,10 +4376,14 @@ def shift_applies_to_date(
     shift,
     date,
 ):
+
     if shift["specific_date"]:
+
         return (
             shift["specific_date"]
-            == date.strftime("%Y-%m-%d")
+            == date.strftime(
+                "%Y-%m-%d"
+            )
         )
 
     if shift["permanent"]:
@@ -3774,6 +4398,7 @@ def shift_applies_to_date(
 
 
 def get_current_shift_safe():
+
     now = local_now()
 
     rows = db.conn.execute(
@@ -3831,9 +4456,12 @@ def get_current_shift_safe():
             )
 
             if end <= start:
-                end += timedelta(days=1)
+                end += timedelta(
+                    days=1
+                )
 
             if start <= now < end:
+
                 candidates.append(
                     (
                         shift,
@@ -3853,6 +4481,7 @@ def get_current_shift_safe():
 
 
 def get_next_shift():
+
     now = local_now()
 
     rows = db.conn.execute(
@@ -3870,7 +4499,11 @@ def get_next_shift():
 
     candidates = []
 
-    for offset in range(0, 15):
+    for offset in range(
+        0,
+        15,
+    ):
+
         date = (
             now.date()
             + timedelta(days=offset)
@@ -3925,6 +4558,7 @@ async def dispatch_queued_messages(
     bot: Bot,
     shift,
 ):
+
     rows = db.conn.execute(
         """
         SELECT *
@@ -3937,6 +4571,7 @@ async def dispatch_queued_messages(
     for row in rows:
 
         try:
+
             db.conn.execute(
                 """
                 UPDATE messages
@@ -3972,6 +4607,14 @@ async def dispatch_queued_messages(
             )
 
         except Exception:
+
+            logger.exception(
+                "DISPATCH QUEUED MESSAGE ERROR | "
+                "message_id=%s | shift_id=%s",
+                row["id"],
+                shift["id"],
+            )
+
             db.conn.execute(
                 """
                 UPDATE messages
@@ -3993,24 +4636,28 @@ async def dispatch_queued_messages(
 async def shift_monitor(
     bot: Bot,
 ):
+
     global notified_shifts
 
     while True:
 
         try:
+
             current = get_current_shift_safe()
 
             if current:
+
                 shift, start_dt = current
 
                 key = (
                     start_dt.strftime(
                         "%Y-%m-%d"
                     ),
-                    int(shift["id"]),
+                    int(
+                        shift["id"]
+                    ),
                 )
 
-                # پیام‌های صف‌شده همیشه با شیفت فعلی بررسی می‌شوند.
                 await dispatch_queued_messages(
                     bot,
                     shift,
@@ -4024,10 +4671,17 @@ async def shift_monitor(
                     < timedelta(minutes=1)
                     and key not in notified_shifts
                 ):
-                    notified_shifts.add(key)
 
-                    if shift["notifications_enabled"]:
+                    notified_shifts.add(
+                        key
+                    )
+
+                    if shift[
+                        "notifications_enabled"
+                    ]:
+
                         try:
+
                             await bot.send_message(
                                 shift["admin_id"],
                                 (
@@ -4045,15 +4699,25 @@ async def shift_monitor(
                         ):
                             pass
 
-            if len(notified_shifts) > 1000:
+            if len(
+                notified_shifts
+            ) > 1000:
+
                 notified_shifts = set(
-                    list(notified_shifts)[-200:]
+                    list(
+                        notified_shifts
+                    )[-200:]
                 )
 
         except Exception:
-            pass
 
-        await asyncio.sleep(10)
+            logger.exception(
+                "SHIFT MONITOR ERROR"
+            )
+
+        await asyncio.sleep(
+            10
+        )
 
 
 # =========================================================
@@ -4068,6 +4732,7 @@ async def owner_today_schedule(
     message: Message,
     bot: Bot,
 ):
+
     if not db.is_owner(
         message.from_user.id
     ):
@@ -4084,6 +4749,7 @@ async def owner_today_schedule(
     ]
 
     for shift in rows:
+
         admin = await mention_user(
             bot,
             shift["admin_id"],
@@ -4097,6 +4763,7 @@ async def owner_today_schedule(
         )
 
     if not rows:
+
         lines.append(
             "امروز شیفتی ثبت نشده."
         )
@@ -4115,12 +4782,18 @@ async def owner_today_schedule(
 # =========================================================
 
 async def cleanup_loop():
+
     while True:
 
         try:
+
             db.cleanup_old_data()
+
         except Exception:
-            pass
+
+            logger.exception(
+                "CLEANUP ERROR"
+            )
 
         await asyncio.sleep(
             30 * 60
@@ -4134,6 +4807,7 @@ async def cleanup_loop():
 async def setup_commands(
     bot: Bot,
 ):
+
     await bot.set_my_commands(
         [
             BotCommand(
@@ -4154,6 +4828,7 @@ async def setup_commands(
 # =========================================================
 
 async def main():
+
     global shift_task
     global cleanup_task
     global BOT_USERNAME
@@ -4169,11 +4844,20 @@ async def main():
     me = await bot.get_me()
 
     BOT_ID = me.id
+
     BOT_USERNAME = (
         me.username or ""
     )
 
-    await setup_commands(bot)
+    logger.info(
+        "Bot started: @%s | ID=%s",
+        BOT_USERNAME,
+        BOT_ID,
+    )
+
+    await setup_commands(
+        bot
+    )
 
     dp = Dispatcher()
 
@@ -4182,7 +4866,9 @@ async def main():
     )
 
     shift_task = asyncio.create_task(
-        shift_monitor(bot)
+        shift_monitor(
+            bot
+        )
     )
 
     cleanup_task = asyncio.create_task(
@@ -4190,6 +4876,7 @@ async def main():
     )
 
     try:
+
         await dp.start_polling(
             bot
         )
