@@ -7,7 +7,9 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
-
+import socket
+import aiohttp
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -58,7 +60,76 @@ cleanup_task: asyncio.Task | None = None
 BOT_USERNAME = ""
 BOT_ID = 0
 
+# =========================================================
+# FIXED IP RESOLVER (TLS SNI-safe, bypass DNS/SNI blocking)
+# =========================================================
 
+TELEGRAM_IPS = [
+    "149.154.167.220",
+    "149.154.175.100",
+    "149.154.167.99",
+    "149.154.175.50",
+    "95.161.64.90",
+]
+
+
+class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
+    """
+    هاست api.telegram.org را مستقیماً به IP‌های شناخته‌شده
+    resolve می‌کند (DNS را دور می‌زند)، اما SNI/hostname برای
+    TLS handshake همچنان api.telegram.org باقی می‌ماند تا
+    گواهی به‌درستی تأیید شود.
+    """
+
+    def __init__(self, ips: list[str]):
+        self._ips = ips
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        if host != "api.telegram.org":
+            # برای سایر هاست‌ها از DNS معمولی استفاده کن
+            loop = asyncio.get_running_loop()
+            infos = await loop.getaddrinfo(
+                host, port,
+                type=socket.SOCK_STREAM,
+                family=family,
+            )
+            return [
+                {
+                    "hostname": host,
+                    "host": info[4][0],
+                    "port": port,
+                    "family": info[0],
+                    "proto": info[4][1] if len(info[4]) > 1 else 0,
+                    "flags": 0,
+                }
+                for info in infos
+            ]
+
+        return [
+            {
+                "hostname": host,
+                "host": ip,
+                "port": port,
+                "family": socket.AF_INET,
+                "proto": 0,
+                "flags": 0,
+            }
+            for ip in self._ips
+        ]
+
+    async def close(self):
+        pass
+
+
+def build_telegram_session() -> AiohttpSession:
+    connector = aiohttp.TCPConnector(
+        resolver=TelegramFixedIPResolver(TELEGRAM_IPS),
+        ssl=True,       # چک کردن گواهی همچنان فعال است (امن)
+        ttl_dns_cache=300,
+        limit=100,
+    )
+
+    return AiohttpSession(connector=connector)
 # =========================================================
 # DATABASE COMPATIBILITY / MIGRATION
 # =========================================================
@@ -4081,8 +4152,9 @@ async def main():
 
     ensure_runtime_schema()
 
-    bot = Bot(
-        token=BOT_TOKEN
+       bot = Bot(
+        token=BOT_TOKEN,
+        session=build_telegram_session(),
     )
 
     me = await bot.get_me()
