@@ -120,9 +120,21 @@ class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
 
     async def close(self):
         pass
-def build_telegram_session() -> AiohttpSession:
-    return AiohttpSession()
+        class PinnedAiohttpSession(AiohttpSession):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
+        self._connector_type = aiohttp.TCPConnector
+        self._connector_init = {
+            "resolver": TelegramFixedIPResolver(TELEGRAM_IPS),
+            "family": socket.AF_INET,
+            "ssl": True,
+            "ttl_dns_cache": 300,
+            "limit": 100,
+            "enable_cleanup_closed": True,
+        }
+def build_telegram_session() -> AiohttpSession:
+    return PinnedAiohttpSession()
 
 # =========================================================
 # DATABASE COMPATIBILITY / MIGRATION
