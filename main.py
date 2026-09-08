@@ -120,10 +120,11 @@ class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
 
     async def close(self):
         pass
-
-
 def build_telegram_session() -> AiohttpSession:
-    return AiohttpSession()================================
+    return AiohttpSession()
+
+
+# =========================================================
 # DATABASE COMPATIBILITY / MIGRATION
 # =========================================================
 
