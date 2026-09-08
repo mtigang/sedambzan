@@ -6,9 +6,7 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-import socket
-import aiohttp
-from aiogram.client.session.aiohttp import AiohttpSession
+
 from config import (
     DATABASE_PATH,
     OWNER_IDS,
