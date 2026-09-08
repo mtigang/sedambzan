@@ -4155,7 +4155,7 @@ async def main():
 
     ensure_runtime_schema()
 
-       bot = Bot(
+    bot = Bot(
         token=BOT_TOKEN,
         session=build_telegram_session(),
     )
