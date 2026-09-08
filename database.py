@@ -73,6 +73,7 @@ class Database:
                 first_name TEXT,
                 last_name TEXT,
                 blocked INTEGER NOT NULL DEFAULT 0,
+                started INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 last_seen TEXT NOT NULL
             );
@@ -172,13 +173,21 @@ class Database:
 
     def _migrate(self):
         """
-        شیفت دائمی در نسخه جدید یعنی:
-        هر روز، بدون وابستگی به weekday.
-
-        برای سازگاری با دیتابیس قدیمی، تمام شیفت‌های permanent
-        به weekday=-1 تبدیل می‌شوند.
+        مهاجرت‌های سازگار با دیتابیس نسخه‌های قبلی.
         """
         try:
+            columns = {
+                row["name"]
+                for row in self.conn.execute(
+                    "PRAGMA table_info(users)"
+                ).fetchall()
+            }
+
+            if "started" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE users ADD COLUMN started INTEGER NOT NULL DEFAULT 0"
+                )
+
             self.conn.execute(
                 """
                 UPDATE shifts
@@ -423,6 +432,7 @@ class Database:
         username: str | None,
         first_name: str | None,
         last_name: str | None,
+        started: bool = False,
     ):
         now = self.now()
 
@@ -434,16 +444,21 @@ class Database:
                 first_name,
                 last_name,
                 blocked,
+                started,
                 created_at,
                 last_seen
             )
-            VALUES (?, ?, ?, ?, 0, ?, ?)
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?)
 
             ON CONFLICT(user_id)
             DO UPDATE SET
                 username = excluded.username,
                 first_name = excluded.first_name,
                 last_name = excluded.last_name,
+                started = CASE
+                    WHEN excluded.started = 1 THEN 1
+                    ELSE users.started
+                END,
                 last_seen = excluded.last_seen
             """,
             (
@@ -451,12 +466,60 @@ class Database:
                 username,
                 first_name,
                 last_name,
+                1 if started else 0,
                 now,
                 now,
             ),
         )
 
         self.conn.commit()
+
+    def mark_user_started(self, user_id: int):
+        self.conn.execute(
+            """
+            UPDATE users
+            SET started = 1,
+                last_seen = ?
+            WHERE user_id = ?
+            """,
+            (self.now(), user_id),
+        )
+        self.conn.commit()
+
+    def has_started(self, user_id: int) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT started
+            FROM users
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        return bool(row and row["started"])
+
+    def get_user_by_username(self, username: str):
+        username = username.lstrip("@").strip().lower()
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE lower(username) = ?
+            LIMIT 1
+            """,
+            (username,),
+        ).fetchone()
+
+    def get_started_users(self, limit: int = 200):
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE started = 1
+            ORDER BY last_seen DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
 
     def get_user(self, user_id: int):
         return self.conn.execute(
@@ -826,6 +889,44 @@ class Database:
 
         return cur.lastrowid
 
+    def assign_pending_messages_to_admin(
+        self,
+        admin_id: int,
+        limit: int = 100,
+    ):
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM messages
+            WHERE status = 'pending'
+              AND admin_id IS NULL
+            ORDER BY submitted_at
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        assigned = []
+        for row in rows:
+            cur = self.conn.execute(
+                """
+                UPDATE messages
+                SET admin_id = ?
+                WHERE id = ?
+                  AND status = 'pending'
+                  AND admin_id IS NULL
+                """,
+                (admin_id, row["id"]),
+            )
+            if cur.rowcount == 1:
+                data = dict(row)
+                data["admin_id"] = admin_id
+                data["entities"] = self._load_json(data.get("entities_json"))
+                assigned.append(data)
+
+        self.conn.commit()
+        return assigned
+
     def get_message(self, message_id: int):
         row = self.conn.execute(
             """
@@ -900,6 +1001,19 @@ class Database:
                 limit,
             ),
         ).fetchall()
+
+    def clear_message_admin_id(self, message_id: int):
+        self.conn.execute(
+            """
+            UPDATE messages
+            SET admin_id = NULL,
+                admin_message_id = NULL
+            WHERE id = ?
+              AND status = 'pending'
+            """,
+            (message_id,),
+        )
+        self.conn.commit()
 
     def set_admin_message_id(
         self,
@@ -1151,6 +1265,19 @@ class Database:
             "1" if enabled else "0",
         )
 
+    def get_admin_group_id(self) -> int:
+        value = self.get_setting("admin_group_id", "0")
+        try:
+            return int(value)
+        except Exception:
+            return 0
+
+    def set_admin_group_id(self, chat_id: int):
+        self.set_setting("admin_group_id", str(chat_id))
+
+    def clear_admin_group_id(self):
+        self.set_setting("admin_group_id", "0")
+
     def get_channel_id(self):
         value = self.get_setting(
             "channel_id",
@@ -1367,6 +1494,61 @@ class Database:
             ),
         }
 
+    def user_message_stats(self, limit: int = 200):
+        return self.conn.execute(
+            """
+            SELECT
+                users.user_id,
+                users.username,
+                users.first_name,
+                users.last_name,
+                COUNT(messages.id) AS message_count
+            FROM users
+            LEFT JOIN messages
+                ON messages.user_id = users.user_id
+            GROUP BY users.user_id
+            HAVING COUNT(messages.id) > 0
+            ORDER BY message_count DESC, users.user_id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    def admin_review_details(self, admin_id: int, limit: int = 100):
+        return self.conn.execute(
+            """
+            SELECT id, user_id, content, status, reject_reason,
+                   submitted_at, reviewed_at
+            FROM messages
+            WHERE admin_id = ?
+              AND status IN ('approved', 'rejected')
+            ORDER BY reviewed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (admin_id, limit),
+        ).fetchall()
+
+    def all_admin_stats(self):
+        return self.conn.execute(
+            """
+            SELECT
+                admins.user_id,
+                admins.name,
+                admins.active,
+                SUM(
+                    CASE WHEN messages.status = 'approved' THEN 1 ELSE 0 END
+                ) AS approved,
+                SUM(
+                    CASE WHEN messages.status = 'rejected' THEN 1 ELSE 0 END
+                ) AS rejected
+            FROM admins
+            LEFT JOIN messages
+                ON messages.admin_id = admins.user_id
+            GROUP BY admins.user_id
+            ORDER BY admins.name COLLATE NOCASE
+            """
+        ).fetchall()
+
     # ---------------------------------------------------------
     # Cleanup
     # ---------------------------------------------------------
@@ -1425,6 +1607,7 @@ class Database:
             """
             DELETE FROM users
             WHERE last_seen < ?
+              AND started = 0
               AND user_id NOT IN (
                   SELECT DISTINCT user_id
                   FROM messages
