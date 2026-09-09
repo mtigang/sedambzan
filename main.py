@@ -1200,7 +1200,21 @@ def contains_blocked_word(
             return True
 
     return False
+def contains_emoji(text: str) -> bool:
+    if not text:
+        return False
 
+    for ch in text:
+        code = ord(ch)
+        if (
+            0x1F300 <= code <= 0x1FAFF   # اکثر ایموجی‌ها
+            or 0x2600 <= code <= 0x27BF  # نمادها
+            or 0x2300 <= code <= 0x23FF
+            or 0x2B00 <= code <= 0x2BFF
+            or code in (0x200D, 0xFE0F)  # ترکیب‌کننده‌های ایموجی
+        ):
+            return True
+    return False
 
 # =========================================================
 # VALIDATION
@@ -1280,6 +1294,11 @@ def validate_submission(
             False,
             "🚫 این پیام به دلیل استفاده از کلمات غیرمجاز قابل ارسال نیست.",
         )
+        if contains_emoji(text):
+    return (
+        False,
+        "🚫 ارسال ایموجی مجاز نیست.",
+    )
 
     if not text.startswith(
         "صدام بزن"
