@@ -1403,6 +1403,41 @@ class Database:
             (admin_id,),
         ).fetchall()
 
+
+    def clear_pending_messages(self):
+        with self.lock:
+
+            rows = self.conn.execute(
+                """
+                SELECT DISTINCT user_id
+                FROM messages
+                WHERE status IN ('pending', 'queued')
+                """
+            ).fetchall()
+
+            if not rows:
+                return []
+
+            user_ids = [
+                int(row["user_id"])
+                for row in rows
+            ]
+
+            self.conn.execute(
+                """
+                UPDATE messages
+                SET
+                    status = 'cleared',
+                    admin_id = NULL,
+                    shift_id = NULL
+                WHERE status IN ('pending', 'queued')
+                """
+            )
+
+            self._commit()
+
+            return user_ids
+
     def get_queued_messages(
         self,
         limit: int = 100,

@@ -1283,6 +1283,19 @@ def review_keyboard(
     )
 
 
+def clear_pending_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑 پاک‌سازی کل صف",
+                    callback_data="pending:clear_all",
+                )
+            ]
+        ]
+    )
+
+
 def reject_keyboard(
     message_id: int,
 ):
@@ -1825,13 +1838,20 @@ async def pending_messages(
         await message.answer(
             "📥 فعلاً پیام در انتظاری وجود ندارد.",
             reply_markup=(
-                owner_keyboard(
-                    db.is_bot_enabled()
-                )
+                clear_pending_keyboard()
                 if db.is_owner(user_id)
                 else admin_keyboard()
             ),
         )
+
+        if db.is_owner(user_id):
+
+            await message.answer(
+                "پنل مالک:",
+                reply_markup=owner_keyboard(
+                    db.is_bot_enabled()
+                ),
+            )
 
         return
 
@@ -1874,61 +1894,128 @@ async def pending_messages(
             "دوباره «📥 پیام‌های در انتظار» را بزن."
         )
 
-    await message.answer(
-        summary,
-        reply_markup=(
-            owner_keyboard(
-                db.is_bot_enabled()
-            )
-            if db.is_owner(user_id)
-            else admin_keyboard()
-        ),
-    )
-
-
-async def can_review(
-    user_id: int,
-    row,
-):
-
     if db.is_owner(user_id):
-        return True
 
-    admin = db.get_admin(
-        user_id
-    )
+        await message.answer(
+            summary,
+            reply_markup=clear_pending_keyboard(),
+        )
 
-    return bool(
-        admin
-        and admin["user_id"]
-        == row["admin_id"]
-    )
+        await message.answer(
+            "پنل مالک:",
+            reply_markup=owner_keyboard(
+                db.is_bot_enabled()
+            ),
+        )
+
+    else:
+
+        await message.answer(
+            summary,
+            reply_markup=admin_keyboard(),
+        )
 
 
-async def edit_original_admin_message(
+@router.callback_query(
+    F.data == "pending:clear_all"
+)
+async def clear_all_pending_callback(
+    callback: CallbackQuery,
     bot: Bot,
-    row,
-    text: str,
 ):
 
-    if not row["admin_message_id"]:
+    user_id = callback.from_user.id
+
+    if not db.is_owner(user_id):
+
+        await callback.answer(
+            "⛔ فقط مالک می‌تواند صف را پاک‌سازی کند.",
+            show_alert=True,
+        )
+
         return
+
+    user_ids = db.clear_pending_messages()
+
+    if not user_ids:
+
+        await callback.answer(
+            "📥 صف پیام‌ها از قبل خالی است.",
+            show_alert=True,
+        )
+
+        try:
+            await callback.message.edit_text(
+                "📥 فعلاً پیام در انتظاری وجود ندارد.",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        return
+
+    notification_text = (
+        "⚠️ پیام شما از صف بررسی پاک شد.\n\n"
+        "این پیام بررسی نخواهد شد.\n"
+        "اگر هنوز می‌خواهید پیام‌تان بررسی شود، "
+        "لطفاً آن را دوباره ارسال کنید."
+    )
+
+    notified = 0
+    failed = 0
+
+    for target_user_id in user_ids:
+
+        try:
+
+            await bot.send_message(
+                chat_id=target_user_id,
+                text=notification_text,
+            )
+
+            notified += 1
+
+        except Exception:
+
+            failed += 1
+
+            logger.exception(
+                "CLEAR QUEUE NOTIFICATION ERROR | "
+                "user_id=%s",
+                target_user_id,
+            )
+
+        await asyncio.sleep(0.05)
+
+    await callback.answer(
+        "✅ صف با موفقیت پاک‌سازی شد.",
+        show_alert=True,
+    )
+
+    result_text = (
+        "🗑 صف پیام‌های در انتظار پاک‌سازی شد.\n\n"
+        f"📨 تعداد کاربران اطلاع‌رسانی‌شده: {notified}"
+    )
+
+    if failed:
+
+        result_text += (
+            f"\n⚠️ اطلاع‌رسانی ناموفق: {failed}"
+        )
 
     try:
 
-        await bot.edit_message_text(
-            chat_id=row["admin_id"],
-            message_id=row["admin_message_id"],
-            text=text,
+        await callback.message.edit_text(
+            result_text,
+            reply_markup=None,
         )
 
     except Exception:
-        pass
 
+        logger.exception(
+            "CLEAR QUEUE EDIT MESSAGE ERROR"
+        )
 
-# =========================================================
-# APPROVE
-# =========================================================
 
 @router.callback_query(
     F.data.startswith("approve:")
