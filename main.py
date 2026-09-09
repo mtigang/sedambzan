@@ -94,6 +94,9 @@ class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
     """
     api.telegram.org را مستقیماً به IPهای مشخص‌شده resolve می‌کند.
     hostname همچنان api.telegram.org باقی می‌ماند تا SNI/TLS درست باشد.
+    اگر resolve با IPهای ثابت شکست بخورد یا نتیجه‌ای ندهد، به DNS معمولی
+    سیستم fallback می‌کند تا در صورت تغییر IP تلگرام یا بلاک‌شدن یکی از
+    IPها، ربات کاملاً از کار نیفتد.
     """
 
     def __init__(self, ips: list[str]):
@@ -129,17 +132,46 @@ class TelegramFixedIPResolver(aiohttp.abc.AbstractResolver):
                 for info in infos
             ]
 
-        return [
-            {
-                "hostname": host,
-                "host": ip,
-                "port": port,
-                "family": socket.AF_INET,
-                "proto": 0,
-                "flags": 0,
-            }
-            for ip in self._ips
-        ]
+        try:
+            return [
+                {
+                    "hostname": host,
+                    "host": ip,
+                    "port": port,
+                    "family": socket.AF_INET,
+                    "proto": 0,
+                    "flags": 0,
+                }
+                for ip in self._ips
+            ]
+        except Exception:
+            logger.exception(
+                "FIXED IP RESOLVE ERROR | host=%s | falling back to system DNS",
+                host,
+            )
+
+            loop = asyncio.get_running_loop()
+
+            infos = await loop.getaddrinfo(
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+                family=family,
+            )
+
+            return [
+                {
+                    "hostname": host,
+                    "host": info[4][0],
+                    "port": port,
+                    "family": info[0],
+                    "proto": info[4][1]
+                    if len(info[4]) > 1
+                    else 0,
+                    "flags": 0,
+                }
+                for info in infos
+            ]
 
     async def close(self):
         pass
@@ -697,6 +729,29 @@ def shift_entities(
             pass
 
     return result
+
+
+def get_message_entities(row) -> list:
+    """
+    مقدار entities یک ردیف پیام را با فرمت یکسان برمی‌گرداند،
+    صرف‌نظر از اینکه ستون در دیتابیس entities باشد یا entities_json.
+    این تابع نقطه‌ی واحد خواندن entities است تا تناقض بین بخش‌های
+    مختلف کد (مثل send_review_message و approve_callback) از بین برود.
+    """
+
+    if isinstance(row, dict):
+        raw = row.get("entities_json", row.get("entities"))
+    else:
+        keys = row.keys() if hasattr(row, "keys") else []
+
+        if "entities_json" in keys:
+            raw = row["entities_json"]
+        elif "entities" in keys:
+            raw = row["entities"]
+        else:
+            raw = None
+
+    return deserialize_entities(raw)
 
 
 # =========================================================
@@ -1687,19 +1742,7 @@ async def send_review_message(
         f"👤 ارسال‌کننده: {sender}\n\n"
     )
 
-    entities_data = (
-        row["entities"]
-        if isinstance(row, dict)
-        else json.loads(
-            row["entities_json"]
-        )
-        if row["entities_json"]
-        else []
-    )
-
-    original_entities = deserialize_entities(
-        entities_data
-    )
+    original_entities = get_message_entities(row)
 
     entities = shift_entities(
         original_entities,
@@ -1755,16 +1798,47 @@ async def pending_messages(
 
         return
 
+    sent_count = 0
+    failed_count = 0
+
     for row in rows:
 
-        await send_review_message(
-            bot,
-            user_id,
-            row,
+        try:
+
+            await send_review_message(
+                bot,
+                user_id,
+                row,
+            )
+
+            sent_count += 1
+
+        except Exception:
+
+            failed_count += 1
+
+            logger.exception(
+                "PENDING MESSAGES SEND ERROR | "
+                "message_id=%s | to_user=%s",
+                row["id"],
+                user_id,
+            )
+
+            continue
+
+        await asyncio.sleep(0.05)
+
+    summary = f"📥 {sent_count} پیام نمایش داده شد."
+
+    if failed_count:
+        summary += (
+            f"\n⚠️ {failed_count} پیام ارسال نشد "
+            "(محدودیت Telegram یا خطای موقت). "
+            "دوباره «📥 پیام‌های در انتظار» را بزن."
         )
 
     await message.answer(
-        f"📥 {len(rows)} پیام نمایش داده شد.",
+        summary,
         reply_markup=(
             owner_keyboard(
                 db.is_bot_enabled()
@@ -1896,9 +1970,7 @@ async def approve_callback(
         sent = await bot.send_message(
             chat_id=channel_id,
             text=row["content"],
-            entities=deserialize_entities(
-                row["entities_json"]
-            ),
+            entities=get_message_entities(row),
         )
 
     except Exception as e:
@@ -2242,15 +2314,19 @@ async def admin_stats(
         user_id
     )
 
+    reviewed = stats["reviewed"] or 0
+    avg_seconds = stats["avg_seconds"] or 0
     avg_minutes = (
-        stats["avg_seconds"] / 60
+        avg_seconds / 60
+        if reviewed
+        else 0
     )
 
     await message.answer(
         (
             "📊 عملکرد من\n\n"
             f"📨 بررسی‌شده: "
-            f"{stats['reviewed']}\n"
+            f"{reviewed}\n"
             f"🟢 تأییدشده: "
             f"{stats['approved']}\n"
             f"🔴 ردشده: "
@@ -2888,20 +2964,22 @@ def group_shift_hourly_keyboard():
 
     # بازه باقی‌مانده از ساعت فعلی
     # مثال: 18:27 تا 19:00
+    # اگر ساعت فعلی نزدیک پایان شب باشد (مثلاً 23:15)، بازه‌ی باقی‌مانده
+    # باید تا 00:00 (شروع روز بعد) به‌عنوان شیفت شب معتبر ثبت شود، نه
+    # اینکه به‌خاطر next_hour == 24 کلاً حذف شود.
     if now.minute > 0 or now.second > 0 or now.microsecond > 0:
         next_hour = now.hour + 1
 
-        if next_hour < 24:
-            end = f"{next_hour:02d}:00"
+        end = f"{next_hour % 24:02d}:00"
 
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"⏰ {now.strftime('%H:%M')} تا {end}",
-                        callback_data=f"group_shift_time:{now.strftime('%H:%M')}-{end}",
-                    )
-                ]
-            )
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"⏰ {now.strftime('%H:%M')} تا {end}",
+                    callback_data=f"group_shift_time:{now.strftime('%H:%M')}-{end}",
+                )
+            ]
+        )
 
         first_hour = now.hour + 1
 
@@ -4651,7 +4729,7 @@ async def handle_state(
 
             return True
 
-       # =====================================================
+    # =====================================================
     # GROUP SHIFT
     # فقط TODAY
     # =====================================================
@@ -4821,52 +4899,6 @@ async def handle_state(
                     f"⏰ {start} تا {end}\n\n"
                     "ℹ️ هر ادمین حداکثر ۲ شیفت "
                     "و مجموعاً ۲ ساعت در روز می‌تواند داشته باشد."
-                )
-            )
-
-            return True
-            # =================================================
-            # همیشه امروز
-            # هیچ permanent یا date انتخابی از ادمین قبول نمی‌شود
-            # =================================================
-
-            permanent = False
-            specific_date = today_string()
-
-            try:
-
-                shift_id = db.create_shift(
-                    start_time=start,
-                    end_time=end,
-                    admin_id=user_id,
-                    permanent=False,
-                    specific_date=specific_date,
-                )
-
-            except Exception:
-
-                logger.exception(
-                    "GROUP CREATE TODAY SHIFT ERROR | "
-                    "admin_id=%s | date=%s",
-                    user_id,
-                    specific_date,
-                )
-
-                await message.answer(
-                    "❌ ثبت شیفت ناموفق بود."
-                )
-
-                return True
-
-            clear_state(
-                user_id
-            )
-
-            await message.answer(
-                (
-                    "✅ شیفت امروز شما ثبت شد.\n\n"
-                    f"📅 {specific_date}\n"
-                    f"⏰ {start} تا {end}"
                 )
             )
 
