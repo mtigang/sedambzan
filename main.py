@@ -1997,7 +1997,56 @@ async def send_review_message(
             message_id
         ),
     )
+async def can_review(user_id: int, row) -> bool:
+    if db.is_owner(user_id):
+        return True
 
+    admin = db.get_admin(user_id)
+    if not admin:
+        return False
+
+    try:
+        msg_admin_id = row["admin_id"]
+    except Exception:
+        msg_admin_id = None
+
+    if msg_admin_id is not None and int(msg_admin_id) != int(user_id):
+        return False
+
+    current = get_current_shift_safe()
+    if not current:
+        return False
+
+    return int(current[0]["admin_id"]) == int(user_id)
+
+
+async def edit_original_admin_message(bot: Bot, row, text: str):
+    try:
+        admin_message_id = row["admin_message_id"]
+    except Exception:
+        admin_message_id = None
+
+    try:
+        admin_id = row["admin_id"]
+    except Exception:
+        admin_id = None
+
+    if not admin_message_id or not admin_id:
+        return
+
+    try:
+        await bot.edit_message_text(
+            chat_id=admin_id,
+            message_id=admin_message_id,
+            text=text,
+            reply_markup=None,
+        )
+    except Exception:
+        logger.exception(
+            "EDIT ORIGINAL ADMIN MESSAGE ERROR | message_id=%s | admin_id=%s",
+            row["id"],
+            admin_id,
+        )
 
 @router.message(
     F.text == "📥 پیام‌های در انتظار",
