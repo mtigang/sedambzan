@@ -372,9 +372,11 @@ def get_started_users():
     ).fetchall()
 
 
-def get_user_message_stats():
-    return db.conn.execute(
-        """
+def get_user_message_stats(
+    limit: int | None = None,
+    offset: int = 0,
+):
+    query = """
         SELECT
             u.user_id,
             u.username,
@@ -387,8 +389,43 @@ def get_user_message_stats():
         WHERE u.started = 1
         GROUP BY u.user_id
         ORDER BY message_count DESC, u.user_id
-        """
+    """
+
+    params: tuple = ()
+
+    if limit is not None:
+        query += " LIMIT ? OFFSET ?"
+        params = (limit, offset)
+
+    return db.conn.execute(
+        query,
+        params,
     ).fetchall()
+
+
+def get_user_total_messages(user_id: int) -> int:
+    row = db.conn.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM messages
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+    return row["total"] if row else 0
+
+
+def get_user_message_stats_count() -> int:
+    row = db.conn.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM users
+        WHERE started = 1
+        """
+    ).fetchone()
+
+    return row["total"] if row else 0
 
 
 def get_all_admin_stats():
@@ -3564,8 +3601,11 @@ async def owner_stats_menu(
     )
 
 
+USER_STATS_PAGE_SIZE = 50
+
+
 @router.callback_query(
-    F.data == "stats:users"
+    F.data.startswith("stats:users")
 )
 async def stats_users(
     callback: CallbackQuery,
@@ -3583,46 +3623,256 @@ async def stats_users(
 
         return
 
-    rows = get_user_message_stats()
+    parts = callback.data.split(":")
+
+    try:
+        page = int(parts[2]) if len(parts) > 2 else 0
+    except ValueError:
+        page = 0
+
+    if page < 0:
+        page = 0
+
+    # جواب سریع به Telegram تا کوئری callback منقضی نشود؛
+    # واکشی mention برای ۵۰ کاربر ممکن است چند ثانیه طول بکشد.
+    await callback.answer()
+
+    total = get_user_message_stats_count()
+
+    rows = get_user_message_stats(
+        limit=USER_STATS_PAGE_SIZE,
+        offset=page * USER_STATS_PAGE_SIZE,
+    )
+
+    total_pages = max(
+        1,
+        (total + USER_STATS_PAGE_SIZE - 1) // USER_STATS_PAGE_SIZE,
+    )
 
     lines = [
-        "👤 آمار پیام کاربران\n"
+        f"👤 آمار پیام کاربران "
+        f"(صفحه {page + 1} از {total_pages} — "
+        f"{total} کاربر)\n",
+        "برای دیدن جزئیات هر کاربر، روی نامش بزن:",
     ]
 
     if not rows:
 
         lines.append(
-            "هنوز کاربری پیامی ارسال نکرده."
+            "\nهنوز کاربری پیامی ارسال نکرده."
         )
+
+    buttons = []
 
     for row in rows:
 
-        mention = await mention_user(
-            bot,
-            row["user_id"],
+        label = (
+            " ".join(
+                x
+                for x in (
+                    row["first_name"],
+                    row["last_name"],
+                )
+                if x
+            ).strip()
+            or (
+                f"@{row['username']}"
+                if row["username"]
+                else str(row["user_id"])
+            )
         )
 
-        lines.append(
-            f"• {mention} — "
-            f"{row['message_count']} پیام"
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{label} — {row['message_count']} پیام",
+                    callback_data=(
+                        f"user_info:{row['user_id']}:{page}"
+                    ),
+                )
+            ]
         )
+
+    nav_row = []
+
+    if page > 0:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="◀️ صفحه قبل",
+                callback_data=f"stats:users:{page - 1}",
+            )
+        )
+
+    if (page + 1) * USER_STATS_PAGE_SIZE < total:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="▶️ صفحه بعد",
+                callback_data=f"stats:users:{page + 1}",
+            )
+        )
+
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="🔙 بازگشت",
+                callback_data="stats:menu",
+            )
+        ]
+    )
+
+    try:
+
+        await callback.message.edit_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=buttons
+            ),
+        )
+
+    except Exception:
+
+        logger.exception(
+            "STATS USERS EDIT ERROR | page=%s",
+            page,
+        )
+
+        try:
+
+            await callback.message.answer(
+                "\n".join(lines),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=buttons
+                ),
+            )
+
+        except Exception:
+
+            logger.exception(
+                "STATS USERS ANSWER ERROR | page=%s",
+                page,
+            )
+
+
+@router.callback_query(
+    F.data.startswith("user_info:")
+)
+async def user_info_callback(
+    callback: CallbackQuery,
+):
+
+    if not db.is_owner(
+        callback.from_user.id
+    ):
+
+        await callback.answer(
+            "⛔ دسترسی ندارید.",
+            show_alert=True,
+        )
+
+        return
+
+    parts = callback.data.split(":")
+
+    try:
+        target_id = int(parts[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+
+    try:
+        back_page = int(parts[2]) if len(parts) > 2 else 0
+    except ValueError:
+        back_page = 0
 
     await callback.answer()
 
-    await callback.message.edit_text(
-        "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔙 بازگشت",
-                        callback_data="stats:menu",
-                    )
-                ]
-            ]
-        ),
+    row = db.get_user(target_id)
+
+    name = (
+        " ".join(
+            x
+            for x in (
+                row["first_name"],
+                row["last_name"],
+            )
+            if x
+        ).strip()
+        if row
+        else ""
+    ) or "نامشخص"
+
+    username = (
+        f"@{escape(row['username'])}"
+        if row and row["username"]
+        else "ندارد"
     )
+
+    message_count = get_user_total_messages(
+        target_id
+    )
+
+    text = (
+        "◂ نام کاربر : "
+        f"{escape(name)}\n"
+        "◂ آیدی عددی : "
+        f"<code>{target_id}</code>\n"
+        "◂ یوزرنیم : "
+        f"{username}\n"
+        "◂ تعداد پیام‌های ارسال‌شده : "
+        f"{message_count}"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔓 باز کردن پیوی",
+                    url=f"tg://user?id={target_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 بازگشت به لیست",
+                    callback_data=f"stats:users:{back_page}",
+                )
+            ],
+        ]
+    )
+
+    try:
+
+        await callback.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "USER INFO EDIT ERROR | target_id=%s",
+            target_id,
+        )
+
+        try:
+
+            await callback.message.answer(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+
+        except Exception:
+
+            logger.exception(
+                "USER INFO ANSWER ERROR | target_id=%s",
+                target_id,
+            )
 
 
 @router.callback_query(
