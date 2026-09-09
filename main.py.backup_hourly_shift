@@ -1729,12 +1729,15 @@ async def pending_messages(
 
     if db.is_owner(user_id):
 
-        rows = db.get_all_pending()
+        rows = db.get_all_pending(
+            PENDING_MESSAGES_PAGE_SIZE
+        )
 
     elif db.get_admin(user_id):
 
         rows = db.get_pending_for_admin(
-            user_id
+            user_id,
+            PENDING_MESSAGES_PAGE_SIZE,
         )
 
     else:
@@ -2304,205 +2307,21 @@ async def owner_admins(
             f"• {mention}"
         )
 
-    buttons = [[
-        InlineKeyboardButton(
-            text="➕ افزودن ادمین",
-            callback_data="admin:add",
-        )
-    ]]
-
-    if admins:
-        buttons.append([InlineKeyboardButton(
-            text="🗑 حذف ادمین",
-            callback_data="admin:delete",
-        )])
-
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=buttons
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="➕ افزودن ادمین",
+                    callback_data="admin:add",
+                )
+            ]
+        ]
     )
 
     await message.answer(
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard,
-    )
-
-
-@router.callback_query(
-    F.data == "admin:delete"
-)
-async def owner_delete_admin_start(
-    callback: CallbackQuery,
-):
-    if not db.is_owner(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-
-    admins = db.get_admins()
-
-    if not admins:
-        await callback.answer(
-            "⚠️ هیچ ادمینی ثبت نشده است.",
-            show_alert=True,
-        )
-        return
-
-    buttons = []
-
-    for admin in admins:
-        name = admin["name"] or str(admin["user_id"])
-
-        buttons.append([InlineKeyboardButton(
-            text=f"🗑 {name}",
-            callback_data=f"admin:delete_select:{admin['user_id']}",
-        )])
-
-    buttons.append([InlineKeyboardButton(
-        text="❌ انصراف",
-        callback_data="admin:delete_cancel",
-    )])
-
-    await callback.answer()
-
-    await callback.message.answer(
-        "🗑 <b>حذف ادمین</b>\n\n"
-        "ادمینی که می‌خواهی حذف شود را انتخاب کن:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=buttons
-        ),
-    )
-
-
-@router.callback_query(
-    F.data.startswith("admin:delete_select:")
-)
-async def owner_delete_admin_select(
-    callback: CallbackQuery,
-):
-    if not db.is_owner(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-
-    try:
-        admin_id = int(callback.data.split(":")[-1])
-    except ValueError:
-        await callback.answer("❌ ادمین نامعتبر است.", show_alert=True)
-        return
-
-    admin = db.get_admin(admin_id)
-
-    if not admin:
-        await callback.answer(
-            "⚠️ این ادمین وجود ندارد.",
-            show_alert=True,
-        )
-        return
-
-    name = admin["name"] or str(admin_id)
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(
-                text="✅ بله، حذف شود",
-                callback_data=f"admin:delete_confirm:{admin_id}",
-            )],
-            [InlineKeyboardButton(
-                text="❌ انصراف",
-                callback_data="admin:delete_cancel",
-            )],
-        ]
-    )
-
-    await callback.answer()
-
-    await callback.message.answer(
-        "⚠️ <b>تأیید حذف ادمین</b>\n\n"
-        f"👤 ادمین: <b>{name}</b>\n"
-        f"🆔 <code>{admin_id}</code>\n\n"
-        "آیا مطمئنی که می‌خواهی این ادمین حذف شود؟",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
-    )
-
-
-@router.callback_query(
-    F.data.startswith("admin:delete_confirm:")
-)
-async def owner_delete_admin_confirm(
-    callback: CallbackQuery,
-):
-    if not db.is_owner(callback.from_user.id):
-        await callback.answer(
-            "⛔ دسترسی ندارید.",
-            show_alert=True,
-        )
-        return
-
-    try:
-        admin_id = int(callback.data.split(":")[-1])
-    except ValueError:
-        await callback.answer(
-            "❌ ادمین نامعتبر است.",
-            show_alert=True,
-        )
-        return
-
-    admin = db.get_admin(admin_id)
-
-    if not admin:
-        await callback.answer(
-            "⚠️ این ادمین قبلاً حذف شده است.",
-            show_alert=True,
-        )
-        return
-
-    name = admin["name"] or str(admin_id)
-
-    try:
-        db.delete_admin(admin_id)
-    except Exception:
-        logger.exception(
-            "ADMIN DELETE ERROR | admin_id=%s",
-            admin_id,
-        )
-
-        await callback.answer(
-            "❌ حذف ادمین انجام نشد؛ رکوردهای وابسته وجود دارد.",
-            show_alert=True,
-        )
-        return
-
-    await callback.answer(
-        "✅ ادمین حذف شد.",
-        show_alert=True,
-    )
-
-    await callback.message.answer(
-        "✅ <b>ادمین با موفقیت حذف شد.</b>\n\n"
-        f"👤 {name}\n"
-        f"🆔 <code>{admin_id}</code>",
-        parse_mode=ParseMode.HTML,
-    )
-
-
-@router.callback_query(
-    F.data == "admin:delete_cancel"
-)
-async def owner_delete_admin_cancel(
-    callback: CallbackQuery,
-):
-    if not db.is_owner(callback.from_user.id):
-        await callback.answer(
-            "⛔ دسترسی ندارید.",
-            show_alert=True,
-        )
-        return
-
-    await callback.answer("❌ عملیات لغو شد.")
-
-    await callback.message.answer(
-        "عملیات حذف ادمین لغو شد."
     )
 
 
@@ -2878,56 +2697,6 @@ async def select_shift_admin(
 
 
 # =========================================================
-# GROUP SHIFT HOURLY KEYBOARD
-# =========================================================
-
-def group_shift_hourly_keyboard():
-    now = local_now()
-
-    buttons = []
-
-    # بازه باقی‌مانده از ساعت فعلی
-    # مثال: 18:27 تا 19:00
-    if now.minute > 0 or now.second > 0 or now.microsecond > 0:
-        next_hour = now.hour + 1
-
-        if next_hour < 24:
-            end = f"{next_hour:02d}:00"
-
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"⏰ {now.strftime('%H:%M')} تا {end}",
-                        callback_data=f"group_shift_time:{now.strftime('%H:%M')}-{end}",
-                    )
-                ]
-            )
-
-        first_hour = now.hour + 1
-
-    else:
-        first_hour = now.hour
-
-    # ساعت‌های کامل باقی‌مانده امروز
-    for hour in range(first_hour, 24):
-        start_time = f"{hour:02d}:00"
-        end_hour = (hour + 1) % 24
-        end_time = f"{end_hour:02d}:00"
-
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"⏰ {start_time} تا {end_time}",
-                    callback_data=f"group_shift_time:{start_time}-{end_time}",
-                )
-            ]
-        )
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=buttons
-    )
-
-# =========================================================
 # GROUP SHIFT
 # فقط امروز
 # =========================================================
@@ -3072,249 +2841,20 @@ async def group_shift_callback(
         date=today_string(),
     )
 
-    logger.info(
-        "GROUP SHIFT MENU | user_id=%s | group_id=%s | date=%s",
-        callback.from_user.id,
-        group_id,
-        today_string(),
+    text = (
+        "📅 شیفت امروز\n\n"
+        "بازه زمانی را بفرست.\n\n"
+        "مثال:\n"
+        "09:00-17:00\n"
+        "یا\n"
+        "23:00-02:00"
     )
 
     await callback.answer()
 
     await callback.message.answer(
-        (
-            "📅 <b>شیفت امروز</b>\n\n"
-            "⏰ یکی از بازه‌های یک‌ساعته زیر را انتخاب کن:"
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=group_shift_hourly_keyboard(),
+        text
     )
-
-
-# =========================================================
-# GROUP SHIFT HOURLY CALLBACK
-# =========================================================
-
-@router.callback_query(
-    F.data.startswith("group_shift_time:")
-)
-async def group_shift_hourly_callback(
-    callback: CallbackQuery,
-):
-
-    user_id = callback.from_user.id
-
-    try:
-
-        logger.info(
-            "GROUP SHIFT BUTTON CLICK | user_id=%s | data=%s",
-            user_id,
-            callback.data,
-        )
-
-        if not callback.message:
-
-            logger.error(
-                "GROUP SHIFT ERROR | callback.message is None | user_id=%s",
-                user_id,
-            )
-
-            await callback.answer(
-                "❌ پیام گروه پیدا نشد.",
-                show_alert=True,
-            )
-
-            return
-
-        group_id = configured_group_id()
-
-        if callback.message.chat.id != group_id:
-
-            logger.warning(
-                "GROUP SHIFT WRONG GROUP | user_id=%s | chat_id=%s | configured=%s",
-                user_id,
-                callback.message.chat.id,
-                group_id,
-            )
-
-            await callback.answer(
-                "⛔ این گروه مجاز نیست.",
-                show_alert=True,
-            )
-
-            return
-
-        admin = db.get_admin(user_id)
-
-        if not admin:
-
-            logger.warning(
-                "GROUP SHIFT NOT ADMIN | user_id=%s | group_id=%s",
-                user_id,
-                group_id,
-            )
-
-            await callback.answer(
-                "⛔ شما به عنوان ادمین ثبت نشده‌اید.",
-                show_alert=True,
-            )
-
-            return
-
-        if not user_started(user_id):
-
-            logger.warning(
-                "GROUP SHIFT NOT STARTED | user_id=%s",
-                user_id,
-            )
-
-            await callback.answer(
-                "⚠️ ابتدا ربات را در پیوی Start کن.",
-                show_alert=True,
-            )
-
-            return
-
-        value = callback.data.split(
-            ":",
-            1,
-        )[1]
-
-        parsed = parse_time_range(value)
-
-        if not parsed:
-
-            logger.error(
-                "GROUP SHIFT INVALID TIME | user_id=%s | value=%s",
-                user_id,
-                value,
-            )
-
-            await callback.answer(
-                "❌ بازه زمانی نامعتبر است.",
-                show_alert=True,
-            )
-
-            return
-
-        start, end = parsed
-
-        specific_date = today_string()
-
-        logger.info(
-            "GROUP SHIFT LIMIT CHECK | user_id=%s | start=%s | end=%s | date=%s",
-            user_id,
-            start,
-            end,
-            specific_date,
-        )
-
-        allowed, reason = db.check_admin_shift_limit(
-            admin_id=user_id,
-            start_time=start,
-            end_time=end,
-            specific_date=specific_date,
-        )
-
-        if not allowed:
-
-            logger.warning(
-                "GROUP SHIFT LIMIT REJECTED | user_id=%s | start=%s | end=%s | date=%s | reason=%s",
-                user_id,
-                start,
-                end,
-                specific_date,
-                reason,
-            )
-
-            await callback.answer(
-                reason,
-                show_alert=True,
-            )
-
-            return
-
-        logger.info(
-            "GROUP SHIFT CREATE START | user_id=%s | start=%s | end=%s | date=%s",
-            user_id,
-            start,
-            end,
-            specific_date,
-        )
-
-        try:
-
-            shift_id = db.create_shift(
-                start_time=start,
-                end_time=end,
-                admin_id=user_id,
-                permanent=False,
-                specific_date=specific_date,
-            )
-
-        except Exception:
-
-            logger.exception(
-                "GROUP SHIFT DATABASE ERROR | user_id=%s | start=%s | end=%s | date=%s",
-                user_id,
-                start,
-                end,
-                specific_date,
-            )
-
-            await callback.answer(
-                "❌ خطا در ثبت شیفت. لاگ ثبت شد.",
-                show_alert=True,
-            )
-
-            await callback.message.answer(
-                "❌ ثبت شیفت انجام نشد. خطای سیستم در لاگ ثبت شده است."
-            )
-
-            return
-
-        clear_state(user_id)
-
-        logger.info(
-            "GROUP SHIFT SUCCESS | shift_id=%s | user_id=%s | group_id=%s | date=%s | start=%s | end=%s",
-            shift_id,
-            user_id,
-            group_id,
-            specific_date,
-            start,
-            end,
-        )
-
-        await callback.answer(
-            "✅ شیفت ثبت شد.",
-            show_alert=True,
-        )
-
-        await callback.message.answer(
-            (
-                "✅ <b>شیفت شما با موفقیت ثبت شد.</b>\n\n"
-                f"📅 تاریخ: <b>{specific_date}</b>\n"
-                f"⏰ ساعت: <b>{start} تا {end}</b>\n\n"
-                "🔁 این شیفت فقط برای امروز است."
-            ),
-            parse_mode=ParseMode.HTML,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "GROUP SHIFT CALLBACK UNEXPECTED ERROR | user_id=%s | data=%s",
-            user_id,
-            getattr(callback, "data", None),
-        )
-
-        try:
-            await callback.answer(
-                "❌ یک خطای غیرمنتظره رخ داد. لاگ ثبت شد.",
-                show_alert=True,
-            )
-        except Exception:
-            pass
 
 
 # =========================================================
@@ -3823,40 +3363,6 @@ async def owner_security(
 # CHANNEL / SETTINGS
 # =========================================================
 
-@router.callback_query(
-    F.data == "channel:change"
-)
-async def change_channel(
-    callback: CallbackQuery,
-):
-    if not db.is_owner(
-        callback.from_user.id
-    ):
-        await callback.answer(
-            "⛔ فقط Owner اجازه این کار را دارد.",
-            show_alert=True,
-        )
-        return
-
-    set_state(
-        callback.from_user.id,
-        "channel_change",
-    )
-
-    await callback.answer()
-
-    await callback.message.answer(
-        (
-            "🔄 تغییر کانال\n\n"
-            "برای انتخاب کانال جدید، یک پست از "
-            "کانال موردنظر را همینجا برای من فوروارد کن.\n\n"
-            "⚠️ قبل از این کار مطمئن شو ربات در کانال جدید "
-            "ادمین و دارای اجازه ارسال پیام است.\n\n"
-            "❌ برای لغو، /start را بزن."
-        )
-    )
-
-
 @router.message(
     F.text == "📢 کانال",
     F.chat.type == "private",
@@ -3924,17 +3430,6 @@ async def owner_channel(
             f"🔴 خطا: {str(e)[:180]}"
         )
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔄 تغییر کانال",
-                    callback_data="channel:change",
-                )
-            ]
-        ]
-    )
-
     await message.answer(
         (
             "📢 تنظیمات کانال\n\n"
@@ -3946,7 +3441,9 @@ async def owner_channel(
             "ادمین و دارای اجازه ارسال پیام باشد."
         ),
         parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
+        reply_markup=owner_keyboard(
+            db.is_bot_enabled()
+        ),
     )
 
 
@@ -4043,163 +3540,6 @@ async def handle_state(
 
     kind = state["kind"]
     text = message.text or ""
-
-    # =====================================================
-    # CHANNEL CHANGE
-    # =====================================================
-
-    if kind == "channel_change":
-
-        if message.chat.type != "private":
-            return True
-
-        if not db.is_owner(user_id):
-            clear_state(user_id)
-            return True
-
-        forwarded_chat = None
-
-        # aiogram 3.x
-        if getattr(message, "forward_origin", None):
-
-            origin = message.forward_origin
-
-            if getattr(origin, "type", None) == "channel":
-                forwarded_chat = getattr(
-                    origin,
-                    "chat",
-                    None,
-                )
-
-        if not forwarded_chat:
-
-            await message.answer(
-                (
-                    "❌ این پیام از یک کانال فوروارد نشده است.\n\n"
-                    "لطفاً یک پست را مستقیماً از کانال جدید "
-                    "برای من فوروارد کن."
-                )
-            )
-
-            return True
-
-        channel_id = getattr(
-            forwarded_chat,
-            "id",
-            None,
-        )
-
-        if not channel_id:
-
-            await message.answer(
-                "❌ نتوانستم آیدی کانال را تشخیص بدهم."
-            )
-
-            return True
-
-        # بررسی اتصال به کانال
-        try:
-
-            chat = await bot.get_chat(
-                channel_id
-            )
-
-            if getattr(chat, "type", None) != "channel":
-
-                await message.answer(
-                    "❌ مقصد انتخاب‌شده یک کانال معتبر نیست."
-                )
-
-                return True
-
-            # بررسی دسترسی ربات
-            me = await bot.get_me()
-
-            member = await bot.get_chat_member(
-                channel_id,
-                me.id,
-            )
-
-            status = getattr(
-                member,
-                "status",
-                None,
-            )
-
-            if status not in (
-                "administrator",
-                "creator",
-            ):
-
-                await message.answer(
-                    (
-                        "❌ ربات در این کانال ادمین نیست.\n\n"
-                        "ابتدا ربات را در کانال جدید ادمین کن "
-                        "و دوباره یک پست از آن فوروارد کن."
-                    )
-                )
-
-                return True
-
-        except Exception as e:
-
-            logger.exception(
-                "CHANNEL CHANGE ERROR | "
-                "channel_id=%s | error=%s",
-                channel_id,
-                e,
-            )
-
-            await message.answer(
-                (
-                    "❌ اتصال به کانال جدید موفق نبود.\n\n"
-                    "مطمئن شو ربات داخل کانال ادمین است "
-                    "و اجازه ارسال پیام دارد."
-                )
-            )
-
-            return True
-
-        # فقط بعد از تأیید موفق، تنظیم قبلی تغییر می‌کند.
-        db.set_channel_id(
-            channel_id
-        )
-
-        clear_state(
-            user_id
-        )
-
-        title = (
-            getattr(chat, "title", None)
-            or "کانال"
-        )
-
-        username = getattr(
-            chat,
-            "username",
-            None,
-        )
-
-        public = (
-            f"@{escape(username)}"
-            if username
-            else "کانال خصوصی"
-        )
-
-        await message.answer(
-            (
-                "✅ کانال با موفقیت تغییر کرد.\n\n"
-                f"🏷 نام: <b>{escape(title)}</b>\n"
-                f"📢 {public}\n"
-                f"🆔 <code>{channel_id}</code>"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=owner_keyboard(
-                db.is_bot_enabled()
-            ),
-        )
-
-        return True
 
     # =====================================================
     # USER MESSAGE

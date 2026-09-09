@@ -1377,19 +1377,25 @@ class Database:
             (message_id,),
         ).fetchone()
 
-    def get_all_pending(self):
+    def get_all_pending(
+        self,
+        limit: int = 20,
+    ):
         return self.conn.execute(
             """
             SELECT *
             FROM messages
             WHERE status = 'pending'
             ORDER BY submitted_at
-            """
+            LIMIT ?
+            """,
+            (limit,),
         ).fetchall()
 
     def get_pending_for_admin(
         self,
         admin_id: int,
+        limit: int = 20,
     ):
         return self.conn.execute(
             """
@@ -1399,8 +1405,12 @@ class Database:
                 status = 'pending'
                 AND admin_id = ?
             ORDER BY submitted_at
+            LIMIT ?
             """,
-            (admin_id,),
+            (
+                admin_id,
+                limit,
+            ),
         ).fetchall()
 
     def get_queued_messages(
