@@ -1294,11 +1294,12 @@ def validate_submission(
             False,
             "🚫 این پیام به دلیل استفاده از کلمات غیرمجاز قابل ارسال نیست.",
         )
-        if contains_emoji(text):
-    return (
-        False,
-        "🚫 ارسال ایموجی مجاز نیست.",
-    )
+
+    if contains_emoji(text):
+        return (
+            False,
+            "🚫 ارسال ایموجی مجاز نیست.",
+        )
 
     if not text.startswith(
         "صدام بزن"
