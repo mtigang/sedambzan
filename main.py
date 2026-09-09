@@ -514,13 +514,12 @@ def get_admin_rejected_messages(
     ).fetchall()
 
 
-def get_today_taken_shift_slots() -> set[str]:
+def get_taken_shift_slots(for_date: str | None = None) -> set[str]:
     """
-    بازه‌های زمانی شیفت‌های ثبت‌شده برای امروز را برمی‌گرداند
-    (فرمت: "HH:MM-HH:MM") تا در کیبورد گروه به‌عنوان انتخاب‌شده
-    نمایش داده شوند و از انتخاب تکراری جلوگیری شود.
+    بازه‌های زمانی شیفت‌های ثبت‌شده برای تاریخ مشخص را برمی‌گرداند
+    (فرمت: "HH:MM-HH:MM").
     """
-    today = today_string()
+    target = for_date or today_string()
     rows = db.conn.execute(
         """
         SELECT start_time, end_time
@@ -528,7 +527,7 @@ def get_today_taken_shift_slots() -> set[str]:
         WHERE specific_date = ?
            OR (permanent = 1 AND (specific_date IS NULL OR specific_date = ''))
         """,
-        (today,),
+        (target,),
     ).fetchall()
 
     taken: set[str] = set()
@@ -537,6 +536,10 @@ def get_today_taken_shift_slots() -> set[str]:
         end = str(row["end_time"]).strip()
         taken.add(f"{start}-{end}")
     return taken
+
+
+def get_today_taken_shift_slots() -> set[str]:
+    return get_taken_shift_slots(today_string())
 
 
 def is_shift_slot_taken(
@@ -1200,21 +1203,27 @@ def contains_blocked_word(
             return True
 
     return False
+
+
 def contains_emoji(text: str) -> bool:
+    """تشخیص هرگونه ایموجی در متن پیام کاربر."""
     if not text:
         return False
 
     for ch in text:
         code = ord(ch)
         if (
-            0x1F300 <= code <= 0x1FAFF   # اکثر ایموجی‌ها
-            or 0x2600 <= code <= 0x27BF  # نمادها
+            0x1F300 <= code <= 0x1FAFF
+            or 0x2600 <= code <= 0x27BF
             or 0x2300 <= code <= 0x23FF
             or 0x2B00 <= code <= 0x2BFF
-            or code in (0x200D, 0xFE0F)  # ترکیب‌کننده‌های ایموجی
+            or 0x1F000 <= code <= 0x1F02F
+            or 0x1F0A0 <= code <= 0x1F0FF
+            or code in (0x200D, 0xFE0F, 0x3030, 0x303D, 0x3297, 0x3299)
         ):
             return True
     return False
+
 
 # =========================================================
 # VALIDATION
@@ -1300,6 +1309,16 @@ def validate_submission(
             False,
             "🚫 ارسال ایموجی مجاز نیست.",
         )
+
+    for entity in entities:
+        if entity_type(entity) in {
+            "custom_emoji",
+            "emoji",
+        }:
+            return (
+                False,
+                "🚫 ارسال ایموجی مجاز نیست.",
+            )
 
     if not text.startswith(
         "صدام بزن"
@@ -1470,23 +1489,36 @@ def owner_keyboard(
     )
 
 
+def _btn(text: str, callback_data: str, style: str | None = None) -> InlineKeyboardButton:
+    """دکمه اینلاین؛ در صورت پشتیبانی aiogram از style رنگی استفاده می‌کند."""
+    kwargs = {
+        "text": text,
+        "callback_data": callback_data,
+    }
+    if style:
+        kwargs["style"] = style
+    try:
+        return InlineKeyboardButton(**kwargs)
+    except TypeError:
+        kwargs.pop("style", None)
+        return InlineKeyboardButton(**kwargs)
+
+
 def review_keyboard(
     message_id: int,
 ):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="🟢 تأیید و ارسال",
-                    callback_data=(
-                        f"approve:{message_id}"
-                    ),
+                _btn(
+                    "🟢 تأیید و ارسال",
+                    f"approve:{message_id}",
+                    style="success",
                 ),
-                InlineKeyboardButton(
-                    text="🔴 رد",
-                    callback_data=(
-                        f"reject:{message_id}"
-                    ),
+                _btn(
+                    "🔴 رد",
+                    f"reject:{message_id}",
+                    style="danger",
                 ),
             ]
         ]
@@ -1497,9 +1529,10 @@ def clear_pending_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="🗑 پاک‌سازی کل صف",
-                    callback_data="pending:clear_all",
+                _btn(
+                    "🗑 پاک‌سازی کل صف",
+                    "pending:clear_all",
+                    style="danger",
                 )
             ]
         ]
@@ -1512,13 +1545,10 @@ def reject_keyboard(
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text=title,
-                    callback_data=(
-                        f"reject_reason:"
-                        f"{message_id}:"
-                        f"{key}"
-                    ),
+                _btn(
+                    title,
+                    f"reject_reason:{message_id}:{key}",
+                    style="danger",
                 )
             ]
             for key, title
@@ -1692,27 +1722,58 @@ async def group_router(
         return
 
     # =====================================================
-    # فقط شیفت امروز
+    # شیفت: فقط ۱۲ ظهر تا ۱۲ شب
+    # بین ۲۲ تا ۰۰ می‌تواند امروز یا فردا را انتخاب کند
     # =====================================================
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📅 تعیین شیفت امروز",
-                    callback_data="group_shift:today",
-                )
-            ]
-        ]
-    )
+    now = local_now()
+    can_pick_tomorrow = now.hour >= 22
 
-    await message.answer(
-        (
+    if can_pick_tomorrow:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    _btn(
+                        "📅 شیفت امروز (ساعات باقی‌مانده)",
+                        "group_shift:today",
+                        style="primary",
+                    )
+                ],
+                [
+                    _btn(
+                        "📆 شیفت فردا",
+                        "group_shift:tomorrow",
+                        style="success",
+                    )
+                ],
+            ]
+        )
+        text = (
+            "👨‍💼 مدیریت شیفت\n\n"
+            "الان بین <b>۲۲ تا ۰۰</b> هستید.\n"
+            "می‌توانید شیفت <b>امروز</b> یا <b>فردا</b> را تنظیم کنید.\n\n"
+            "⏱ بازه‌های مجاز: فقط از <b>۱۲:۰۰ تا ۰۰:۰۰</b>"
+        )
+    else:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    _btn(
+                        "📅 تعیین شیفت امروز",
+                        "group_shift:today",
+                        style="primary",
+                    )
+                ]
+            ]
+        )
+        text = (
             "👨‍💼 مدیریت شیفت\n\n"
             "شیفت فقط برای <b>امروز</b> قابل تعیین است.\n\n"
-            "ساعت‌ها کاملاً آزاد هستند؛ حتی شیفت‌هایی مثل "
-            "23:00 تا 02:00 هم قابل ثبت هستند."
-        ),
+            "⏱ بازه‌های مجاز: فقط از <b>۱۲:۰۰ تا ۰۰:۰۰</b>"
+        )
+
+    await message.answer(
+        text,
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard,
     )
@@ -2017,7 +2078,13 @@ async def send_review_message(
             message_id
         ),
     )
+
+
 async def can_review(user_id: int, row) -> bool:
+    """
+    مالک همیشه می‌تواند بررسی کند.
+    ادمین فقط اگر پیام برای او باشد و در شیفت فعال خودش باشد.
+    """
     if db.is_owner(user_id):
         return True
 
@@ -2026,11 +2093,11 @@ async def can_review(user_id: int, row) -> bool:
         return False
 
     try:
-        msg_admin_id = row["admin_id"]
+        row_admin = row["admin_id"] if not isinstance(row, dict) else row.get("admin_id")
     except Exception:
-        msg_admin_id = None
+        row_admin = None
 
-    if msg_admin_id is not None and int(msg_admin_id) != int(user_id):
+    if row_admin is not None and int(row_admin) != int(user_id):
         return False
 
     current = get_current_shift_safe()
@@ -2040,16 +2107,24 @@ async def can_review(user_id: int, row) -> bool:
     return int(current[0]["admin_id"]) == int(user_id)
 
 
-async def edit_original_admin_message(bot: Bot, row, text: str):
+async def edit_original_admin_message(
+    bot: Bot,
+    row,
+    text: str,
+):
+    """آپدیت پیام بررسی قبلی ادمین با وضعیت جدید."""
     try:
-        admin_message_id = row["admin_message_id"]
+        if isinstance(row, dict):
+            admin_message_id = row.get("admin_message_id")
+            admin_id = row.get("admin_id")
+            msg_id = row.get("id")
+        else:
+            keys = row.keys() if hasattr(row, "keys") else []
+            admin_message_id = row["admin_message_id"] if "admin_message_id" in keys else None
+            admin_id = row["admin_id"] if "admin_id" in keys else None
+            msg_id = row["id"] if "id" in keys else None
     except Exception:
-        admin_message_id = None
-
-    try:
-        admin_id = row["admin_id"]
-    except Exception:
-        admin_id = None
+        return
 
     if not admin_message_id or not admin_id:
         return
@@ -2064,9 +2139,10 @@ async def edit_original_admin_message(bot: Bot, row, text: str):
     except Exception:
         logger.exception(
             "EDIT ORIGINAL ADMIN MESSAGE ERROR | message_id=%s | admin_id=%s",
-            row["id"],
+            msg_id,
             admin_id,
         )
+
 
 @router.message(
     F.text == "📥 پیام‌های در انتظار",
@@ -3357,9 +3433,19 @@ async def select_shift_admin(
 # GROUP SHIFT HOURLY KEYBOARD
 # =========================================================
 
-def group_shift_hourly_keyboard():
+def group_shift_hourly_keyboard(
+    for_date: str | None = None,
+    for_tomorrow: bool = False,
+):
+    """
+    فقط بازه‌های ۱۲:۰۰ تا ۰۰:۰۰ (نیمه‌شب).
+    اگر for_tomorrow=True کل بازه‌های فردا از ۱۲ تا ۲۴ نمایش داده می‌شود.
+    اگر امروز باشد، فقط ساعت‌های باقی‌مانده از الان تا نیمه‌شب
+    (و نه قبل از ۱۲ ظهر).
+    """
     now = local_now()
-    taken = get_today_taken_shift_slots()
+    target_date = for_date or today_string()
+    taken = get_taken_shift_slots(target_date)
 
     buttons = []
 
@@ -3374,36 +3460,63 @@ def group_shift_hourly_keyboard():
             ]
         return [
             InlineKeyboardButton(
-                text=f"⏰ {start} تا {end}",
+                text=f"🟢 {start} تا {end}",
                 callback_data=f"group_shift_time:{start}-{end}",
             )
         ]
 
-    # بازه باقی‌مانده از ساعت فعلی
-    # مثال: 18:27 تا 19:00
-    # اگر ساعت فعلی نزدیک پایان شب باشد (مثلاً 23:15)، بازه‌ی باقی‌مانده
-    # باید تا 00:00 (شروع روز بعد) به‌عنوان شیفت شب معتبر ثبت شود، نه
-    # اینکه به‌خاطر next_hour == 24 کلاً حذف شود.
-    if now.minute > 0 or now.second > 0 or now.microsecond > 0:
-        next_hour = now.hour + 1
+    # فقط ۱۲ تا ۲۴
+    SHIFT_START_HOUR = 12
+    SHIFT_END_HOUR = 24
 
-        end = f"{next_hour % 24:02d}:00"
-        start_now = now.strftime("%H:%M")
-
-        buttons.append(make_button(start_now, end))
-
-        first_hour = now.hour + 1
-
+    if for_tomorrow:
+        first_hour = SHIFT_START_HOUR
+        # کل بازه‌های فردا
+        for hour in range(first_hour, SHIFT_END_HOUR):
+            start_time = f"{hour:02d}:00"
+            end_hour = (hour + 1) % 24
+            end_time = f"{end_hour:02d}:00"
+            buttons.append(make_button(start_time, end_time))
     else:
-        first_hour = now.hour
+        # امروز: از max(الان، ۱۲) تا ۲۴
+        if now.hour < SHIFT_START_HOUR:
+            first_hour = SHIFT_START_HOUR
+            # هنوز به ۱۲ نرسیده‌ایم؛ فقط از ۱۲ به بعد
+            for hour in range(first_hour, SHIFT_END_HOUR):
+                start_time = f"{hour:02d}:00"
+                end_hour = (hour + 1) % 24
+                end_time = f"{end_hour:02d}:00"
+                buttons.append(make_button(start_time, end_time))
+        else:
+            # ساعت جاری در بازه ۱۲–۲۴
+            if now.minute > 0 or now.second > 0 or now.microsecond > 0:
+                next_hour = now.hour + 1
+                if next_hour <= SHIFT_END_HOUR:
+                    end = f"{next_hour % 24:02d}:00"
+                    start_now = now.strftime("%H:%M")
+                    # فقط اگر start در بازه مجاز باشد
+                    if now.hour >= SHIFT_START_HOUR:
+                        buttons.append(make_button(start_now, end))
+                first_hour = now.hour + 1
+            else:
+                first_hour = now.hour
 
-    # ساعت‌های کامل باقی‌مانده امروز
-    for hour in range(first_hour, 24):
-        start_time = f"{hour:02d}:00"
-        end_hour = (hour + 1) % 24
-        end_time = f"{end_hour:02d}:00"
+            first_hour = max(first_hour, SHIFT_START_HOUR)
+            for hour in range(first_hour, SHIFT_END_HOUR):
+                start_time = f"{hour:02d}:00"
+                end_hour = (hour + 1) % 24
+                end_time = f"{end_hour:02d}:00"
+                buttons.append(make_button(start_time, end_time))
 
-        buttons.append(make_button(start_time, end_time))
+    if not buttons:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="⛔ بازهٔ مجازی باقی نمانده",
+                    callback_data="group_shift_taken:none",
+                )
+            ]
+        )
 
     return InlineKeyboardMarkup(
         inline_keyboard=buttons
@@ -3532,44 +3645,61 @@ async def group_shift_callback(
         1,
     )[1]
 
-    # =====================================================
-    # فقط today مجاز است
-    # =====================================================
+    now = local_now()
+    is_tomorrow = mode == "tomorrow"
 
-    if mode != "today":
-
+    if is_tomorrow and now.hour < 22:
         await callback.answer(
-            "⛔ فقط امکان تعیین شیفت امروز وجود دارد.",
+            "⛔ انتخاب شیفت فردا فقط بین ۲۲ تا ۰۰ مجاز است.",
             show_alert=True,
         )
-
         return
+
+    if mode not in {"today", "tomorrow"}:
+        await callback.answer(
+            "⛔ گزینه نامعتبر است.",
+            show_alert=True,
+        )
+        return
+
+    if is_tomorrow:
+        target_date = (now.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+        title = "شیفت فردا"
+    else:
+        target_date = today_string()
+        title = "شیفت امروز"
 
     set_state(
         callback.from_user.id,
         "group_shift",
         chat_id=group_id,
-        mode="today",
+        mode=mode,
         step="time",
-        date=today_string(),
+        date=target_date,
+        for_tomorrow=is_tomorrow,
     )
 
     logger.info(
-        "GROUP SHIFT MENU | user_id=%s | group_id=%s | date=%s",
+        "GROUP SHIFT MENU | user_id=%s | group_id=%s | date=%s | mode=%s",
         callback.from_user.id,
         group_id,
-        today_string(),
+        target_date,
+        mode,
     )
 
     await callback.answer()
 
     await callback.message.answer(
         (
-            "📅 <b>شیفت امروز</b>\n\n"
-            "⏰ یکی از بازه‌های یک‌ساعته زیر را انتخاب کن:"
+            f"📅 <b>{title}</b>\n"
+            f"📆 تاریخ: <b>{target_date}</b>\n\n"
+            "⏰ یکی از بازه‌های یک‌ساعته (۱۲:۰۰ تا ۰۰:۰۰) را انتخاب کن:"
         ),
         parse_mode=ParseMode.HTML,
-        reply_markup=group_shift_hourly_keyboard(),
+        reply_markup=group_shift_hourly_keyboard(
+            for_date=target_date,
+            for_tomorrow=is_tomorrow,
+        ),
     )
 
 
@@ -3693,7 +3823,24 @@ async def group_shift_hourly_callback(
 
         start, end = parsed
 
-        specific_date = today_string()
+        # تاریخ هدف از state (امروز یا فردا)
+        state = get_state(user_id) or {}
+        specific_date = state.get("date") or today_string()
+        is_tomorrow = bool(state.get("for_tomorrow"))
+
+        # فقط بازه ۱۲–۲۴ مجاز
+        try:
+            sh = int(start.split(":")[0])
+        except Exception:
+            sh = -1
+        if sh < 12 and not (start.endswith(":00") and sh == 0 and end):
+            # اجازه نده بازه قبل از ۱۲ ثبت شود (جز پایان ۰۰:۰۰)
+            if sh < 12:
+                await callback.answer(
+                    "⛔ فقط بازه‌های ۱۲:۰۰ تا ۰۰:۰۰ مجاز است.",
+                    show_alert=True,
+                )
+                return
 
         # جلوگیری از شیفت تکراری (همان بازه برای همان روز)
         if is_shift_slot_taken(start, end, specific_date):
@@ -3784,6 +3931,13 @@ async def group_shift_hourly_callback(
 
         clear_state(user_id)
 
+        admin_row = db.get_admin(user_id)
+        admin_name = (
+            (admin_row["name"] if admin_row else None)
+            or callback.from_user.full_name
+            or str(user_id)
+        )
+
         logger.info(
             "GROUP SHIFT SUCCESS | shift_id=%s | user_id=%s | group_id=%s | date=%s | start=%s | end=%s",
             shift_id,
@@ -3799,12 +3953,13 @@ async def group_shift_hourly_callback(
             show_alert=True,
         )
 
+        day_label = "فردا" if is_tomorrow else "امروز"
         await callback.message.answer(
             (
-                "✅ <b>شیفت شما با موفقیت ثبت شد.</b>\n\n"
-                f"📅 تاریخ: <b>{specific_date}</b>\n"
-                f"⏰ ساعت: <b>{start} تا {end}</b>\n\n"
-                "🔁 این شیفت فقط برای امروز است."
+                "✅ <b>شیفت با موفقیت ثبت شد.</b>\n\n"
+                f"👤 ادمین: <b>{escape(admin_name)}</b>\n"
+                f"📅 تاریخ: <b>{specific_date}</b> ({day_label})\n"
+                f"⏰ ساعت: <b>{start} تا {end}</b>"
             ),
             parse_mode=ParseMode.HTML,
         )
@@ -4713,27 +4868,30 @@ def announcements_menu_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="📨 ارسال اطلاعیه برای ادمین‌ها",
-                    callback_data="ann:target:admins",
+                _btn(
+                    "📨 ارسال اطلاعیه برای ادمین‌ها",
+                    "ann:target:admins",
+                    style="primary",
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text="👥 ارسال اطلاعیه برای کلیه کاربران",
-                    callback_data="ann:target:users",
+                _btn(
+                    "👥 ارسال اطلاعیه برای کلیه کاربران",
+                    "ann:target:users",
+                    style="primary",
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text="📢 ارسال پیام در کانال",
-                    callback_data="ann:target:channel",
+                _btn(
+                    "📢 ارسال پیام در کانال",
+                    "ann:target:channel",
+                    style="success",
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text="📋 لیست اطلاعیه‌های فعال",
-                    callback_data="ann:list",
+                _btn(
+                    "📋 لیست اطلاعیه‌های فعال",
+                    "ann:list",
                 )
             ],
         ]
@@ -4744,33 +4902,38 @@ def announcement_schedule_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="⚡ ارسال فوری",
-                    callback_data="ann:sched:immediate",
+                _btn(
+                    "⚡ ارسال فوری",
+                    "ann:sched:immediate",
+                    style="success",
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text="🕐 یک‌باره در تاریخ و ساعت مشخص",
-                    callback_data="ann:sched:once",
+                _btn(
+                    "🕐 یک‌باره در تاریخ و ساعت مشخص",
+                    "ann:sched:once",
+                    style="primary",
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text="🔄 روزانه در ساعت مشخص",
-                    callback_data="ann:sched:daily",
+                _btn(
+                    "🔄 روزانه در ساعت مشخص",
+                    "ann:sched:daily",
+                    style="primary",
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text="📅 هفتگی در روز و ساعت مشخص",
-                    callback_data="ann:sched:weekly",
+                _btn(
+                    "📅 هفتگی در روز و ساعت مشخص",
+                    "ann:sched:weekly",
+                    style="primary",
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text="❌ انصراف",
-                    callback_data="ann:cancel",
+                _btn(
+                    "❌ انصراف",
+                    "ann:cancel",
+                    style="danger",
                 )
             ],
         ]
@@ -4868,7 +5031,16 @@ async def ann_schedule_callback(
     state["schedule_type"] = sched
 
     if sched == "immediate":
-        await callback.answer()
+        # پاسخ فوری تا مالک فکر نکند دکمه کار نکرده
+        await callback.answer("⏳ در حال ارسال...")
+        try:
+            await callback.message.answer(
+                "⏳ <b>شروع ارسال اطلاعیه...</b>\n"
+                "لطفاً صبر کنید؛ پس از اتمام نتیجه اعلام می‌شود.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
         await send_announcement_now(bot, state, callback.from_user.id)
         clear_state(callback.from_user.id)
         return
@@ -4986,46 +5158,52 @@ async def send_announcement_now(
     sent = 0
     failed = 0
 
-    if target == "channel":
-        channel_id = db.get_channel_id()
+    # ارسال موازی‌تر و با تأخیر کمتر برای سرعت بیشتر
+    async def _send_one(chat_id: int) -> bool:
         try:
             await bot.send_message(
-                chat_id=channel_id,
+                chat_id=chat_id,
                 text=content,
                 entities=entities or None,
             )
-            sent = 1
+            return True
         except Exception:
-            logger.exception("ANN CHANNEL SEND ERROR")
+            return False
+
+    if target == "channel":
+        channel_id = db.get_channel_id()
+        if await _send_one(channel_id):
+            sent = 1
+        else:
             failed = 1
+            logger.exception("ANN CHANNEL SEND ERROR")
 
     elif target == "admins":
+        tasks = []
         for admin in db.get_admins(active_only=True):
-            try:
-                await bot.send_message(
-                    chat_id=admin["user_id"],
-                    text=content,
-                    entities=entities or None,
-                )
-                sent += 1
-            except Exception:
-                failed += 1
-            await asyncio.sleep(0.05)
+            tasks.append(_send_one(admin["user_id"]))
+        # دسته‌ای برای جلوگیری از flood
+        batch_size = 15
+        for i in range(0, len(tasks), batch_size):
+            results = await asyncio.gather(*tasks[i:i + batch_size])
+            sent += sum(1 for ok in results if ok)
+            failed += sum(1 for ok in results if not ok)
+            if i + batch_size < len(tasks):
+                await asyncio.sleep(0.15)
 
     elif target == "users":
-        for user in get_started_users():
-            try:
-                await bot.send_message(
-                    chat_id=user["user_id"],
-                    text=content,
-                    entities=entities or None,
-                )
-                sent += 1
-            except Exception:
-                failed += 1
-            await asyncio.sleep(0.03)
+        users = get_started_users()
+        batch_size = 20
+        for i in range(0, len(users), batch_size):
+            batch = users[i:i + batch_size]
+            results = await asyncio.gather(
+                *[_send_one(u["user_id"]) for u in batch]
+            )
+            sent += sum(1 for ok in results if ok)
+            failed += sum(1 for ok in results if not ok)
+            if i + batch_size < len(users):
+                await asyncio.sleep(0.12)
 
-    # ذخیره در دیتابیس (حتی فوری) برای تاریخچه
     create_announcement(
         target=target,
         content=content,
@@ -6016,18 +6194,17 @@ async def handle_state(
             return True
 
         # ---------------------------------------------
-        # امنیت:
-        # گروه فقط باید شیفت امروز را ثبت کند.
+        # امنیت: فقط today یا tomorrow (در بازه مجاز)
         # ---------------------------------------------
 
-        if state.get("mode") != "today":
+        if state.get("mode") not in {"today", "tomorrow"}:
 
             clear_state(
                 user_id
             )
 
             await message.answer(
-                "⛔ فقط امکان تعیین شیفت امروز وجود دارد."
+                "⛔ فقط امکان تعیین شیفت امروز (و در صورت مجاز، فردا) وجود دارد."
             )
 
             return True
@@ -6079,12 +6256,19 @@ async def handle_state(
 
             start, end = parsed
 
-            # -----------------------------------------
-            # همیشه فقط امروز
-            # -----------------------------------------
-
             permanent = False
-            specific_date = today_string()
+            specific_date = state.get("date") or today_string()
+            is_tomorrow = bool(state.get("for_tomorrow"))
+
+            try:
+                sh = int(start.split(":")[0])
+            except Exception:
+                sh = -1
+            if sh < 12:
+                await message.answer(
+                    "⛔ فقط بازه‌های ۱۲:۰۰ تا ۰۰:۰۰ مجاز است."
+                )
+                return True
 
             # جلوگیری از شیفت تکراری
             if is_shift_slot_taken(start, end, specific_date):
@@ -6092,14 +6276,6 @@ async def handle_state(
                     "⛔ این بازه زمانی قبلاً ثبت شده و قابل انتخاب مجدد نیست."
                 )
                 return True
-
-            # -----------------------------------------
-            # بررسی محدودیت ادمین
-            #
-            # حداکثر:
-            # ۲ شیفت
-            # ۲ ساعت مجموع
-            # -----------------------------------------
 
             allowed, reason = (
                 db.check_admin_shift_limit(
@@ -6117,10 +6293,6 @@ async def handle_state(
                 )
 
                 return True
-
-            # -----------------------------------------
-            # ثبت شیفت
-            # -----------------------------------------
 
             try:
 
@@ -6147,18 +6319,23 @@ async def handle_state(
 
                 return True
 
-            # -----------------------------------------
-            # پایان state
-            # -----------------------------------------
-
             clear_state(
                 user_id
             )
 
+            admin_row = db.get_admin(user_id)
+            admin_name = (
+                (admin_row["name"] if admin_row else None)
+                or message.from_user.full_name
+                or str(user_id)
+            )
+            day_label = "فردا" if is_tomorrow else "امروز"
+
             await message.answer(
                 (
-                    "✅ شیفت امروز شما ثبت شد.\n\n"
-                    f"📅 {specific_date}\n"
+                    "✅ شیفت با موفقیت ثبت شد.\n\n"
+                    f"👤 ادمین: {admin_name}\n"
+                    f"📅 {specific_date} ({day_label})\n"
                     f"⏰ {start} تا {end}\n\n"
                     "ℹ️ هر ادمین حداکثر ۲ شیفت "
                     "و مجموعاً ۲ ساعت در روز می‌تواند داشته باشد."
