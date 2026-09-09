@@ -255,6 +255,41 @@ def ensure_runtime_schema():
         """
     )
 
+    # ایندکس برای ضدپیام تکراری (۲۴ ساعته per-user)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_messages_user_content
+        ON messages(user_id, content)
+        """
+    )
+
+    # جدول اطلاعیه‌ها (پایدار حتی بعد از ری‌استارت)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS announcements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target TEXT NOT NULL,
+            content TEXT NOT NULL,
+            entities_json TEXT,
+            schedule_type TEXT NOT NULL,
+            schedule_date TEXT,
+            schedule_time TEXT,
+            weekday INTEGER,
+            last_sent TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            created_by INTEGER
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_announcements_active
+        ON announcements(active, schedule_type)
+        """
+    )
+
     conn.commit()
 
 
@@ -477,6 +512,158 @@ def get_admin_rejected_messages(
         """,
         (admin_id, limit),
     ).fetchall()
+
+
+def get_today_taken_shift_slots() -> set[str]:
+    """
+    بازه‌های زمانی شیفت‌های ثبت‌شده برای امروز را برمی‌گرداند
+    (فرمت: "HH:MM-HH:MM") تا در کیبورد گروه به‌عنوان انتخاب‌شده
+    نمایش داده شوند و از انتخاب تکراری جلوگیری شود.
+    """
+    today = today_string()
+    rows = db.conn.execute(
+        """
+        SELECT start_time, end_time
+        FROM shifts
+        WHERE specific_date = ?
+           OR (permanent = 1 AND (specific_date IS NULL OR specific_date = ''))
+        """,
+        (today,),
+    ).fetchall()
+
+    taken: set[str] = set()
+    for row in rows:
+        start = str(row["start_time"]).strip()
+        end = str(row["end_time"]).strip()
+        taken.add(f"{start}-{end}")
+    return taken
+
+
+def is_shift_slot_taken(
+    start_time: str,
+    end_time: str,
+    specific_date: str | None = None,
+) -> bool:
+    """
+    بررسی می‌کند آیا دقیقاً همین بازه زمانی برای تاریخ مشخص
+    (یا دائمی) قبلاً ثبت شده است.
+    """
+    date = specific_date or today_string()
+    row = db.conn.execute(
+        """
+        SELECT 1
+        FROM shifts
+        WHERE start_time = ?
+          AND end_time = ?
+          AND (
+                specific_date = ?
+                OR (permanent = 1 AND (specific_date IS NULL OR specific_date = ''))
+              )
+        LIMIT 1
+        """,
+        (start_time, end_time, date),
+    ).fetchone()
+    return bool(row)
+
+
+def is_duplicate_user_message(
+    user_id: int,
+    content: str,
+    hours: int = 24,
+) -> bool:
+    """
+    ضد پیام تکراری: اگر همین کاربر دقیقاً همین متن را
+    در ۲۴ ساعت گذشته ارسال کرده باشد (و هنوز در دیتابیس باشد)
+    True برمی‌گرداند. پیام‌هایی که مالک با پاک‌سازی صف حذف کرده
+    دیگر در جدول نیستند و مانع ارسال مجدد نمی‌شوند.
+    """
+    cutoff = (local_now() - timedelta(hours=hours)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    # submitted_at ممکن است با فرمت‌های مختلف ذخیره شده باشد؛
+    # مقایسه رشته‌ای برای ISO-like کار می‌کند.
+    row = db.conn.execute(
+        """
+        SELECT 1
+        FROM messages
+        WHERE user_id = ?
+          AND content = ?
+          AND submitted_at >= ?
+        LIMIT 1
+        """,
+        (user_id, content, cutoff),
+    ).fetchone()
+    return bool(row)
+
+
+def create_announcement(
+    target: str,
+    content: str,
+    schedule_type: str,
+    created_by: int,
+    entities_json: str | None = None,
+    schedule_date: str | None = None,
+    schedule_time: str | None = None,
+    weekday: int | None = None,
+) -> int:
+    cur = db.conn.execute(
+        """
+        INSERT INTO announcements (
+            target, content, entities_json,
+            schedule_type, schedule_date, schedule_time,
+            weekday, last_sent, active, created_at, created_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)
+        """,
+        (
+            target,
+            content,
+            entities_json,
+            schedule_type,
+            schedule_date,
+            schedule_time,
+            weekday,
+            db.now(),
+            created_by,
+        ),
+    )
+    db.conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_active_announcements():
+    return db.conn.execute(
+        """
+        SELECT *
+        FROM announcements
+        WHERE active = 1
+        ORDER BY id ASC
+        """
+    ).fetchall()
+
+
+def mark_announcement_sent(ann_id: int):
+    db.conn.execute(
+        """
+        UPDATE announcements
+        SET last_sent = ?
+        WHERE id = ?
+        """,
+        (db.now(), ann_id),
+    )
+    db.conn.commit()
+
+
+def deactivate_announcement(ann_id: int):
+    db.conn.execute(
+        """
+        UPDATE announcements
+        SET active = 0
+        WHERE id = ?
+        """,
+        (ann_id,),
+    )
+    db.conn.commit()
 
 
 # =========================================================
@@ -1235,20 +1422,23 @@ def owner_keyboard(
             ],
             [
                 KeyboardButton(
-                    text="⚙️ تنظیمات ربات"
+                    text="📢 اطلاعیه‌ها"
                 ),
                 KeyboardButton(
-                    text="🛡️ امنیت و دسترسی"
+                    text="⚙️ تنظیمات ربات"
                 ),
             ],
             [
+                KeyboardButton(
+                    text="🛡️ امنیت و دسترسی"
+                ),
                 KeyboardButton(
                     text=(
                         "🔴 خاموش کردن"
                         if enabled
                         else "🟢 روشن کردن"
                     )
-                )
+                ),
             ],
             [
                 KeyboardButton(
@@ -1825,6 +2015,23 @@ async def pending_messages(
         rows = db.get_all_pending()
 
     elif db.get_admin(user_id):
+
+        # ادمین فقط وقتی داخل شیفت خودش است می‌تواند
+        # پیام‌های در انتظار را ببیند.
+        current = get_current_shift_safe()
+        if (
+            not current
+            or int(current[0]["admin_id"]) != int(user_id)
+        ):
+            await message.answer(
+                (
+                    "⛔ شما در حال حاضر در شیفت نیستید.\n\n"
+                    "فقط در زمان شیفت خودتان می‌توانید "
+                    "پیام‌های در انتظار را مشاهده و بررسی کنید."
+                ),
+                reply_markup=admin_keyboard(),
+            )
+            return
 
         rows = db.get_pending_for_admin(
             user_id
@@ -3083,8 +3290,25 @@ async def select_shift_admin(
 
 def group_shift_hourly_keyboard():
     now = local_now()
+    taken = get_today_taken_shift_slots()
 
     buttons = []
+
+    def make_button(start: str, end: str):
+        key = f"{start}-{end}"
+        if key in taken:
+            return [
+                InlineKeyboardButton(
+                    text=f"✅ انتخاب‌شده از قبل — {start} تا {end}",
+                    callback_data=f"group_shift_taken:{start}-{end}",
+                )
+            ]
+        return [
+            InlineKeyboardButton(
+                text=f"⏰ {start} تا {end}",
+                callback_data=f"group_shift_time:{start}-{end}",
+            )
+        ]
 
     # بازه باقی‌مانده از ساعت فعلی
     # مثال: 18:27 تا 19:00
@@ -3095,15 +3319,9 @@ def group_shift_hourly_keyboard():
         next_hour = now.hour + 1
 
         end = f"{next_hour % 24:02d}:00"
+        start_now = now.strftime("%H:%M")
 
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"⏰ {now.strftime('%H:%M')} تا {end}",
-                    callback_data=f"group_shift_time:{now.strftime('%H:%M')}-{end}",
-                )
-            ]
-        )
+        buttons.append(make_button(start_now, end))
 
         first_hour = now.hour + 1
 
@@ -3116,14 +3334,7 @@ def group_shift_hourly_keyboard():
         end_hour = (hour + 1) % 24
         end_time = f"{end_hour:02d}:00"
 
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"⏰ {start_time} تا {end_time}",
-                    callback_data=f"group_shift_time:{start_time}-{end_time}",
-                )
-            ]
-        )
+        buttons.append(make_button(start_time, end_time))
 
     return InlineKeyboardMarkup(
         inline_keyboard=buttons
@@ -3298,6 +3509,18 @@ async def group_shift_callback(
 # =========================================================
 
 @router.callback_query(
+    F.data.startswith("group_shift_taken:")
+)
+async def group_shift_taken_callback(
+    callback: CallbackQuery,
+):
+    await callback.answer(
+        "⛔ این بازه قبلاً انتخاب شده و قابل انتخاب مجدد نیست.",
+        show_alert=True,
+    )
+
+
+@router.callback_query(
     F.data.startswith("group_shift_time:")
 )
 async def group_shift_hourly_callback(
@@ -3402,6 +3625,21 @@ async def group_shift_hourly_callback(
         start, end = parsed
 
         specific_date = today_string()
+
+        # جلوگیری از شیفت تکراری (همان بازه برای همان روز)
+        if is_shift_slot_taken(start, end, specific_date):
+            logger.warning(
+                "GROUP SHIFT DUPLICATE | user_id=%s | start=%s | end=%s | date=%s",
+                user_id,
+                start,
+                end,
+                specific_date,
+            )
+            await callback.answer(
+                "⛔ این بازه زمانی قبلاً ثبت شده و قابل انتخاب مجدد نیست.",
+                show_alert=True,
+            )
+            return
 
         logger.info(
             "GROUP SHIFT LIMIT CHECK | user_id=%s | start=%s | end=%s | date=%s",
@@ -4399,6 +4637,459 @@ async def owner_settings(
 
 
 # =========================================================
+# ANNOUNCEMENTS (اطلاعیه‌ها)
+# =========================================================
+
+def announcements_menu_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📨 ارسال اطلاعیه برای ادمین‌ها",
+                    callback_data="ann:target:admins",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👥 ارسال اطلاعیه برای کلیه کاربران",
+                    callback_data="ann:target:users",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📢 ارسال پیام در کانال",
+                    callback_data="ann:target:channel",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📋 لیست اطلاعیه‌های فعال",
+                    callback_data="ann:list",
+                )
+            ],
+        ]
+    )
+
+
+def announcement_schedule_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚡ ارسال فوری",
+                    callback_data="ann:sched:immediate",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🕐 یک‌باره در تاریخ و ساعت مشخص",
+                    callback_data="ann:sched:once",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 روزانه در ساعت مشخص",
+                    callback_data="ann:sched:daily",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 هفتگی در روز و ساعت مشخص",
+                    callback_data="ann:sched:weekly",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ انصراف",
+                    callback_data="ann:cancel",
+                )
+            ],
+        ]
+    )
+
+
+@router.message(
+    F.text == "📢 اطلاعیه‌ها",
+    F.chat.type == "private",
+)
+async def owner_announcements_menu(
+    message: Message,
+):
+    if not db.is_owner(message.from_user.id):
+        return
+
+    await message.answer(
+        (
+            "📢 <b>سیستم اطلاعیه‌ها</b>\n\n"
+            "مقصد ارسال را انتخاب کن:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=announcements_menu_keyboard(),
+    )
+
+
+@router.callback_query(
+    F.data.startswith("ann:target:")
+)
+async def ann_target_callback(
+    callback: CallbackQuery,
+):
+    if not db.is_owner(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
+        return
+
+    target = callback.data.split(":")[-1]
+    if target not in {"admins", "users", "channel"}:
+        await callback.answer()
+        return
+
+    set_state(
+        callback.from_user.id,
+        "announcement",
+        target=target,
+        step="content",
+    )
+
+    await callback.answer()
+    await callback.message.answer(
+        (
+            "📝 متن اطلاعیه را بفرست.\n\n"
+            "می‌توانی از فرمت‌بندی معمولی تلگرام (Bold و ...) استفاده کنی."
+        ),
+        reply_markup=back_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "ann:cancel")
+async def ann_cancel_callback(
+    callback: CallbackQuery,
+):
+    if not db.is_owner(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
+        return
+    clear_state(callback.from_user.id)
+    await callback.answer("لغو شد.")
+    await callback.message.answer(
+        "عملیات اطلاعیه لغو شد.",
+        reply_markup=owner_keyboard(db.is_bot_enabled()),
+    )
+
+
+@router.callback_query(
+    F.data.startswith("ann:sched:")
+)
+async def ann_schedule_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+):
+    if not db.is_owner(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
+        return
+
+    state = get_state(callback.from_user.id)
+    if not state or state.get("kind") != "announcement":
+        await callback.answer("نشست منقضی شده.", show_alert=True)
+        return
+
+    sched = callback.data.split(":")[-1]
+    if sched not in {"immediate", "once", "daily", "weekly"}:
+        await callback.answer()
+        return
+
+    state["schedule_type"] = sched
+
+    if sched == "immediate":
+        await callback.answer()
+        await send_announcement_now(bot, state, callback.from_user.id)
+        clear_state(callback.from_user.id)
+        return
+
+    if sched == "once":
+        state["step"] = "once_datetime"
+        await callback.answer()
+        await callback.message.answer(
+            (
+                "🕐 تاریخ و ساعت ارسال را بفرست.\n\n"
+                "فرمت:\n"
+                "2026-09-10 18:30"
+            ),
+            reply_markup=back_keyboard(),
+        )
+        return
+
+    if sched == "daily":
+        state["step"] = "daily_time"
+        await callback.answer()
+        await callback.message.answer(
+            (
+                "🔄 ساعت ارسال روزانه را بفرست.\n\n"
+                "فرمت:\n"
+                "09:00"
+            ),
+            reply_markup=back_keyboard(),
+        )
+        return
+
+    if sched == "weekly":
+        state["step"] = "weekly_day"
+        await callback.answer()
+        await callback.message.answer(
+            (
+                "📅 شماره روز هفته را بفرست (۰=دوشنبه ... ۶=یکشنبه).\n\n"
+                "سپس ساعت را می‌گیریم.\n"
+                "مثال روز: 0"
+            ),
+            reply_markup=back_keyboard(),
+        )
+        return
+
+
+@router.callback_query(F.data == "ann:list")
+async def ann_list_callback(
+    callback: CallbackQuery,
+):
+    if not db.is_owner(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
+        return
+
+    rows = get_active_announcements()
+    lines = ["📋 <b>اطلاعیه‌های فعال</b>\n"]
+
+    if not rows:
+        lines.append("هیچ اطلاعیه فعالی وجود ندارد.")
+    else:
+        for row in rows:
+            preview = (row["content"] or "")[:60].replace("\n", " ")
+            lines.append(
+                f"#{row['id']} — {escape(row['target'])} | "
+                f"{escape(row['schedule_type'])}\n"
+                f"📝 {escape(preview)}\n"
+            )
+
+    buttons = []
+    for row in rows:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🗑 غیرفعال #{row['id']}",
+                    callback_data=f"ann:deactivate:{row['id']}",
+                )
+            ]
+        )
+
+    await callback.answer()
+    await callback.message.answer(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        if buttons
+        else None,
+    )
+
+
+@router.callback_query(
+    F.data.startswith("ann:deactivate:")
+)
+async def ann_deactivate_callback(
+    callback: CallbackQuery,
+):
+    if not db.is_owner(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
+        return
+    try:
+        ann_id = int(callback.data.split(":")[-1])
+    except ValueError:
+        await callback.answer()
+        return
+    deactivate_announcement(ann_id)
+    await callback.answer("✅ غیرفعال شد.", show_alert=True)
+
+
+async def send_announcement_now(
+    bot: Bot,
+    state: dict,
+    owner_id: int,
+):
+    target = state.get("target")
+    content = state.get("content") or ""
+    entities = deserialize_entities(state.get("entities"))
+
+    sent = 0
+    failed = 0
+
+    if target == "channel":
+        channel_id = db.get_channel_id()
+        try:
+            await bot.send_message(
+                chat_id=channel_id,
+                text=content,
+                entities=entities or None,
+            )
+            sent = 1
+        except Exception:
+            logger.exception("ANN CHANNEL SEND ERROR")
+            failed = 1
+
+    elif target == "admins":
+        for admin in db.get_admins(active_only=True):
+            try:
+                await bot.send_message(
+                    chat_id=admin["user_id"],
+                    text=content,
+                    entities=entities or None,
+                )
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)
+
+    elif target == "users":
+        for user in get_started_users():
+            try:
+                await bot.send_message(
+                    chat_id=user["user_id"],
+                    text=content,
+                    entities=entities or None,
+                )
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.03)
+
+    # ذخیره در دیتابیس (حتی فوری) برای تاریخچه
+    create_announcement(
+        target=target,
+        content=content,
+        schedule_type="immediate",
+        created_by=owner_id,
+        entities_json=json.dumps(state.get("entities") or [], ensure_ascii=False),
+    )
+
+    text = (
+        f"✅ اطلاعیه ارسال شد.\n\n"
+        f"📨 موفق: {sent}"
+    )
+    if failed:
+        text += f"\n⚠️ ناموفق: {failed}"
+
+    try:
+        await bot.send_message(
+            chat_id=owner_id,
+            text=text,
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
+    except Exception:
+        pass
+
+
+async def process_scheduled_announcements(bot: Bot):
+    now = local_now()
+    rows = get_active_announcements()
+
+    for row in rows:
+        stype = row["schedule_type"]
+        if stype == "immediate":
+            continue
+
+        should_send = False
+
+        if stype == "once":
+            if not row["schedule_date"] or not row["schedule_time"]:
+                continue
+            try:
+                target_dt = datetime.strptime(
+                    f"{row['schedule_date']} {row['schedule_time']}",
+                    "%Y-%m-%d %H:%M",
+                ).replace(tzinfo=TZ)
+            except ValueError:
+                continue
+            if now >= target_dt:
+                # فقط یک‌بار
+                if not row["last_sent"]:
+                    should_send = True
+
+        elif stype == "daily":
+            if not row["schedule_time"]:
+                continue
+            try:
+                th, tm = map(int, row["schedule_time"].split(":"))
+            except Exception:
+                continue
+            if now.hour == th and now.minute == tm:
+                last = row["last_sent"]
+                if not last or last[:10] != today_string():
+                    should_send = True
+
+        elif stype == "weekly":
+            if row["weekday"] is None or not row["schedule_time"]:
+                continue
+            try:
+                th, tm = map(int, row["schedule_time"].split(":"))
+            except Exception:
+                continue
+            if (
+                now.weekday() == int(row["weekday"])
+                and now.hour == th
+                and now.minute == tm
+            ):
+                last = row["last_sent"]
+                if not last or last[:10] != today_string():
+                    should_send = True
+
+        if not should_send:
+            continue
+
+        content = row["content"]
+        entities = deserialize_entities(row["entities_json"])
+        target = row["target"]
+        sent_ok = False
+
+        try:
+            if target == "channel":
+                channel_id = db.get_channel_id()
+                await bot.send_message(
+                    chat_id=channel_id,
+                    text=content,
+                    entities=entities or None,
+                )
+                sent_ok = True
+            elif target == "admins":
+                for admin in db.get_admins(active_only=True):
+                    try:
+                        await bot.send_message(
+                            chat_id=admin["user_id"],
+                            text=content,
+                            entities=entities or None,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.05)
+                sent_ok = True
+            elif target == "users":
+                for user in get_started_users():
+                    try:
+                        await bot.send_message(
+                            chat_id=user["user_id"],
+                            text=content,
+                            entities=entities or None,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.03)
+                sent_ok = True
+        except Exception:
+            logger.exception(
+                "SCHEDULED ANN SEND ERROR | id=%s",
+                row["id"],
+            )
+
+        if sent_ok:
+            mark_announcement_sent(row["id"])
+            if stype == "once":
+                deactivate_announcement(row["id"])
+
+
+# =========================================================
 # OWNER TOGGLE
 # =========================================================
 
@@ -4617,6 +5308,141 @@ async def handle_state(
         return True
 
     # =====================================================
+    # ANNOUNCEMENT STATE
+    # =====================================================
+
+    if kind == "announcement":
+
+        if message.chat.type != "private":
+            return True
+
+        if not db.is_owner(user_id):
+            clear_state(user_id)
+            return True
+
+        step = state.get("step")
+
+        if step == "content":
+            if not (message.text or "").strip():
+                await message.answer("❌ متن اطلاعیه خالی است.")
+                return True
+
+            state["content"] = message.text
+            state["entities"] = serialize_entities(message.entities)
+            state["step"] = "schedule"
+
+            await message.answer(
+                "⏰ نوع زمان‌بندی را انتخاب کن:",
+                reply_markup=announcement_schedule_keyboard(),
+            )
+            return True
+
+        if step == "once_datetime":
+            value = (message.text or "").strip()
+            try:
+                dt = datetime.strptime(value, "%Y-%m-%d %H:%M")
+            except ValueError:
+                await message.answer(
+                    "❌ فرمت نادرست است.\nمثال: 2026-09-10 18:30"
+                )
+                return True
+
+            create_announcement(
+                target=state["target"],
+                content=state["content"],
+                schedule_type="once",
+                created_by=user_id,
+                entities_json=json.dumps(
+                    state.get("entities") or [],
+                    ensure_ascii=False,
+                ),
+                schedule_date=dt.strftime("%Y-%m-%d"),
+                schedule_time=dt.strftime("%H:%M"),
+            )
+            clear_state(user_id)
+            await message.answer(
+                (
+                    f"✅ اطلاعیه یک‌باره ثبت شد.\n\n"
+                    f"🕐 {dt.strftime('%Y-%m-%d %H:%M')}"
+                ),
+                reply_markup=owner_keyboard(db.is_bot_enabled()),
+            )
+            return True
+
+        if step == "daily_time":
+            value = (message.text or "").strip()
+            if not valid_time(value):
+                await message.answer("❌ ساعت معتبر نیست. مثال: 09:00")
+                return True
+
+            create_announcement(
+                target=state["target"],
+                content=state["content"],
+                schedule_type="daily",
+                created_by=user_id,
+                entities_json=json.dumps(
+                    state.get("entities") or [],
+                    ensure_ascii=False,
+                ),
+                schedule_time=value,
+            )
+            clear_state(user_id)
+            await message.answer(
+                f"✅ اطلاعیه روزانه برای ساعت {value} ثبت شد.",
+                reply_markup=owner_keyboard(db.is_bot_enabled()),
+            )
+            return True
+
+        if step == "weekly_day":
+            try:
+                day = int((message.text or "").strip())
+                if day < 0 or day > 6:
+                    raise ValueError
+            except ValueError:
+                await message.answer(
+                    "❌ عدد روز باید بین ۰ تا ۶ باشد (۰=دوشنبه)."
+                )
+                return True
+
+            state["weekday"] = day
+            state["step"] = "weekly_time"
+            await message.answer(
+                "🕐 ساعت ارسال هفتگی را بفرست.\nمثال: 10:00"
+            )
+            return True
+
+        if step == "weekly_time":
+            value = (message.text or "").strip()
+            if not valid_time(value):
+                await message.answer("❌ ساعت معتبر نیست. مثال: 10:00")
+                return True
+
+            create_announcement(
+                target=state["target"],
+                content=state["content"],
+                schedule_type="weekly",
+                created_by=user_id,
+                entities_json=json.dumps(
+                    state.get("entities") or [],
+                    ensure_ascii=False,
+                ),
+                schedule_time=value,
+                weekday=state.get("weekday"),
+            )
+            clear_state(user_id)
+            await message.answer(
+                (
+                    f"✅ اطلاعیه هفتگی ثبت شد.\n\n"
+                    f"📅 روز: {state.get('weekday')}\n"
+                    f"🕐 ساعت: {value}"
+                ),
+                reply_markup=owner_keyboard(db.is_bot_enabled()),
+            )
+            return True
+
+        return True
+
+    # =====================================================
     # USER MESSAGE
     # =====================================================
 
@@ -4649,6 +5475,21 @@ async def handle_state(
                 error
             )
 
+            return True
+
+        # ضد پیام تکراری — ۲۴ ساعت (فقط برای همین کاربر)
+        if is_duplicate_user_message(
+            user_id,
+            message.text or "",
+            hours=24,
+        ):
+            await message.answer(
+                (
+                    "🚫 این متن را در ۲۴ ساعت گذشته ارسال کرده‌اید.\n\n"
+                    "پیام تکراری به ادمین ارسال نمی‌شود.\n"
+                    "پس از گذشت ۲۴ ساعت می‌توانید دوباره همان متن را بفرستید."
+                )
+            )
             return True
 
         current = get_current_shift_safe()
@@ -5026,6 +5867,15 @@ async def handle_state(
 
             start, end = parsed
 
+            # جلوگیری از شیفت تکراری (برای تاریخ مشخص)
+            if not state.get("permanent"):
+                specific = state.get("specific_date") or today_string()
+                if is_shift_slot_taken(start, end, specific):
+                    await message.answer(
+                        "⛔ این بازه زمانی برای این تاریخ قبلاً ثبت شده است."
+                    )
+                    return True
+
             try:
 
                 shift_id = db.create_shift(
@@ -5166,6 +6016,13 @@ async def handle_state(
 
             permanent = False
             specific_date = today_string()
+
+            # جلوگیری از شیفت تکراری
+            if is_shift_slot_taken(start, end, specific_date):
+                await message.answer(
+                    "⛔ این بازه زمانی قبلاً ثبت شده و قابل انتخاب مجدد نیست."
+                )
+                return True
 
             # -----------------------------------------
             # بررسی محدودیت ادمین
@@ -5448,6 +6305,14 @@ async def text_router(
         await owner_channel(
             message,
             bot,
+        )
+
+        return
+
+    if text == "📢 اطلاعیه‌ها":
+
+        await owner_announcements_menu(
+            message
         )
 
         return
@@ -5936,6 +6801,18 @@ async def cleanup_loop():
         )
 
 
+async def announcement_monitor(bot: Bot):
+    """
+    هر دقیقه اطلاعیه‌های زمان‌بندی‌شده را بررسی و در صورت نیاز ارسال می‌کند.
+    """
+    while True:
+        try:
+            await process_scheduled_announcements(bot)
+        except Exception:
+            logger.exception("ANNOUNCEMENT MONITOR ERROR")
+        await asyncio.sleep(30)
+
+
 # =========================================================
 # COMMANDS
 # =========================================================
@@ -6011,6 +6888,10 @@ async def main():
         cleanup_loop()
     )
 
+    ann_task = asyncio.create_task(
+        announcement_monitor(bot)
+    )
+
     try:
 
         await dp.start_polling(
@@ -6024,6 +6905,9 @@ async def main():
 
         if cleanup_task:
             cleanup_task.cancel()
+
+        if ann_task:
+            ann_task.cancel()
 
         db.close()
 
