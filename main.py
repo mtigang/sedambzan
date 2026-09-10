@@ -76,6 +76,157 @@ cleanup_task: asyncio.Task | None = None
 BOT_USERNAME = ""
 BOT_ID = 0
 
+# قفل پردازش برای جلوگیری از دوباره‌کلیک روی تأیید/رد
+_processing_message_ids: set[int] = set()
+
+
+# =========================================================
+# NON-BLOCKING DB HELPERS (جلوگیری از بلاک شدن event loop)
+# ساختار و نحوه اتصال دیتابیس دست‌نخورده باقی می‌ماند.
+# =========================================================
+
+async def db_run(func, *args, **kwargs):
+    """اجرای تابع sync دیتابیس در thread جدا تا event loop بلاک نشود."""
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def _sync_execute(query: str, params: tuple = ()):
+    return db.conn.execute(query, params)
+
+
+def _sync_execute_fetchone(query: str, params: tuple = ()):
+    return db.conn.execute(query, params).fetchone()
+
+
+def _sync_execute_fetchall(query: str, params: tuple = ()):
+    return db.conn.execute(query, params).fetchall()
+
+
+def _sync_commit():
+    db.conn.commit()
+
+
+async def db_execute(query: str, params: tuple = ()):
+    return await asyncio.to_thread(_sync_execute, query, params)
+
+
+async def db_fetchone(query: str, params: tuple = ()):
+    return await asyncio.to_thread(_sync_execute_fetchone, query, params)
+
+
+async def db_fetchall(query: str, params: tuple = ()):
+    return await asyncio.to_thread(_sync_execute_fetchall, query, params)
+
+
+async def db_commit():
+    await asyncio.to_thread(_sync_commit)
+
+
+GENERIC_ERROR = (
+    "⏳ خطای موقت رخ داد.\n"
+    "لطفاً چند ثانیه صبر کنید و دوباره امتحان کنید."
+)
+GENERIC_ERROR_WAIT = (
+    "⏳ سیستم مشغول است یا خطای موقتی رخ داده.\n"
+    "لطفاً کمی صبر کنید و دوباره تلاش کنید."
+)
+
+
+async def safe_db(coro_or_func, *args, **kwargs):
+    """
+    اجرای امن عملیات دیتابیس.
+    اگر تابع sync باشد با to_thread اجرا می‌شود تا event loop بلاک نشود.
+    """
+    try:
+        if asyncio.iscoroutinefunction(coro_or_func):
+            return await coro_or_func(*args, **kwargs)
+        return await asyncio.to_thread(coro_or_func, *args, **kwargs)
+    except Exception:
+        logger.exception("SAFE_DB ERROR")
+        raise
+
+# =========================================================
+# MULTI CHANNEL CONFIG (۳ کانال)
+# =========================================================
+
+CHANNELS: dict[str, dict[str, Any]] = {
+    "sadambazan": {
+        "title": "صدام بزن",
+        "prefixes": ("صدام بزن",),
+        "channel_id": -1003877061735,
+        "group_id": -1004444089094,
+    },
+    "inkarbar": {
+        "title": "این کاربر",
+        "prefixes": ("این کاربر",),
+        "channel_id": -1003764383335,
+        "group_id": -1004335935102,
+    },
+    "zendegi": {
+        "title": "تو زندگی بعدی",
+        "prefixes": ("تو زندگی بعدی",),
+        "channel_id": -1004371148799,
+        "group_id": -1003812392984,
+    },
+}
+
+DEFAULT_CHANNEL_KEY = "sadambazan"
+
+
+def channel_keys() -> list[str]:
+    return list(CHANNELS.keys())
+
+
+def get_channel_cfg(key: str | None) -> dict[str, Any]:
+    if key and key in CHANNELS:
+        return CHANNELS[key]
+    return CHANNELS[DEFAULT_CHANNEL_KEY]
+
+
+def channel_key_from_prefix(text: str) -> str | None:
+    t = (text or "").lstrip()
+    # طولانی‌ترها اول تا اشتباه تشخیص داده نشوند
+    ordered = sorted(
+        CHANNELS.items(),
+        key=lambda kv: max(len(p) for p in kv[1]["prefixes"]),
+        reverse=True,
+    )
+    for key, cfg in ordered:
+        for prefix in cfg["prefixes"]:
+            if t.startswith(prefix):
+                return key
+    return None
+
+
+def channel_key_for_group(chat_id: int) -> str | None:
+    for key, cfg in CHANNELS.items():
+        if int(cfg["group_id"]) == int(chat_id):
+            return key
+    return None
+
+
+def channel_id_for_key(key: str | None) -> int:
+    return int(get_channel_cfg(key)["channel_id"])
+
+
+def is_managed_group(chat_id: int) -> bool:
+    return channel_key_for_group(chat_id) is not None
+
+
+def channels_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    """۳ دکمه انتخاب کانال — بدون style تا روی همه کلاینت‌ها مطمئن کار کند."""
+    rows = []
+    for key, cfg in CHANNELS.items():
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"📺 {cfg['title']}",
+                    callback_data=f"{prefix}:{key}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 # =========================================================
 # FIXED IP RESOLVER
@@ -289,6 +440,83 @@ def ensure_runtime_schema():
         """
         CREATE INDEX IF NOT EXISTS idx_announcements_active
         ON announcements(active, schedule_type)
+        """
+    )
+
+    # --- multi-channel columns ---
+    message_columns = {
+        row["name"]
+        for row in conn.execute(
+            "PRAGMA table_info(messages)"
+        ).fetchall()
+    }
+    if "channel_key" not in message_columns:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN channel_key TEXT"
+        )
+        conn.execute(
+            """
+            UPDATE messages
+            SET channel_key = ?
+            WHERE channel_key IS NULL OR channel_key = ''
+            """,
+            (DEFAULT_CHANNEL_KEY,),
+        )
+
+    admin_columns = {
+        row["name"]
+        for row in conn.execute(
+            "PRAGMA table_info(admins)"
+        ).fetchall()
+    }
+    if "channel_key" not in admin_columns:
+        conn.execute(
+            "ALTER TABLE admins ADD COLUMN channel_key TEXT"
+        )
+        conn.execute(
+            """
+            UPDATE admins
+            SET channel_key = ?
+            WHERE channel_key IS NULL OR channel_key = ''
+            """,
+            (DEFAULT_CHANNEL_KEY,),
+        )
+
+    shift_columns = {
+        row["name"]
+        for row in conn.execute(
+            "PRAGMA table_info(shifts)"
+        ).fetchall()
+    }
+    if "channel_key" not in shift_columns:
+        conn.execute(
+            "ALTER TABLE shifts ADD COLUMN channel_key TEXT"
+        )
+        conn.execute(
+            """
+            UPDATE shifts
+            SET channel_key = ?
+            WHERE channel_key IS NULL OR channel_key = ''
+            """,
+            (DEFAULT_CHANNEL_KEY,),
+        )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_messages_channel_status
+        ON messages(channel_key, status)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admins_channel
+        ON admins(channel_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shifts_channel
+        ON shifts(channel_key)
         """
     )
 
@@ -552,26 +780,71 @@ def get_admin_rejected_messages(
     ).fetchall()
 
 
-def get_taken_shift_slots(for_date: str | None = None) -> set[str]:
-    """
-    بازه‌های زمانی شیفت‌های ثبت‌شده برای تاریخ مشخص را برمی‌گرداند
-    (فرمت: "HH:MM-HH:MM").
-    """
+def _time_to_minutes(value: str) -> int:
+    hour, minute = map(int, value.strip().split(":"))
+    return hour * 60 + minute
+
+
+def _shift_range_minutes(start: str, end: str) -> tuple[int, int]:
+    """بازه را به دقیقه تبدیل می‌کند؛ اگر شبانه باشد end بزرگ‌تر از ۲۴ساعت می‌شود."""
+    start_m = _time_to_minutes(start)
+    end_m = _time_to_minutes(end)
+    if end_m <= start_m:
+        end_m += 24 * 60
+    return start_m, end_m
+
+
+def _ranges_overlap(
+    start_a: str,
+    end_a: str,
+    start_b: str,
+    end_b: str,
+) -> bool:
+    """آیا دو بازه زمانی هم‌پوشانی دارند؟ (مثلاً 12:00-13:00 با 12:30-13:00)"""
+    s1, e1 = _shift_range_minutes(start_a, end_a)
+    s2, e2 = _shift_range_minutes(start_b, end_b)
+    return s1 < e2 and s2 < e1
+
+
+def get_shift_ranges_for_date(
+    for_date: str | None = None,
+    channel_key: str | None = None,
+) -> list[tuple[str, str]]:
+    """لیست (start, end) شیفت‌های ثبت‌شده برای آن تاریخ (+ دائمی) و کانال."""
     target = for_date or today_string()
+    ch = channel_key or DEFAULT_CHANNEL_KEY
     rows = db.conn.execute(
         """
-        SELECT start_time, end_time
+        SELECT start_time, end_time, channel_key
         FROM shifts
         WHERE specific_date = ?
            OR (permanent = 1 AND (specific_date IS NULL OR specific_date = ''))
         """,
         (target,),
     ).fetchall()
-
-    taken: set[str] = set()
+    result: list[tuple[str, str]] = []
     for row in rows:
+        sk = None
+        try:
+            sk = row["channel_key"]
+        except Exception:
+            sk = None
+        sk = sk or DEFAULT_CHANNEL_KEY
+        if sk != ch:
+            continue
         start = str(row["start_time"]).strip()
         end = str(row["end_time"]).strip()
+        result.append((start, end))
+    return result
+
+
+def get_taken_shift_slots(for_date: str | None = None) -> set[str]:
+    """
+    برای سازگاری: کلید دقیق بازه‌های ثبت‌شده.
+    برای تشخیص اشغال واقعی از is_shift_slot_taken / هم‌پوشانی استفاده کن.
+    """
+    taken: set[str] = set()
+    for start, end in get_shift_ranges_for_date(for_date):
         taken.add(f"{start}-{end}")
     return taken
 
@@ -584,27 +857,73 @@ def is_shift_slot_taken(
     start_time: str,
     end_time: str,
     specific_date: str | None = None,
+    channel_key: str | None = None,
 ) -> bool:
     """
-    بررسی می‌کند آیا دقیقاً همین بازه زمانی برای تاریخ مشخص
-    (یا دائمی) قبلاً ثبت شده است.
+    اگر همین بازه یا هر بازهٔ هم‌پوشان برای آن تاریخ+کانال ثبت شده باشد True.
     """
     date = specific_date or today_string()
-    row = db.conn.execute(
+    for existing_start, existing_end in get_shift_ranges_for_date(
+        date, channel_key=channel_key
+    ):
+        if _ranges_overlap(
+            start_time,
+            end_time,
+            existing_start,
+            existing_end,
+        ):
+            return True
+    return False
+
+
+def get_admin_shift_ranges_for_date(
+    admin_id: int,
+    for_date: str | None = None,
+) -> list[tuple[str, str]]:
+    """همه شیفت‌های یک ادمین در تاریخ مشخص (در همه کانال‌ها)."""
+    target = for_date or today_string()
+    rows = db.conn.execute(
         """
-        SELECT 1
+        SELECT start_time, end_time
         FROM shifts
-        WHERE start_time = ?
-          AND end_time = ?
+        WHERE admin_id = ?
           AND (
                 specific_date = ?
                 OR (permanent = 1 AND (specific_date IS NULL OR specific_date = ''))
               )
-        LIMIT 1
         """,
-        (start_time, end_time, date),
-    ).fetchone()
-    return bool(row)
+        (admin_id, target),
+    ).fetchall()
+    result: list[tuple[str, str]] = []
+    for row in rows:
+        start = str(row["start_time"]).strip()
+        end = str(row["end_time"]).strip()
+        result.append((start, end))
+    return result
+
+
+def admin_has_overlapping_shift(
+    admin_id: int,
+    start_time: str,
+    end_time: str,
+    specific_date: str | None = None,
+) -> bool:
+    """
+    آیا این ادمین قبلاً شیفتی (در هر کانالی) دارد که با بازه جدید
+    حتی یک دقیقه هم‌پوشانی داشته باشد؟
+    """
+    date = specific_date or today_string()
+    for existing_start, existing_end in get_admin_shift_ranges_for_date(
+        admin_id, date
+    ):
+        if _ranges_overlap(
+            start_time,
+            end_time,
+            existing_start,
+            existing_end,
+        ):
+            return True
+    return False
 
 
 def is_duplicate_user_message(
@@ -712,17 +1031,173 @@ def deactivate_announcement(ann_id: int):
 # =========================================================
 
 def configured_group_id() -> int | None:
-    value = get_setting(
-        "admin_group_id"
-    )
-
-    if not value:
-        return None
-
+    """
+    برای سازگاری قدیمی: اولین گروه مدیریت‌شده را برمی‌گرداند.
+    ترجیحاً از is_managed_group / channel_key_for_group استفاده کن.
+    """
+    value = get_setting("admin_group_id")
+    if value:
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    # fallback: گروه کانال پیش‌فرض
     try:
-        return int(value)
-    except ValueError:
+        return int(CHANNELS[DEFAULT_CHANNEL_KEY]["group_id"])
+    except Exception:
         return None
+
+
+def admin_channel_keys(user_id: int) -> list[str]:
+    """لیست کانال‌هایی که این کاربر ادمین آن‌هاست (پشتیبانی از چند کانال)."""
+    admin = db.get_admin(user_id)
+    if not admin:
+        return []
+    try:
+        raw = admin["channel_key"] or ""
+    except Exception:
+        raw = ""
+    if not raw:
+        return [DEFAULT_CHANNEL_KEY]
+    keys = []
+    for part in str(raw).split(","):
+        k = part.strip()
+        if k and k in CHANNELS and k not in keys:
+            keys.append(k)
+    return keys or [DEFAULT_CHANNEL_KEY]
+
+
+def admin_channel_key(user_id: int) -> str | None:
+    """اولین/اصلی کانال ادمین (برای سازگاری با کد قبلی)."""
+    keys = admin_channel_keys(user_id)
+    return keys[0] if keys else None
+
+
+def set_admin_channel(user_id: int, channel_key: str):
+    """افزودن کانال به لیست کانال‌های ادمین (بدون حذف کانال‌های قبلی)."""
+    if channel_key not in CHANNELS:
+        return
+    admin = db.get_admin(user_id)
+    if not admin:
+        return
+    try:
+        raw = admin["channel_key"] or ""
+    except Exception:
+        raw = ""
+    existing = [p.strip() for p in str(raw).split(",") if p.strip()]
+    if channel_key not in existing:
+        existing.append(channel_key)
+    new_val = ",".join(existing)
+    db.conn.execute(
+        """
+        UPDATE admins
+        SET channel_key = ?
+        WHERE user_id = ?
+        """,
+        (new_val, user_id),
+    )
+    db.conn.commit()
+
+
+PENDING_PAGE_SIZE = 12
+
+
+def get_pending_rows_for_channel(
+    channel_key: str,
+    admin_id: int | None = None,
+    limit: int = PENDING_PAGE_SIZE,
+    offset: int = 0,
+):
+    """
+    پیام‌های در انتظار یک کانال — صفحه‌بندی برای سرور ضعیف.
+    پیام بدون channel_key فقط در کانال پیش‌فرض (صدام بزن) دیده می‌شود.
+    """
+    key = channel_key or DEFAULT_CHANNEL_KEY
+    ch_sql = """
+        (
+            channel_key = ?
+            OR (
+                ? = ?
+                AND (channel_key IS NULL OR channel_key = '')
+            )
+        )
+    """
+    try:
+        if admin_id is None:
+            return db.conn.execute(
+                f"""
+                SELECT *
+                FROM messages
+                WHERE status IN ('pending', 'queued', 'processing')
+                  AND {ch_sql}
+                ORDER BY id ASC
+                LIMIT ? OFFSET ?
+                """,
+                (key, key, DEFAULT_CHANNEL_KEY, limit, offset),
+            ).fetchall()
+
+        return db.conn.execute(
+            f"""
+            SELECT *
+            FROM messages
+            WHERE status IN ('pending', 'queued', 'processing')
+              AND {ch_sql}
+              AND (
+                    admin_id IS NULL
+                    OR admin_id = ?
+                    OR status = 'queued'
+                  )
+            ORDER BY id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (key, key, DEFAULT_CHANNEL_KEY, admin_id, limit, offset),
+        ).fetchall()
+    except Exception:
+        logger.exception(
+            "GET PENDING FOR CHANNEL ERROR | channel=%s admin=%s",
+            key,
+            admin_id,
+        )
+        return []
+
+
+def count_pending_for_channel(
+    channel_key: str,
+    admin_id: int | None = None,
+) -> int:
+    key = channel_key or DEFAULT_CHANNEL_KEY
+    ch_sql = """
+        (
+            channel_key = ?
+            OR (
+                ? = ?
+                AND (channel_key IS NULL OR channel_key = '')
+            )
+        )
+    """
+    try:
+        if admin_id is None:
+            row = db.conn.execute(
+                f"""
+                SELECT COUNT(*) AS c FROM messages
+                WHERE status IN ('pending', 'queued', 'processing')
+                  AND {ch_sql}
+                """,
+                (key, key, DEFAULT_CHANNEL_KEY),
+            ).fetchone()
+        else:
+            row = db.conn.execute(
+                f"""
+                SELECT COUNT(*) AS c FROM messages
+                WHERE status IN ('pending', 'queued', 'processing')
+                  AND {ch_sql}
+                  AND (admin_id IS NULL OR admin_id = ? OR status = 'queued')
+                """,
+                (key, key, DEFAULT_CHANNEL_KEY, admin_id),
+            ).fetchone()
+        return int(row["c"] or 0) if row else 0
+    except Exception:
+        return 0
 
 
 def pending_group_id() -> int | None:
@@ -1361,11 +1836,13 @@ def validate_submission(
             "متن را بدون ایموجی بفرست."
         )
 
-    if not text.startswith("صدام بزن"):
+    if channel_key_from_prefix(text) is None:
         errors.append(
-            "پیام باید با «صدام بزن» شروع شود.\n"
-            "مثال درست:\n"
-            "صدام بزن سلام به همگی ."
+            "پیام باید با یکی از این‌ها شروع شود:\n"
+            "• صدام بزن\n"
+            "• این کاربر\n"
+            "• تو زندگی بعدی\n\n"
+            "مثال: صدام بزن سلام به همگی ."
         )
 
     if not is_fully_bold(text, entities):
@@ -1497,33 +1974,16 @@ def owner_keyboard(
             ],
             [
                 KeyboardButton(
-                    text="👥 کاربران"
-                ),
-                KeyboardButton(
                     text="📢 کانال"
                 ),
-            ],
-            [
                 KeyboardButton(
                     text="📢 اطلاعیه‌ها"
                 ),
+            ],
+            [
                 KeyboardButton(
                     text="⚙️ تنظیمات"
                 ),
-            ],
-            [
-                KeyboardButton(
-                    text="🛡️ امنیت و دسترسی"
-                ),
-                KeyboardButton(
-                    text=(
-                        "🔴 خاموش کردن"
-                        if enabled
-                        else "🟢 روشن کردن"
-                    )
-                ),
-            ],
-            [
                 KeyboardButton(
                     text="❓ راهنما"
                 ),
@@ -1616,7 +2076,7 @@ async def show_home(
         await message.answer(
             (
                 "👑 سلام مالک عزیز\n\n"
-                "به مرکز کنترل ربات صدام بزن خوش آمدی.\n\n"
+                "به مرکز کنترل ربات چندکاناله خوش آمدی.\n\n"
                 f"🟢 وضعیت ربات: "
                 f"{'فعال' if db.is_bot_enabled() else 'غیرفعال'}\n"
                 f"👥 ادمین‌ها: "
@@ -1641,7 +2101,7 @@ async def show_home(
             (
                 f"👋 سلام "
                 f"{escape(await get_profile_name(bot, user_id, admin['name']))}\n\n"
-                "شما ادمین ربات صدام بزن هستید."
+                "شما ادمین ربات هستید."
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=admin_keyboard(),
@@ -1679,6 +2139,87 @@ async def group_router(
     user = message.from_user
 
     if not user:
+        return
+
+    # گروه‌های ثابت سه کانال — مدیریت شیفت مستقیم
+    group_ch = channel_key_for_group(message.chat.id)
+    if group_ch and bot_matches_text(text):
+        admin = db.get_admin(user.id)
+        if not admin and not db.is_owner(user.id):
+            await message.answer("⛔ شما ادمین ربات نیستید.")
+            return
+        if admin and not db.is_owner(user.id):
+            a_chs = admin_channel_keys(user.id)
+            if a_chs and group_ch not in a_chs:
+                await message.answer(
+                    "⛔ این گروه مربوط به کانال شما نیست."
+                )
+                return
+        if not user_started(user.id) and not db.is_owner(user.id):
+            link = (
+                f"https://t.me/{BOT_USERNAME}"
+                if BOT_USERNAME
+                else ""
+            )
+            await message.answer(
+                (
+                    "⚠️ برای مدیریت شیفت ابتدا باید ربات را در PV "
+                    "استارت کنی.\n\n"
+                    f"🔗 {link}"
+                )
+            )
+            return
+
+        now = local_now()
+        can_pick_tomorrow = now.hour >= 22
+        title = CHANNELS[group_ch]["title"]
+        if can_pick_tomorrow:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        _btn(
+                            "📅 شیفت امروز (ساعات باقی‌مانده)",
+                            "group_shift:today",
+                            style="primary",
+                        )
+                    ],
+                    [
+                        _btn(
+                            "📆 شیفت فردا",
+                            "group_shift:tomorrow",
+                            style="success",
+                        )
+                    ],
+                ]
+            )
+            text_out = (
+                f"👨‍💼 مدیریت شیفت — <b>{title}</b>\n\n"
+                "الان بین <b>۲۲ تا ۰۰</b> هستید.\n"
+                "می‌توانید شیفت <b>امروز</b> یا <b>فردا</b> را تنظیم کنید.\n\n"
+                "⏱ بازه‌های مجاز: فقط از <b>۱۲:۰۰ تا ۰۰:۰۰</b>"
+            )
+        else:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        _btn(
+                            "📅 تعیین شیفت امروز",
+                            "group_shift:today",
+                            style="primary",
+                        )
+                    ]
+                ]
+            )
+            text_out = (
+                f"👨‍💼 مدیریت شیفت — <b>{title}</b>\n\n"
+                "شیفت فقط برای <b>امروز</b> قابل تعیین است.\n\n"
+                "⏱ بازه‌های مجاز: فقط از <b>۱۲:۰۰ تا ۰۰:۰۰</b>"
+            )
+        await message.answer(
+            text_out,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
         return
 
     configured = configured_group_id()
@@ -1990,40 +2531,37 @@ async def cancel_group(
 async def user_send_start(
     message: Message,
 ):
-
-    if db.is_blocked(
-        message.from_user.id
-    ):
-
-        await message.answer(
-            ERROR_MESSAGES["blocked"]
-        )
-
-        return
-
-    if not db.is_bot_enabled():
-
-        await message.answer(
-            ERROR_MESSAGES["bot_disabled"]
-        )
-
-        return
-
+    # پاسخ سریع اول — جلوگیری از «اولی کار نمی‌کند»
     set_state(
         message.from_user.id,
         "user_send",
     )
 
-    await message.answer(
-        (
-            "📝 پیام خودت را بفرست.\n\n"
-            "• با «صدام بزن» شروع شود\n"
-            "• کل پیام Bold باشد\n"
-            "• با « .» تمام شود\n"
-            "• لینک نداشته باشد"
-        ),
-        reply_markup=back_keyboard(),
-    )
+    try:
+        await message.answer(
+            (
+                "📝 پیام خودت را بفرست.\n\n"
+                "• با «صدام بزن / این کاربر / تو زندگی بعدی  » شروع شود .\n"
+                "• کل پیام Bold باشد .\n"
+                "• با « .» تمام شود .\n"
+                "• لینک نداشته باشد .\n"
+                "• فاقد هر گونه ایموجی باشد ."
+            ),
+            reply_markup=back_keyboard(),
+        )
+    except Exception:
+        logger.exception("USER SEND START ANSWER ERROR")
+        return
+
+    if db.is_blocked(message.from_user.id):
+        clear_state(message.from_user.id)
+        await message.answer(ERROR_MESSAGES["blocked"])
+        return
+
+    if not db.is_bot_enabled():
+        clear_state(message.from_user.id)
+        await message.answer(ERROR_MESSAGES["bot_disabled"])
+        return
 
 
 # =========================================================
@@ -2107,8 +2645,16 @@ async def send_review_message(
         row["user_id"],
     )
 
+    try:
+        ch_key = row["channel_key"]
+    except Exception:
+        ch_key = None
+    ch_key = ch_key or DEFAULT_CHANNEL_KEY
+    ch_title = get_channel_cfg(ch_key)["title"]
+
     prefix = (
         f"📨 پیام جدید #{message_id}\n"
+        f"📺 کانال: {ch_title}\n"
         f"👤 ارسال‌کننده: {sender}\n\n"
     )
 
@@ -2170,10 +2716,21 @@ async def can_review(user_id: int, row) -> bool:
     except Exception:
         row_admin = None
 
+    # پیام بدون ادمین (queued) برای ادمین شیفت همان کانال مجاز است
     if row_admin is not None and int(row_admin) != int(user_id):
         return False
 
-    current = get_current_shift_safe()
+    try:
+        msg_ch = row["channel_key"] if not isinstance(row, dict) else row.get("channel_key")
+    except Exception:
+        msg_ch = None
+    msg_ch = msg_ch or DEFAULT_CHANNEL_KEY
+
+    admin_chs = admin_channel_keys(user_id)
+    if msg_ch not in admin_chs:
+        return False
+
+    current = await get_current_shift_safe_async(channel_key=msg_ch)
     if not current:
         return False
 
@@ -2217,6 +2774,97 @@ async def edit_original_admin_message(
         )
 
 
+async def deliver_pending_rows(
+    bot: Bot,
+    user_id: int,
+    rows,
+    is_owner: bool = False,
+    total: int | None = None,
+    channel_key: str | None = None,
+    offset: int = 0,
+):
+    if not rows:
+        await bot.send_message(
+            chat_id=user_id,
+            text="📥 فعلاً پیام در انتظاری وجود ندارد.",
+            reply_markup=(
+                clear_pending_keyboard()
+                if is_owner
+                else admin_keyboard()
+            ),
+        )
+        if is_owner:
+            await bot.send_message(
+                chat_id=user_id,
+                text="پنل مالک:",
+                reply_markup=owner_keyboard(db.is_bot_enabled()),
+            )
+        return
+
+    sent_count = 0
+    failed_count = 0
+    for row in rows:
+        try:
+            await send_review_message(bot, user_id, row)
+            sent_count += 1
+        except Exception:
+            failed_count += 1
+            logger.exception(
+                "PENDING MESSAGES SEND ERROR | message_id=%s | to_user=%s",
+                row["id"],
+                user_id,
+            )
+            continue
+        await asyncio.sleep(0.03)
+
+    shown_to = offset + sent_count
+    total_n = total if total is not None else shown_to
+    summary = f"📥 {sent_count} پیام نمایش داده شد."
+    if total_n > shown_to:
+        summary += f"\n📄 نمایش {offset + 1} تا {shown_to} از {total_n}"
+    if failed_count:
+        summary += (
+            f"\n⚠️ {failed_count} پیام ارسال نشد "
+            "(محدودیت Telegram یا خطای موقت)."
+        )
+
+    markup = (
+        owner_keyboard(db.is_bot_enabled())
+        if is_owner
+        else admin_keyboard()
+    )
+    # دکمه صفحه بعد
+    if total_n > shown_to and channel_key:
+        next_offset = offset + PENDING_PAGE_SIZE
+        markup_inline = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    _btn(
+                        f"📄 صفحه بعد ({shown_to + 1}…)",
+                        f"pending_more:{channel_key}:{next_offset}:{'1' if is_owner else '0'}",
+                        style="primary",
+                    )
+                ]
+            ]
+        )
+        await bot.send_message(
+            chat_id=user_id,
+            text=summary,
+            reply_markup=markup_inline,
+        )
+        await bot.send_message(
+            chat_id=user_id,
+            text="منو:",
+            reply_markup=markup,
+        )
+    else:
+        await bot.send_message(
+            chat_id=user_id,
+            text=summary,
+            reply_markup=markup,
+        )
+
+
 @router.message(
     F.text == "📥 پیام‌های در انتظار",
     F.chat.type == "private",
@@ -2229,19 +2877,26 @@ async def pending_messages(
     user_id = message.from_user.id
 
     if db.is_owner(user_id):
-
-        # مالک: pending + queued + processing
-        rows = get_owner_pending_rows()
+        # مالک اول کانال را انتخاب می‌کند
+        await message.answer(
+            "📥 پیام‌های در انتظار کدام کانال؟",
+            reply_markup=channels_keyboard("pending_ch"),
+        )
+        return
 
     elif db.get_admin(user_id):
 
-        # ادمین فقط وقتی داخل شیفت خودش است می‌تواند
-        # پیام‌های در انتظار را ببیند.
-        current = get_current_shift_safe()
-        if (
-            not current
-            or int(current[0]["admin_id"]) != int(user_id)
-        ):
+        # ادمین فقط وقتی داخل شیفت خودش است (در هر کانالی که عضو آن است)
+        admin_chs = admin_channel_keys(user_id)
+        current = None
+        ch_key = None
+        for ck in admin_chs:
+            cur = await get_current_shift_safe_async(channel_key=ck)
+            if cur and int(cur[0]["admin_id"]) == int(user_id):
+                current = cur
+                ch_key = ck
+                break
+        if not current or not ch_key:
             await message.answer(
                 (
                     "⛔ شما در حال حاضر در شیفت نیستید.\n\n"
@@ -2252,94 +2907,128 @@ async def pending_messages(
             )
             return
 
-        rows = db.get_pending_for_admin(
-            user_id
-        )
-
-    else:
-        return
-
-    if not rows:
-
-        await message.answer(
-            "📥 فعلاً پیام در انتظاری وجود ندارد.",
-            reply_markup=(
-                clear_pending_keyboard()
-                if db.is_owner(user_id)
-                else admin_keyboard()
-            ),
-        )
-
-        if db.is_owner(user_id):
-
-            await message.answer(
-                "پنل مالک:",
-                reply_markup=owner_keyboard(
-                    db.is_bot_enabled()
-                ),
-            )
-
-        return
-
-    sent_count = 0
-    failed_count = 0
-
-    for row in rows:
-
         try:
-
-            await send_review_message(
-                bot,
-                user_id,
-                row,
+            total = await asyncio.to_thread(
+                count_pending_for_channel, ch_key, user_id
             )
-
-            sent_count += 1
-
+            rows = await asyncio.to_thread(
+                get_pending_rows_for_channel,
+                ch_key, user_id, PENDING_PAGE_SIZE, 0,
+            )
         except Exception:
-
-            failed_count += 1
-
-            logger.exception(
-                "PENDING MESSAGES SEND ERROR | "
-                "message_id=%s | to_user=%s",
-                row["id"],
-                user_id,
-            )
-
-            continue
-
-        await asyncio.sleep(0.05)
-
-    summary = f"📥 {sent_count} پیام نمایش داده شد."
-
-    if failed_count:
-        summary += (
-            f"\n⚠️ {failed_count} پیام ارسال نشد "
-            "(محدودیت Telegram یا خطای موقت). "
-            "دوباره «📥 پیام‌های در انتظار» را بزن."
+            logger.exception("PENDING LOAD ERROR | admin=%s", user_id)
+            await message.answer(GENERIC_ERROR, reply_markup=admin_keyboard())
+            return
+        await deliver_pending_rows(
+            bot,
+            user_id,
+            rows,
+            is_owner=False,
+            total=total,
+            channel_key=ch_key,
+            offset=0,
         )
-
-    if db.is_owner(user_id):
-
-        await message.answer(
-            summary,
-            reply_markup=clear_pending_keyboard(),
-        )
-
-        await message.answer(
-            "پنل مالک:",
-            reply_markup=owner_keyboard(
-                db.is_bot_enabled()
-            ),
-        )
+        return
 
     else:
+        return
 
-        await message.answer(
-            summary,
-            reply_markup=admin_keyboard(),
+
+@router.callback_query(
+    F.data.startswith("pending_ch:")
+)
+async def pending_channel_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+):
+    if not db.is_owner(callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+
+    key = callback.data.split(":", 1)[1]
+    if key not in CHANNELS:
+        await callback.answer("کانال نامعتبر.", show_alert=True)
+        return
+
+    await callback.answer()
+    title = CHANNELS[key]["title"]
+    try:
+        await callback.message.edit_text(
+            f"📥 در حال بارگذاری پیام‌های «{title}»..."
         )
+    except Exception:
+        pass
+
+    try:
+        total = await asyncio.to_thread(count_pending_for_channel, key, None)
+        rows = await asyncio.to_thread(
+            get_pending_rows_for_channel, key, None, PENDING_PAGE_SIZE, 0
+        )
+    except Exception:
+        logger.exception("OWNER PENDING LOAD ERROR | channel=%s", key)
+        await callback.message.answer(GENERIC_ERROR)
+        return
+    await deliver_pending_rows(
+        bot,
+        callback.from_user.id,
+        rows,
+        is_owner=True,
+        total=total,
+        channel_key=key,
+        offset=0,
+    )
+
+
+@router.callback_query(
+    F.data.startswith("pending_more:")
+)
+async def pending_more_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+):
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer()
+        return
+    key = parts[1]
+    try:
+        offset = int(parts[2])
+        is_owner = parts[3] == "1"
+    except Exception:
+        await callback.answer()
+        return
+
+    uid = callback.from_user.id
+    if is_owner and not db.is_owner(uid):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    if not is_owner and not db.get_admin(uid):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
+        return
+
+    await callback.answer("⏳ صفحه بعد...")
+    admin_id = None if is_owner else uid
+    try:
+        total = await asyncio.to_thread(
+            count_pending_for_channel, key, admin_id
+        )
+        rows = await asyncio.to_thread(
+            get_pending_rows_for_channel,
+            key, admin_id, PENDING_PAGE_SIZE, offset,
+        )
+    except Exception:
+        logger.exception("PENDING MORE LOAD ERROR")
+        await callback.message.answer(GENERIC_ERROR)
+        return
+    await deliver_pending_rows(
+        bot,
+        uid,
+        rows,
+        is_owner=is_owner,
+        total=total,
+        channel_key=key,
+        offset=offset,
+    )
 
 
 @router.callback_query(
@@ -2462,6 +3151,11 @@ async def approve_callback(
         await callback.answer()
         return
 
+    # پاسخ فوری برای حس سرعت و جلوگیری از دوباره‌کلیک
+    if message_id in _processing_message_ids:
+        await callback.answer("در حال پردازش...", show_alert=False)
+        return
+
     row = db.get_message(
         message_id
     )
@@ -2496,129 +3190,120 @@ async def approve_callback(
 
         return
 
-    # اگر در صف بوده، برای claim به pending برگردان
-    if row["status"] == "queued":
+    _processing_message_ids.add(message_id)
+    try:
+        await callback.answer("⏳ در حال ارسال...")
+    except Exception:
+        pass
+
+    try:
+
+        # اگر در صف بوده، برای claim به pending برگردان
+        if row["status"] == "queued":
+            try:
+                await db_execute(
+                    """
+                    UPDATE messages
+                    SET status = 'pending'
+                    WHERE id = ? AND status = 'queued'
+                    """,
+                    (message_id,),
+                )
+                await db_commit()
+            except Exception:
+                logger.exception(
+                    "QUEUE TO PENDING ERROR | message_id=%s",
+                    message_id,
+                )
+
+        if not db.claim_message(
+            message_id
+        ):
+
+            try:
+                await callback.message.edit_text(
+                    "این پیام قبلاً بررسی شده.",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+            return
+
+        # کانال بر اساس channel_key پیام
         try:
-            db.conn.execute(
-                """
-                UPDATE messages
-                SET status = 'pending'
-                WHERE id = ? AND status = 'queued'
-                """,
-                (message_id,),
+            msg_ch = row["channel_key"]
+        except Exception:
+            msg_ch = None
+        channel_id = channel_id_for_key(msg_ch)
+
+        try:
+            logger.info(
+                "Publishing message #%s to channel %s",
+                message_id,
+                channel_id,
             )
-            db.conn.commit()
+            sent = await bot.send_message(
+                chat_id=channel_id,
+                text=row["content"],
+                entities=get_message_entities(row),
+            )
+        except Exception as e:
+            logger.exception(
+                "CHANNEL PUBLISH ERROR | message_id=%s | channel_id=%s | error=%s",
+                message_id,
+                channel_id,
+                e,
+            )
+            db.restore_pending(message_id)
+            error_text = str(e).strip() or "خطای نامشخص Telegram"
+            try:
+                await callback.message.edit_text(
+                    f"❌ انتشار ناموفق:\n{error_text[:180]}",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+            return
+
+        db.set_channel_message_id(message_id, sent.message_id)
+        db.set_message_status(message_id, "approved")
+
+        try:
+            await callback.message.edit_text(
+                "🟢 ارسال شد",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+        await edit_original_admin_message(
+            bot,
+            row,
+            "🟢 ارسال شد",
+        )
+
+        # اعلان به کاربر + لینک پست کانال
+        try:
+            post_link = await build_channel_post_link(
+                bot,
+                channel_id,
+                sent.message_id,
+            )
+            user_text = "✅ پیام شما تأیید و در کانال منتشر شد."
+            if post_link:
+                user_text += f"\n\n🔗 مشاهده در کانال:\n{post_link}"
+            await bot.send_message(
+                chat_id=row["user_id"],
+                text=user_text,
+            )
         except Exception:
             logger.exception(
-                "QUEUE TO PENDING ERROR | message_id=%s",
+                "USER PUBLISH NOTIFY ERROR | message_id=%s | user_id=%s",
                 message_id,
+                row["user_id"],
             )
-
-    if not db.claim_message(
-        message_id
-    ):
-
-        await callback.answer(
-            "این پیام قبلاً بررسی شده.",
-            show_alert=True,
-        )
-
-        return
-
-    channel_id = db.get_channel_id()
-
-    try:
-
-        logger.info(
-            "Publishing message #%s to channel %s",
-            message_id,
-            channel_id,
-        )
-
-        sent = await bot.send_message(
-            chat_id=channel_id,
-            text=row["content"],
-            entities=get_message_entities(row),
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "CHANNEL PUBLISH ERROR | "
-            "message_id=%s | channel_id=%s | error=%s",
-            message_id,
-            channel_id,
-            e,
-        )
-
-        db.restore_pending(
-            message_id
-        )
-
-        error_text = str(e).strip()
-
-        if not error_text:
-            error_text = (
-                "خطای نامشخص Telegram"
-            )
-
-        await callback.answer(
-            (
-                "انتشار ناموفق بود:\n"
-                f"{error_text[:180]}"
-            ),
-            show_alert=True,
-        )
-
-        return
-
-    db.set_channel_message_id(
-        message_id,
-        sent.message_id,
-    )
-
-    db.set_message_status(
-        message_id,
-        "approved",
-    )
-
-    await callback.answer(
-        "پیام منتشر شد."
-    )
-
-    await callback.message.edit_text(
-        "🟢 ارسال شد",
-        reply_markup=None,
-    )
-
-    await edit_original_admin_message(
-        bot,
-        row,
-        "🟢 ارسال شد",
-    )
-
-    # اعلان به کاربر + لینک پست کانال
-    try:
-        post_link = await build_channel_post_link(
-            bot,
-            channel_id,
-            sent.message_id,
-        )
-        user_text = (
-            "✅ پیام شما تأیید و در کانال منتشر شد."
-        )
-        if post_link:
-            user_text += f"\n\n🔗 مشاهده در کانال:\n{post_link}"
-        await bot.send_message(
-            chat_id=row["user_id"],
-            text=user_text,
-        )
-    except Exception:
-        logger.exception(
-            "USER PUBLISH NOTIFY ERROR | message_id=%s | user_id=%s",
-            message_id,
-            row["user_id"],
-        )
+    finally:
+        _processing_message_ids.discard(message_id)
 
 
 # =========================================================
@@ -2756,7 +3441,7 @@ async def reject_reason_callback(
 
     if row["status"] == "queued":
         try:
-            db.conn.execute(
+            await db_execute(
                 """
                 UPDATE messages
                 SET status = 'pending'
@@ -2764,7 +3449,7 @@ async def reject_reason_callback(
                 """,
                 (message_id,),
             )
-            db.conn.commit()
+            await db_commit()
         except Exception:
             logger.exception(
                 "QUEUE TO PENDING REJECT ERROR | message_id=%s",
@@ -2950,56 +3635,137 @@ async def owner_admins(
     ):
         return
 
-    admins = db.get_admins()
-
-    lines = [
-        "👥 ادمین‌ها\n"
-    ]
-
-    if not admins:
-
-        lines.append(
-            "هیچ ادمینی ثبت نشده."
-        )
-
-    for admin in admins:
-
-        mention = await mention_user(
-            bot,
-            admin["user_id"],
-            admin["name"],
-        )
-
-        lines.append(
-            f"• {mention}"
-        )
-
-    buttons = [[
-        InlineKeyboardButton(
-            text="➕ افزودن ادمین",
-            callback_data="admin:add",
-        )
-    ]]
-
-    if admins:
-        buttons.append([InlineKeyboardButton(
-            text="🗑 حذف ادمین",
-            callback_data="admin:delete",
-        )])
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=buttons
-    )
-
     await message.answer(
-        "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
+        "👥 ادمین‌های کدام کانال را می‌خواهی ببینی؟",
+        reply_markup=channels_keyboard("admins_ch"),
     )
 
 
 @router.callback_query(
-    F.data == "admin:delete"
+    F.data.startswith("admins_ch:")
+)
+async def owner_admins_channel_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+):
+    if not db.is_owner(callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+
+    key = callback.data.split(":", 1)[1]
+
+    # برگشت به منوی ۳ کانال
+    if key == "back":
+        await callback.answer()
+        try:
+            await callback.message.edit_text(
+                "👥 ادمین‌های کدام کانال را می‌خواهی ببینی؟",
+                reply_markup=channels_keyboard("admins_ch"),
+            )
+        except Exception:
+            await callback.message.answer(
+                "👥 ادمین‌های کدام کانال را می‌خواهی ببینی؟",
+                reply_markup=channels_keyboard("admins_ch"),
+            )
+        return
+
+    if key not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+
+    await callback.answer()
+    title = CHANNELS[key]["title"]
+
+    # ادمین‌های همان کانال (پشتیبانی از چندکاناله با channel_key جداشده با کاما)
+    try:
+        if key == DEFAULT_CHANNEL_KEY:
+            admins = db.conn.execute(
+                """
+                SELECT *
+                FROM admins
+                WHERE active = 1
+                  AND (
+                        channel_key = ?
+                        OR channel_key IS NULL
+                        OR channel_key = ''
+                        OR channel_key LIKE ?
+                        OR channel_key LIKE ?
+                        OR channel_key LIKE ?
+                      )
+                ORDER BY user_id
+                """,
+                (key, key + ",%", "%," + key, "%," + key + ",%"),
+            ).fetchall()
+        else:
+            admins = db.conn.execute(
+                """
+                SELECT *
+                FROM admins
+                WHERE active = 1
+                  AND (
+                        channel_key = ?
+                        OR channel_key LIKE ?
+                        OR channel_key LIKE ?
+                        OR channel_key LIKE ?
+                      )
+                ORDER BY user_id
+                """,
+                (key, key + ",%", "%," + key, "%," + key + ",%"),
+            ).fetchall()
+    except Exception:
+        logger.exception("OWNER ADMINS LIST ERROR | channel=%s", key)
+        admins = []
+
+    lines = [f"👥 ادمین‌های «{title}»\n"]
+
+    if not admins:
+        lines.append("هیچ ادمینی برای این کانال ثبت نشده.")
+    else:
+        for admin in admins:
+            mention = await mention_user(
+                bot,
+                admin["user_id"],
+                admin["name"],
+            )
+            lines.append(f"• {mention}")
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="➕ افزودن ادمین",
+                callback_data=f"admin:add:{key}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🗑 حذف ادمین",
+                callback_data=f"admin:delete:{key}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="↩️ برگشت به انتخاب کانال",
+                callback_data="admins_ch:back",
+            )
+        ],
+    ]
+
+    try:
+        await callback.message.edit_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+    except Exception:
+        await callback.message.answer(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+
+
+@router.callback_query(
+    F.data.regexp(r"^admin:delete(?::[a-z_]+)?$")
 )
 async def owner_delete_admin_start(
     callback: CallbackQuery,
@@ -3008,39 +3774,82 @@ async def owner_delete_admin_start(
         await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
         return
 
-    admins = db.get_admins()
+    # فقط admin:delete یا admin:delete:channel_key
+    parts = callback.data.split(":")
+    ch_key = parts[2] if len(parts) >= 3 else DEFAULT_CHANNEL_KEY
+    if ch_key not in CHANNELS:
+        ch_key = DEFAULT_CHANNEL_KEY
+
+    try:
+        if ch_key == DEFAULT_CHANNEL_KEY:
+            admins = db.conn.execute(
+                """
+                SELECT * FROM admins
+                WHERE active = 1
+                  AND (
+                        channel_key = ?
+                        OR channel_key IS NULL
+                        OR channel_key = ''
+                        OR channel_key LIKE ?
+                        OR channel_key LIKE ?
+                        OR channel_key LIKE ?
+                      )
+                ORDER BY user_id
+                """,
+                (ch_key, ch_key + ",%", "%," + ch_key, "%," + ch_key + ",%"),
+            ).fetchall()
+        else:
+            admins = db.conn.execute(
+                """
+                SELECT * FROM admins
+                WHERE active = 1
+                  AND (
+                        channel_key = ?
+                        OR channel_key LIKE ?
+                        OR channel_key LIKE ?
+                        OR channel_key LIKE ?
+                      )
+                ORDER BY user_id
+                """,
+                (ch_key, ch_key + ",%", "%," + ch_key, "%," + ch_key + ",%"),
+            ).fetchall()
+    except Exception:
+        admins = db.get_admins()
 
     if not admins:
         await callback.answer(
-            "⚠️ هیچ ادمینی ثبت نشده است.",
+            "⚠️ هیچ ادمینی برای این کانال ثبت نشده است.",
             show_alert=True,
         )
         return
 
     buttons = []
-
     for admin in admins:
         name = admin["name"] or str(admin["user_id"])
-
-        buttons.append([InlineKeyboardButton(
-            text=f"🗑 {name}",
-            callback_data=f"admin:delete_select:{admin['user_id']}",
-        )])
-
-    buttons.append([InlineKeyboardButton(
-        text="❌ انصراف",
-        callback_data="admin:delete_cancel",
-    )])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🗑 {name}",
+                    callback_data=f"admin:delete_select:{admin['user_id']}",
+                )
+            ]
+        )
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="❌ انصراف",
+                callback_data="admin:delete_cancel",
+            )
+        ]
+    )
 
     await callback.answer()
-
+    title = CHANNELS[ch_key]["title"]
     await callback.message.answer(
-        "🗑 <b>حذف ادمین</b>\n\n"
+        f"🗑 <b>حذف ادمین — {title}</b>\n\n"
         "ادمینی که می‌خواهی حذف شود را انتخاب کن:",
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=buttons
-        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
 
@@ -3177,7 +3986,7 @@ async def owner_delete_admin_cancel(
 
 
 @router.callback_query(
-    F.data == "admin:add"
+    F.data.startswith("admin:add")
 )
 async def owner_add_admin_start(
     callback: CallbackQuery,
@@ -3194,16 +4003,23 @@ async def owner_add_admin_start(
 
         return
 
+    parts = callback.data.split(":")
+    ch_key = parts[2] if len(parts) >= 3 else DEFAULT_CHANNEL_KEY
+    if ch_key not in CHANNELS:
+        ch_key = DEFAULT_CHANNEL_KEY
+
     await callback.answer()
 
     set_state(
         callback.from_user.id,
         "add_admin",
+        channel_key=ch_key,
     )
 
+    title = CHANNELS[ch_key]["title"]
     await callback.message.answer(
         (
-            "➕ افزودن ادمین\n\n"
+            f"➕ افزودن ادمین برای «{title}»\n\n"
             "آیدی عددی یا username را بفرست.\n\n"
             "مثال:\n"
             "123456789\n"
@@ -3567,68 +4383,72 @@ async def select_shift_admin(
 def group_shift_hourly_keyboard(
     for_date: str | None = None,
     for_tomorrow: bool = False,
+    channel_key: str | None = None,
 ):
     """
-    فقط بازه‌های ۱۲:۰۰ تا ۰۰:۰۰ (نیمه‌شب).
-    اگر for_tomorrow=True کل بازه‌های فردا از ۱۲ تا ۲۴ نمایش داده می‌شود.
-    اگر امروز باشد، فقط ساعت‌های باقی‌مانده از الان تا نیمه‌شب
-    (و نه قبل از ۱۲ ظهر).
+    صدام بزن: فقط ۱۲:۰۰ تا ۰۰:۰۰
+    این کاربر / تو زندگی بعدی: کل ۲۴ ساعت
     """
     now = local_now()
     target_date = for_date or today_string()
-    taken = get_taken_shift_slots(target_date)
+    ch = channel_key or DEFAULT_CHANNEL_KEY
+    existing_ranges = get_shift_ranges_for_date(target_date, channel_key=ch)
 
     buttons = []
 
     def make_button(start: str, end: str):
-        key = f"{start}-{end}"
-        if key in taken:
+        blocked = any(
+            _ranges_overlap(start, end, es, ee)
+            for es, ee in existing_ranges
+        )
+        if blocked:
             return [
                 _btn(
-                    f"🔴 انتخاب‌شده — {start} تا {end}",
+                    f"🔴 {start}–{end}",
                     f"group_shift_taken:{start}-{end}",
                     style="danger",
                 )
             ]
         return [
             _btn(
-                f"🟢 {start} تا {end}",
+                f"🟢 {start}–{end}",
                 f"group_shift_time:{start}-{end}",
                 style="success",
             )
         ]
 
-    # فقط ۱۲ تا ۲۴
-    SHIFT_START_HOUR = 12
-    SHIFT_END_HOUR = 24
+    # صدام بزن محدود به ۱۲–۲۴؛ بقیه کانال‌ها ۰–۲۴
+    if ch == "sadambazan":
+        SHIFT_START_HOUR = 12
+        SHIFT_END_HOUR = 24
+    else:
+        SHIFT_START_HOUR = 0
+        SHIFT_END_HOUR = 24
 
     if for_tomorrow:
         first_hour = SHIFT_START_HOUR
-        # کل بازه‌های فردا
         for hour in range(first_hour, SHIFT_END_HOUR):
             start_time = f"{hour:02d}:00"
             end_hour = (hour + 1) % 24
             end_time = f"{end_hour:02d}:00"
             buttons.append(make_button(start_time, end_time))
     else:
-        # امروز: از max(الان، ۱۲) تا ۲۴
         if now.hour < SHIFT_START_HOUR:
             first_hour = SHIFT_START_HOUR
-            # هنوز به ۱۲ نرسیده‌ایم؛ فقط از ۱۲ به بعد
             for hour in range(first_hour, SHIFT_END_HOUR):
                 start_time = f"{hour:02d}:00"
                 end_hour = (hour + 1) % 24
                 end_time = f"{end_hour:02d}:00"
                 buttons.append(make_button(start_time, end_time))
         else:
-            # ساعت جاری در بازه ۱۲–۲۴
             if now.minute > 0 or now.second > 0 or now.microsecond > 0:
                 next_hour = now.hour + 1
-                if next_hour <= SHIFT_END_HOUR:
+                if next_hour <= SHIFT_END_HOUR or (
+                    SHIFT_END_HOUR == 24 and next_hour == 24
+                ):
                     end = f"{next_hour % 24:02d}:00"
                     start_now = now.strftime("%H:%M")
-                    # فقط اگر start در بازه مجاز باشد
-                    if now.hour >= SHIFT_START_HOUR:
+                    if now.hour >= SHIFT_START_HOUR and now.hour < SHIFT_END_HOUR:
                         buttons.append(make_button(start_now, end))
                 first_hour = now.hour + 1
             else:
@@ -3735,11 +4555,9 @@ async def group_shift_callback(
     callback: CallbackQuery,
 ):
 
-    group_id = configured_group_id()
-
     if (
         not callback.message
-        or callback.message.chat.id != group_id
+        or not is_managed_group(callback.message.chat.id)
     ):
 
         await callback.answer(
@@ -3748,6 +4566,9 @@ async def group_shift_callback(
         )
 
         return
+
+    group_id = callback.message.chat.id
+    group_channel = channel_key_for_group(group_id)
 
     admin = db.get_admin(
         callback.from_user.id
@@ -3760,6 +4581,20 @@ async def group_shift_callback(
             show_alert=True,
         )
 
+        return
+
+    # ادمین فقط در گروه کانال‌هایی که عضو آن‌هاست
+    admin_chs = admin_channel_keys(callback.from_user.id)
+    if (
+        group_channel
+        and admin_chs
+        and group_channel not in admin_chs
+        and not db.is_owner(callback.from_user.id)
+    ):
+        await callback.answer(
+            "⛔ این گروه مربوط به کانال شما نیست.",
+            show_alert=True,
+        )
         return
 
     if not user_started(
@@ -3802,6 +4637,8 @@ async def group_shift_callback(
         target_date = today_string()
         title = "شیفت امروز"
 
+    ch_for_group = group_channel or DEFAULT_CHANNEL_KEY
+
     set_state(
         callback.from_user.id,
         "group_shift",
@@ -3810,28 +4647,37 @@ async def group_shift_callback(
         step="time",
         date=target_date,
         for_tomorrow=is_tomorrow,
+        channel_key=ch_for_group,
     )
 
     logger.info(
-        "GROUP SHIFT MENU | user_id=%s | group_id=%s | date=%s | mode=%s",
+        "GROUP SHIFT MENU | user_id=%s | group_id=%s | date=%s | mode=%s | ch=%s",
         callback.from_user.id,
         group_id,
         target_date,
         mode,
+        ch_for_group,
     )
 
     await callback.answer()
 
+    if ch_for_group == "sadambazan":
+        range_hint = "۱۲:۰۰ تا ۰۰:۰۰"
+    else:
+        range_hint = "۰۰:۰۰ تا ۲۴:۰۰ (کل شبانه‌روز)"
+
     await callback.message.answer(
         (
             f"📅 <b>{title}</b>\n"
+            f"📺 کانال: <b>{CHANNELS[ch_for_group]['title']}</b>\n"
             f"📆 تاریخ: <b>{target_date}</b>\n\n"
-            "⏰ یکی از بازه‌های یک‌ساعته (۱۲:۰۰ تا ۰۰:۰۰) را انتخاب کن:"
+            f"⏰ یکی از بازه‌های یک‌ساعته ({range_hint}) را انتخاب کن:"
         ),
         parse_mode=ParseMode.HTML,
         reply_markup=group_shift_hourly_keyboard(
             for_date=target_date,
             for_tomorrow=is_tomorrow,
+            channel_key=ch_for_group,
         ),
     )
 
@@ -3883,14 +4729,12 @@ async def group_shift_hourly_callback(
 
             return
 
-        group_id = configured_group_id()
-
-        if callback.message.chat.id != group_id:
+        group_id = callback.message.chat.id
+        if not is_managed_group(group_id):
 
             logger.warning(
-                "GROUP SHIFT WRONG GROUP | user_id=%s | chat_id=%s | configured=%s",
+                "GROUP SHIFT WRONG GROUP | user_id=%s | chat_id=%s",
                 user_id,
-                callback.message.chat.id,
                 group_id,
             )
 
@@ -3962,30 +4806,57 @@ async def group_shift_hourly_callback(
         is_tomorrow = bool(state.get("for_tomorrow"))
 
         # فقط بازه ۱۲–۲۴ مجاز
+        ch_key = (
+            (get_state(user_id) or {}).get("channel_key")
+            or channel_key_for_group(callback.message.chat.id if callback.message else 0)
+            or DEFAULT_CHANNEL_KEY
+        )
         try:
             sh = int(start.split(":")[0])
         except Exception:
             sh = -1
-        if sh < 12 and not (start.endswith(":00") and sh == 0 and end):
-            # اجازه نده بازه قبل از ۱۲ ثبت شود (جز پایان ۰۰:۰۰)
-            if sh < 12:
-                await callback.answer(
-                    "⛔ فقط بازه‌های ۱۲:۰۰ تا ۰۰:۰۰ مجاز است.",
-                    show_alert=True,
-                )
-                return
+        # فقط صدام بزن: محدودیت ۱۲–۲۴
+        if ch_key == "sadambazan" and sh < 12:
+            await callback.answer(
+                "⛔ در کانال صدام بزن فقط بازه‌های ۱۲:۰۰ تا ۰۰:۰۰ مجاز است.",
+                show_alert=True,
+            )
+            return
 
-        # جلوگیری از شیفت تکراری (همان بازه برای همان روز)
-        if is_shift_slot_taken(start, end, specific_date):
+        # جلوگیری از شیفت تکراری یا هم‌پوشان در همان کانال
+        taken = await asyncio.to_thread(
+            is_shift_slot_taken, start, end, specific_date, ch_key
+        )
+        if taken:
             logger.warning(
-                "GROUP SHIFT DUPLICATE | user_id=%s | start=%s | end=%s | date=%s",
+                "GROUP SHIFT OVERLAP/DUPLICATE | user_id=%s | start=%s | end=%s | date=%s | ch=%s",
+                user_id,
+                start,
+                end,
+                specific_date,
+                ch_key,
+            )
+            await callback.answer(
+                "⛔ این بازه با شیفت ثبت‌شدهٔ دیگری هم‌پوشانی دارد و قابل انتخاب نیست.",
+                show_alert=True,
+            )
+            return
+
+        # جلوگیری از هم‌پوشانی شیفت‌های خود ادمین در همه کانال‌ها
+        self_overlap = await asyncio.to_thread(
+            admin_has_overlapping_shift, user_id, start, end, specific_date
+        )
+        if self_overlap:
+            logger.warning(
+                "GROUP SHIFT ADMIN SELF-OVERLAP | user_id=%s | start=%s | end=%s | date=%s",
                 user_id,
                 start,
                 end,
                 specific_date,
             )
             await callback.answer(
-                "⛔ این بازه زمانی قبلاً ثبت شده و قابل انتخاب مجدد نیست.",
+                "⛔ شما قبلاً شیفتی در این بازه (یا هم‌پوشان با آن) در یکی از کانال‌ها دارید.\n"
+                "انتخاب دو شیفت یکسان یا هم‌پوشان برای یک ادمین مجاز نیست.",
                 show_alert=True,
             )
             return
@@ -3998,12 +4869,19 @@ async def group_shift_hourly_callback(
             specific_date,
         )
 
-        allowed, reason = db.check_admin_shift_limit(
-            admin_id=user_id,
-            start_time=start,
-            end_time=end,
-            specific_date=specific_date,
-        )
+        try:
+            allowed, reason = await asyncio.to_thread(
+                lambda: db.check_admin_shift_limit(
+                    admin_id=user_id,
+                    start_time=start,
+                    end_time=end,
+                    specific_date=specific_date,
+                )
+            )
+        except Exception:
+            logger.exception("GROUP SHIFT LIMIT CHECK ERROR")
+            await callback.answer(GENERIC_ERROR, show_alert=True)
+            return
 
         if not allowed:
 
@@ -4033,13 +4911,25 @@ async def group_shift_hourly_callback(
 
         try:
 
-            shift_id = db.create_shift(
-                start_time=start,
-                end_time=end,
-                admin_id=user_id,
-                permanent=False,
-                specific_date=specific_date,
+            shift_id = await asyncio.to_thread(
+                lambda: db.create_shift(
+                    start_time=start,
+                    end_time=end,
+                    admin_id=user_id,
+                    permanent=False,
+                    specific_date=specific_date,
+                )
             )
+            # اتصال شیفت به کانال گروه
+            ch = channel_key_for_group(group_id) or admin_channel_key(user_id) or DEFAULT_CHANNEL_KEY
+            try:
+                await db_execute(
+                    "UPDATE shifts SET channel_key = ? WHERE id = ?",
+                    (ch, shift_id),
+                )
+                await db_commit()
+            except Exception:
+                logger.exception("SET SHIFT CHANNEL ERROR | shift_id=%s", shift_id)
 
         except Exception:
 
@@ -4052,12 +4942,13 @@ async def group_shift_hourly_callback(
             )
 
             await callback.answer(
-                "❌ خطا در ثبت شیفت. لاگ ثبت شد.",
+                GENERIC_ERROR,
                 show_alert=True,
             )
 
             await callback.message.answer(
-                "❌ ثبت شیفت انجام نشد. خطای سیستم در لاگ ثبت شده است."
+                "❌ ثبت شیفت انجام نشد.\n"
+                "لطفاً چند ثانیه صبر کنید و دوباره امتحان کنید."
             )
 
             return
@@ -5205,6 +6096,13 @@ def owner_runtime_settings_keyboard():
                     style="success" if db.is_bot_enabled() else "danger",
                 )
             ],
+            [
+                _btn(
+                    "🧪 تست هر ۳ کانال",
+                    "cfg:test_channels",
+                    style="primary",
+                )
+            ],
         ]
     )
 
@@ -5265,6 +6163,28 @@ async def owner_cfg_callback(
         await callback.message.edit_reply_markup(
             reply_markup=owner_runtime_settings_keyboard()
         )
+        return
+
+    if action == "test_channels":
+        await callback.answer("⏳ در حال ارسال تست...")
+        results = []
+        for key, cfg in CHANNELS.items():
+            try:
+                await callback.bot.send_message(
+                    chat_id=int(cfg["channel_id"]),
+                    text="test",
+                )
+                results.append(f"✅ {cfg['title']}")
+            except Exception as e:
+                logger.exception("TEST CHANNEL SEND | %s", key)
+                results.append(f"❌ {cfg['title']}: {str(e)[:80]}")
+            await asyncio.sleep(0.2)
+        try:
+            await callback.message.answer(
+                "🧪 نتیجه تست کانال‌ها:\n\n" + "\n".join(results)
+            )
+        except Exception:
+            pass
         return
 
     # مقادیر عددی: ورود به state
@@ -5610,8 +6530,20 @@ async def send_announcement_now(
             logger.exception("ANN CHANNEL SEND ERROR")
 
     elif target == "admins":
+        # همه ادمین‌های فعال (در همه کانال‌ها) — بدون تکرار
+        try:
+            admin_rows = await db_fetchall(
+                """
+                SELECT DISTINCT user_id
+                FROM admins
+                WHERE active = 1
+                """
+            )
+        except Exception:
+            logger.exception("ANN GET ALL ADMINS ERROR")
+            admin_rows = []
         tasks = []
-        for admin in db.get_admins(active_only=True):
+        for admin in admin_rows:
             tasks.append(_send_one(admin["user_id"]))
         # دسته‌ای برای جلوگیری از flood
         batch_size = 15
@@ -5732,7 +6664,19 @@ async def process_scheduled_announcements(bot: Bot):
                 )
                 sent_ok = True
             elif target == "admins":
-                for admin in db.get_admins(active_only=True):
+                # همه ادمین‌های فعال در همه کانال‌ها (بدون تکرار)
+                try:
+                    admin_rows = await db_fetchall(
+                        """
+                        SELECT DISTINCT user_id
+                        FROM admins
+                        WHERE active = 1
+                        """
+                    )
+                except Exception:
+                    logger.exception("SCHEDULED ANN GET ADMINS ERROR")
+                    admin_rows = []
+                for admin in admin_rows:
                     try:
                         await bot.send_message(
                             chat_id=admin["user_id"],
@@ -6213,34 +7157,59 @@ async def handle_state(
             )
             return True
 
-        current = get_current_shift_safe()
+        msg_channel = channel_key_from_prefix(message.text or "") or DEFAULT_CHANNEL_KEY
+        current = await get_current_shift_safe_async(channel_key=msg_channel)
 
         entities = serialize_entities(
             message.entities
         )
 
+        async def _set_msg_channel(mid: int):
+            try:
+                await db_execute(
+                    """
+                    UPDATE messages
+                    SET channel_key = ?
+                    WHERE id = ?
+                    """,
+                    (msg_channel, mid),
+                )
+                await db_commit()
+            except Exception:
+                logger.exception(
+                    "SET MESSAGE CHANNEL ERROR | id=%s channel=%s",
+                    mid,
+                    msg_channel,
+                )
+
         if not current:
 
-            message_id = db.create_message(
-                user_id,
-                message.text,
-                entities,
-                None,
-            )
+            try:
+                message_id = await asyncio.to_thread(
+                    db.create_message,
+                    user_id,
+                    message.text,
+                    entities,
+                    None,
+                )
+                await _set_msg_channel(message_id)
 
-            db.conn.execute(
-                """
-                UPDATE messages
-                SET status = 'queued',
-                    admin_id = NULL
-                WHERE id = ?
-                """,
-                (message_id,),
-            )
+                await db_execute(
+                    """
+                    UPDATE messages
+                    SET status = 'queued',
+                        admin_id = NULL
+                    WHERE id = ?
+                    """,
+                    (message_id,),
+                )
+                await db_commit()
+            except Exception:
+                logger.exception("USER SEND CREATE QUEUED ERROR | user_id=%s", user_id)
+                await message.answer(GENERIC_ERROR)
+                return True
 
-            db.conn.commit()
-
-            next_shift = get_next_shift()
+            next_shift = await get_next_shift_async(channel_key=msg_channel)
 
             if next_shift:
 
@@ -6278,16 +7247,20 @@ async def handle_state(
         shift = current[0]
         admin_id = shift["admin_id"]
 
-        message_id = db.create_message(
-            user_id,
-            message.text,
-            entities,
-            admin_id,
-        )
-
-        row = db.get_message(
-            message_id
-        )
+        try:
+            message_id = await asyncio.to_thread(
+                db.create_message,
+                user_id,
+                message.text,
+                entities,
+                admin_id,
+            )
+            await _set_msg_channel(message_id)
+            row = await asyncio.to_thread(db.get_message, message_id)
+        except Exception:
+            logger.exception("USER SEND CREATE PENDING ERROR | user_id=%s", user_id)
+            await message.answer(GENERIC_ERROR)
+            return True
 
         try:
 
@@ -6297,7 +7270,8 @@ async def handle_state(
                 row,
             )
 
-            db.set_admin_message_id(
+            await asyncio.to_thread(
+                db.set_admin_message_id,
                 message_id,
                 sent.message_id,
             )
@@ -6323,7 +7297,8 @@ async def handle_state(
                 admin_id,
             )
 
-            db.set_message_status(
+            await asyncio.to_thread(
+                db.set_message_status,
                 message_id,
                 "queued",
             )
@@ -6461,11 +7436,15 @@ async def handle_state(
             return True
 
         try:
-
-            db.add_admin(
-                admin_id,
-                name,
-            )
+            # اگر قبلاً ادمین است، فقط کانال جدید را اضافه می‌کنیم
+            existing = db.get_admin(admin_id)
+            if not existing:
+                db.add_admin(
+                    admin_id,
+                    name,
+                )
+            ch = state.get("channel_key") or DEFAULT_CHANNEL_KEY
+            set_admin_channel(admin_id, ch)
 
         except Exception:
 
@@ -6474,7 +7453,8 @@ async def handle_state(
             )
 
             await message.answer(
-                "❌ افزودن ادمین ناموفق بود."
+                "❌ افزودن ادمین ناموفق بود.\n"
+                "لطفاً چند ثانیه بعد دوباره امتحان کنید."
             )
 
             return True
@@ -6488,11 +7468,17 @@ async def handle_state(
             admin_id,
             name,
         )
+        ch_title = CHANNELS.get(
+            state.get("channel_key") or DEFAULT_CHANNEL_KEY,
+            CHANNELS[DEFAULT_CHANNEL_KEY],
+        )["title"]
 
         await message.answer(
             (
-                "✅ ادمین با موفقیت اضافه شد.\n\n"
-                f"👤 {mention}"
+                f"✅ ادمین با موفقیت به «{ch_title}» اضافه شد.\n\n"
+                f"👤 {mention}\n\n"
+                "ℹ️ اگر این کاربر قبلاً ادمین کانال دیگری بود، "
+                "الان ادمین هر دو کانال است."
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=owner_keyboard(
@@ -6588,12 +7574,21 @@ async def handle_state(
 
             start, end = parsed
 
-            # جلوگیری از شیفت تکراری (برای تاریخ مشخص)
+            # جلوگیری از شیفت تکراری / هم‌پوشان (برای تاریخ مشخص)
             if not state.get("permanent"):
                 specific = state.get("specific_date") or today_string()
                 if is_shift_slot_taken(start, end, specific):
                     await message.answer(
-                        "⛔ این بازه زمانی برای این تاریخ قبلاً ثبت شده است."
+                        "⛔ این بازه با شیفت دیگری هم‌پوشانی دارد یا قبلاً ثبت شده است."
+                    )
+                    return True
+                admin_id_for_shift = state.get("admin_id")
+                if admin_id_for_shift and admin_has_overlapping_shift(
+                    admin_id_for_shift, start, end, specific
+                ):
+                    await message.answer(
+                        "⛔ این ادمین قبلاً شیفتی هم‌پوشان با این بازه (در هر کانالی) دارد.\n"
+                        "انتخاب دو شیفت یکسان یا هم‌پوشان برای یک ادمین مجاز نیست."
                     )
                     return True
 
@@ -6744,10 +7739,18 @@ async def handle_state(
                 )
                 return True
 
-            # جلوگیری از شیفت تکراری
+            # جلوگیری از شیفت تکراری یا هم‌پوشان در کانال
             if is_shift_slot_taken(start, end, specific_date):
                 await message.answer(
-                    "⛔ این بازه زمانی قبلاً ثبت شده و قابل انتخاب مجدد نیست."
+                    "⛔ این بازه با شیفت ثبت‌شدهٔ دیگری هم‌پوشانی دارد و قابل انتخاب نیست."
+                )
+                return True
+
+            # جلوگیری از هم‌پوشانی شیفت‌های خود ادمین در همه کانال‌ها
+            if admin_has_overlapping_shift(user_id, start, end, specific_date):
+                await message.answer(
+                    "⛔ شما قبلاً شیفتی در این بازه (یا هم‌پوشان با آن) در یکی از کانال‌ها دارید.\n"
+                    "انتخاب دو شیفت یکسان یا هم‌پوشان برای یک ادمین مجاز نیست."
                 )
                 return True
 
@@ -6908,7 +7911,10 @@ async def help_button(
             (
                 "📖 راهنمای ارسال پیام\n\n"
                 "برای ارسال پیام این قوانین رو رعایت کن:\n\n"
-                "1️⃣ پیام باید با «صدام بزن» شروع شود.\n"
+                "1️⃣ پیام باید با یکی از این‌ها شروع شود:\n"
+                "   • صدام بزن\n"
+                "   • این کاربر\n"
+                "   • تو زندگی بعدی\n"
                 "2️⃣ کل پیام باید Bold باشد.\n"
                 "3️⃣ پیام باید با « .» تمام شود.\n"
                 "4️⃣ ارسال لینک مجاز نیست.\n"
@@ -7030,15 +8036,6 @@ async def text_router(
 
         return
 
-    if text == "👥 کاربران":
-
-        await owner_users_panel(
-            message,
-            bot,
-        )
-
-        return
-
     if text == "📢 کانال":
 
         await owner_channel(
@@ -7060,15 +8057,6 @@ async def text_router(
 
         await owner_settings(
             message
-        )
-
-        return
-
-    if text == "🛡️ امنیت و دسترسی":
-
-        await owner_security(
-            message,
-            bot,
         )
 
         return
@@ -7137,11 +8125,11 @@ def shift_applies_to_date(
     )
 
 
-def get_current_shift_safe():
+def get_current_shift_safe(channel_key: str | None = None):
 
     now = local_now()
 
-    rows = db.conn.execute(
+    rows = _sync_execute_fetchall(
         """
         SELECT
             s.*,
@@ -7152,11 +8140,21 @@ def get_current_shift_safe():
             ON a.user_id = s.admin_id
         WHERE a.active = 1
         """
-    ).fetchall()
+    )
 
     candidates = []
 
     for shift in rows:
+        # فیلتر کانال (در صورت مشخص بودن)
+        if channel_key:
+            sk = None
+            try:
+                sk = shift["channel_key"]
+            except Exception:
+                sk = None
+            sk = sk or DEFAULT_CHANNEL_KEY
+            if sk != channel_key:
+                continue
 
         for date in (
             now.date(),
@@ -7220,11 +8218,11 @@ def get_current_shift_safe():
     return candidates[0]
 
 
-def get_next_shift():
+def get_next_shift(channel_key: str | None = None):
 
     now = local_now()
 
-    rows = db.conn.execute(
+    rows = _sync_execute_fetchall(
         """
         SELECT
             s.*,
@@ -7250,6 +8248,15 @@ def get_next_shift():
         )
 
         for shift in rows:
+            if channel_key:
+                sk = None
+                try:
+                    sk = shift["channel_key"]
+                except Exception:
+                    sk = None
+                sk = sk or DEFAULT_CHANNEL_KEY
+                if sk != channel_key:
+                    continue
 
             if not shift_applies_to_date(
                 shift,
@@ -7290,6 +8297,16 @@ def get_next_shift():
     return candidates[0]
 
 
+async def get_current_shift_safe_async(channel_key: str | None = None):
+    """نسخه non-blocking برای استفاده در هندلرهای async."""
+    return await asyncio.to_thread(get_current_shift_safe, channel_key)
+
+
+async def get_next_shift_async(channel_key: str | None = None):
+    """نسخه non-blocking برای استفاده در هندلرهای async."""
+    return await asyncio.to_thread(get_next_shift, channel_key)
+
+
 # =========================================================
 # QUEUED MESSAGE DISPATCH
 # =========================================================
@@ -7299,20 +8316,20 @@ async def dispatch_queued_messages(
     shift,
 ):
 
-    rows = db.conn.execute(
+    rows = await db_fetchall(
         """
         SELECT *
         FROM messages
         WHERE status = 'queued'
         ORDER BY submitted_at ASC, id ASC
         """
-    ).fetchall()
+    )
 
     for row in rows:
 
         try:
 
-            db.conn.execute(
+            await db_execute(
                 """
                 UPDATE messages
                 SET
@@ -7329,11 +8346,9 @@ async def dispatch_queued_messages(
                 ),
             )
 
-            db.conn.commit()
+            await db_commit()
 
-            updated = db.get_message(
-                row["id"]
-            )
+            updated = await asyncio.to_thread(db.get_message, row["id"])
 
             sent = await send_review_message(
                 bot,
@@ -7341,7 +8356,8 @@ async def dispatch_queued_messages(
                 updated,
             )
 
-            db.set_admin_message_id(
+            await asyncio.to_thread(
+                db.set_admin_message_id,
                 row["id"],
                 sent.message_id,
             )
@@ -7355,18 +8371,23 @@ async def dispatch_queued_messages(
                 shift["id"],
             )
 
-            db.conn.execute(
-                """
-                UPDATE messages
-                SET
-                    status = 'queued',
-                    admin_id = NULL
-                WHERE id = ?
-                """,
-                (row["id"],),
-            )
-
-            db.conn.commit()
+            try:
+                await db_execute(
+                    """
+                    UPDATE messages
+                    SET
+                        status = 'queued',
+                        admin_id = NULL
+                    WHERE id = ?
+                    """,
+                    (row["id"],),
+                )
+                await db_commit()
+            except Exception:
+                logger.exception(
+                    "DISPATCH RESTORE QUEUED ERROR | message_id=%s",
+                    row["id"],
+                )
 
 
 # =========================================================
@@ -7391,7 +8412,7 @@ async def shift_monitor(
         try:
 
             now = local_now()
-            current = get_current_shift_safe()
+            current = await get_current_shift_safe_async()
 
             if current:
 
@@ -7437,7 +8458,7 @@ async def shift_monitor(
                             pass
 
             # یادآوری هر ۱ دقیقه در ۵ دقیقهٔ آخر تا شروع شیفت
-            next_item = get_next_shift()
+            next_item = await get_next_shift_async()
             if next_item:
                 shift, start_dt = next_item
                 delta = start_dt - now
