@@ -67,6 +67,8 @@ TZ = ZoneInfo(TIMEZONE)
 
 states: dict[int, dict[str, Any]] = {}
 notified_shifts: set[tuple[str, int]] = set()
+# یادآوری ۱۰ دقیقه قبل از شروع شیفت (کلید: تاریخ + shift_id)
+notified_shift_reminders: set[tuple[str, int]] = set()
 
 shift_task: asyncio.Task | None = None
 cleanup_task: asyncio.Task | None = None
@@ -1295,61 +1297,72 @@ def contains_link(
 def validate_submission(
     message: Message,
 ):
+    """
+    همهٔ خطاها را یک‌جا جمع می‌کند تا کاربر با یک پیام
+    بفهمد دقیقاً چه چیزهایی را باید درست کند.
+    """
     text = message.text or ""
     entities = message.entities or []
+    errors: list[str] = []
 
     if contains_blocked_word(text):
-        return (
-            False,
-            "🚫 این پیام به دلیل استفاده از کلمات غیرمجاز قابل ارسال نیست.",
+        errors.append(
+            "کلمات غیرمجاز در متن استفاده شده است."
         )
 
-    if contains_emoji(text):
-        return (
-            False,
-            "🚫 ارسال ایموجی مجاز نیست.",
+    has_emoji = contains_emoji(text)
+    if not has_emoji:
+        for entity in entities:
+            if entity_type(entity) in {
+                "custom_emoji",
+                "emoji",
+            }:
+                has_emoji = True
+                break
+    if has_emoji:
+        errors.append(
+            "ارسال هرگونه ایموجی مجاز نیست.\n"
+            "متن را بدون ایموجی بفرست."
         )
 
-    for entity in entities:
-        if entity_type(entity) in {
-            "custom_emoji",
-            "emoji",
-        }:
-            return (
-                False,
-                "🚫 ارسال ایموجی مجاز نیست.",
-            )
-
-    if not text.startswith(
-        "صدام بزن"
-    ):
-        return (
-            False,
-            ERROR_MESSAGES["prefix"],
+    if not text.startswith("صدام بزن"):
+        errors.append(
+            "پیام باید با «صدام بزن» شروع شود.\n"
+            "مثال درست:\n"
+            "صدام بزن سلام به همگی ."
         )
 
-    if not is_fully_bold(
-        text,
-        entities,
-    ):
-        return (
-            False,
-            ERROR_MESSAGES["bold"],
+    if not is_fully_bold(text, entities):
+        errors.append(
+            "کل پیام باید Bold باشد.\n"
+            "در تلگرام کل متن را انتخاب کن و Bold بزن.\n"
+            "مثال: کل جمله از «صدام بزن» تا آخر باید پررنگ باشد."
         )
 
     if not text.endswith(" ."):
-        return (
-            False,
-            ERROR_MESSAGES["suffix"],
+        errors.append(
+            "پیام باید با فاصله و نقطه تمام شود: « .»\n"
+            "مثال درست در پایان پیام:  ."
         )
 
-    if contains_link(
-        text,
-        entities,
-    ):
+    if contains_link(text, entities):
+        errors.append(
+            "لینک یا آدرس وب در پیام مجاز نیست.\n"
+            "هر لینک، یوزرنیم لینک‌شده یا text_link را حذف کن."
+        )
+
+    if errors:
+        body = "\n\n".join(
+            f"❌ {i}. {err}"
+            for i, err in enumerate(errors, 1)
+        )
         return (
             False,
-            ERROR_MESSAGES["link"],
+            (
+                "🚫 پیام قابل ارسال نیست.\n"
+                "لطفاً همهٔ موارد زیر را یک‌جا اصلاح کن:\n\n"
+                f"{body}"
+            ),
         )
 
     return True, None
@@ -2080,6 +2093,30 @@ async def send_review_message(
     )
 
 
+async def build_channel_post_link(
+    bot: Bot,
+    channel_id: int,
+    message_id: int,
+) -> str | None:
+    """لینک عمومی یا خصوصی پست کانال را می‌سازد."""
+    try:
+        chat = await bot.get_chat(channel_id)
+        username = getattr(chat, "username", None)
+        if username:
+            return f"https://t.me/{username}/{message_id}"
+
+        raw = str(channel_id)
+        if raw.startswith("-100"):
+            internal = raw[4:]
+            return f"https://t.me/c/{internal}/{message_id}"
+    except Exception:
+        logger.exception(
+            "BUILD CHANNEL POST LINK ERROR | channel_id=%s",
+            channel_id,
+        )
+    return None
+
+
 async def can_review(user_id: int, row) -> bool:
     """
     مالک همیشه می‌تواند بررسی کند.
@@ -2504,6 +2541,29 @@ async def approve_callback(
         row,
         "🟢 ارسال شد",
     )
+
+    # اعلان به کاربر + لینک پست کانال
+    try:
+        post_link = await build_channel_post_link(
+            bot,
+            channel_id,
+            sent.message_id,
+        )
+        user_text = (
+            "✅ پیام شما تأیید و در کانال منتشر شد."
+        )
+        if post_link:
+            user_text += f"\n\n🔗 مشاهده در کانال:\n{post_link}"
+        await bot.send_message(
+            chat_id=row["user_id"],
+            text=user_text,
+        )
+    except Exception:
+        logger.exception(
+            "USER PUBLISH NOTIFY ERROR | message_id=%s | user_id=%s",
+            message_id,
+            row["user_id"],
+        )
 
 
 # =========================================================
@@ -3115,14 +3175,21 @@ async def owner_shifts(
         return
 
     shifts = db.get_all_shifts()
+    today = today_string()
 
     lines = [
         "⏰ مدیریت شیفت‌ها\n"
     ]
 
     buttons = []
+    shown = 0
 
     for shift in shifts:
+        # شیفت‌های تاریخ‌گذشته نمایش داده نمی‌شوند
+        if not shift["permanent"]:
+            specific = shift["specific_date"] or ""
+            if specific and specific < today:
+                continue
 
         admin_name = (
             shift["admin_name"]
@@ -3154,6 +3221,12 @@ async def owner_shifts(
                     ),
                 )
             ]
+        )
+        shown += 1
+
+    if shown == 0:
+        lines.append(
+            "هیچ شیفت فعالی (امروز/آینده یا دائمی) ثبت نشده."
         )
 
     buttons.append(
@@ -6883,13 +6956,21 @@ async def dispatch_queued_messages(
 async def shift_monitor(
     bot: Bot,
 ):
+    """
+    مانیتور سبک برای سرور کم‌منبع:
+    - صف پیام‌ها در شروع شیفت
+    - اعلان شروع شیفت
+    - یادآوری ۱۰ دقیقه قبل (اگر اعلان ادمین روشن باشد)
+    """
 
     global notified_shifts
+    global notified_shift_reminders
 
     while True:
 
         try:
 
+            now = local_now()
             current = get_current_shift_safe()
 
             if current:
@@ -6897,12 +6978,8 @@ async def shift_monitor(
                 shift, start_dt = current
 
                 key = (
-                    start_dt.strftime(
-                        "%Y-%m-%d"
-                    ),
-                    int(
-                        shift["id"]
-                    ),
+                    start_dt.strftime("%Y-%m-%d"),
+                    int(shift["id"]),
                 )
 
                 await dispatch_queued_messages(
@@ -6910,22 +6987,15 @@ async def shift_monitor(
                     shift,
                 )
 
-                now = local_now()
-
                 if (
                     now >= start_dt
-                    and now - start_dt
-                    < timedelta(minutes=1)
+                    and now - start_dt < timedelta(minutes=1)
                     and key not in notified_shifts
                 ):
 
-                    notified_shifts.add(
-                        key
-                    )
+                    notified_shifts.add(key)
 
-                    if shift[
-                        "notifications_enabled"
-                    ]:
+                    if shift["notifications_enabled"]:
 
                         try:
 
@@ -6946,14 +7016,43 @@ async def shift_monitor(
                         ):
                             pass
 
-            if len(
-                notified_shifts
-            ) > 1000:
+            # یادآوری ۱۰ دقیقه قبل از شروع شیفت بعدی
+            next_item = get_next_shift()
+            if next_item:
+                shift, start_dt = next_item
+                remind_key = (
+                    start_dt.strftime("%Y-%m-%d"),
+                    int(shift["id"]),
+                )
+                delta = start_dt - now
+                if (
+                    timedelta(minutes=9) <= delta <= timedelta(minutes=11)
+                    and remind_key not in notified_shift_reminders
+                    and shift["notifications_enabled"]
+                ):
+                    notified_shift_reminders.add(remind_key)
+                    try:
+                        await bot.send_message(
+                            shift["admin_id"],
+                            (
+                                "⏰ <b>یادآوری شیفت</b>\n\n"
+                                "حدود ۱۰ دقیقه تا شروع شیفت شما مانده است.\n\n"
+                                f"🕐 شروع: <b>{start_dt.strftime('%H:%M')}</b>\n"
+                                f"⏰ بازه: {shift['start_time']} تا {shift['end_time']}"
+                            ),
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except (
+                        TelegramForbiddenError,
+                        TelegramBadRequest,
+                    ):
+                        pass
 
-                notified_shifts = set(
-                    list(
-                        notified_shifts
-                    )[-200:]
+            if len(notified_shifts) > 500:
+                notified_shifts = set(list(notified_shifts)[-150:])
+            if len(notified_shift_reminders) > 500:
+                notified_shift_reminders = set(
+                    list(notified_shift_reminders)[-150:]
                 )
 
         except Exception:
@@ -6962,9 +7061,8 @@ async def shift_monitor(
                 "SHIFT MONITOR ERROR"
             )
 
-        await asyncio.sleep(
-            10
-        )
+        # روی سرور ۱ هسته‌ای / ۱ گیگ، فاصله بیشتر = فشار کمتر
+        await asyncio.sleep(20)
 
 
 # =========================================================
@@ -7049,14 +7147,14 @@ async def cleanup_loop():
 
 async def announcement_monitor(bot: Bot):
     """
-    هر دقیقه اطلاعیه‌های زمان‌بندی‌شده را بررسی و در صورت نیاز ارسال می‌کند.
+    بررسی اطلاعیه‌های زمان‌بندی‌شده — فاصله بیشتر برای سرور کم‌منبع.
     """
     while True:
         try:
             await process_scheduled_announcements(bot)
         except Exception:
             logger.exception("ANNOUNCEMENT MONITOR ERROR")
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
 
 
 # =========================================================
