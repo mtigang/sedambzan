@@ -1924,24 +1924,29 @@ def admin_keyboard():
         keyboard=[
             [
                 KeyboardButton(
+                    text="📝 ارسال پیام"
+                ),
+                KeyboardButton(
                     text="📥 پیام‌های در انتظار"
                 ),
+            ],
+            [
                 KeyboardButton(
                     text="⏰ شیفت من"
                 ),
-            ],
-            [
                 KeyboardButton(
                     text="📊 عملکرد من"
                 ),
-                KeyboardButton(
-                    text="🔔 اعلان‌ها"
-                ),
             ],
             [
                 KeyboardButton(
+                    text="🔔 اعلان‌ها"
+                ),
+                KeyboardButton(
                     text="🔄 درخواست تغییر شیفت"
                 ),
+            ],
+            [
                 KeyboardButton(
                     text="❓ راهنما"
                 ),
@@ -1949,6 +1954,18 @@ def admin_keyboard():
         ],
         resize_keyboard=True,
     )
+
+
+def role_keyboard(user_id: int):
+    """کیبورد مناسب نقش کاربر (مالک / ادمین / کاربر عادی)."""
+    try:
+        if db.is_owner(user_id):
+            return owner_keyboard(db.is_bot_enabled())
+        if db.get_admin(user_id):
+            return admin_keyboard()
+    except Exception:
+        pass
+    return user_keyboard()
 
 
 def owner_keyboard(
@@ -2071,48 +2088,62 @@ async def show_home(
 ):
     user_id = message.from_user.id
 
-    if db.is_owner(user_id):
+    try:
+        is_owner = await asyncio.to_thread(db.is_owner, user_id)
+    except Exception:
+        logger.exception("SHOW_HOME IS_OWNER ERROR")
+        is_owner = False
+
+    if is_owner:
+        try:
+            enabled = await asyncio.to_thread(db.is_bot_enabled)
+            admins_n = await asyncio.to_thread(db.count_admins)
+            pending_n = await asyncio.to_thread(db.count_pending)
+        except Exception:
+            logger.exception("SHOW_HOME OWNER STATS ERROR")
+            enabled, admins_n, pending_n = True, 0, 0
 
         await message.answer(
             (
                 "👑 سلام مالک عزیز\n\n"
                 "به مرکز کنترل ربات چندکاناله خوش آمدی.\n\n"
                 f"🟢 وضعیت ربات: "
-                f"{'فعال' if db.is_bot_enabled() else 'غیرفعال'}\n"
+                f"{'فعال' if enabled else 'غیرفعال'}\n"
                 f"👥 ادمین‌ها: "
-                f"{db.count_admins()}\n"
+                f"{admins_n}\n"
                 f"📥 پیام‌های در انتظار: "
-                f"{db.count_pending()}"
+                f"{pending_n}"
             ),
-            reply_markup=owner_keyboard(
-                db.is_bot_enabled()
-            ),
+            reply_markup=owner_keyboard(enabled),
         )
-
         return
 
-    admin = db.get_admin(
-        user_id
-    )
+    try:
+        admin = await asyncio.to_thread(db.get_admin, user_id)
+    except Exception:
+        logger.exception("SHOW_HOME GET_ADMIN ERROR")
+        admin = None
 
     if admin:
-
+        try:
+            name = await get_profile_name(bot, user_id, admin["name"])
+        except Exception:
+            name = admin["name"] or "ادمین"
         await message.answer(
             (
                 f"👋 سلام "
-                f"{escape(await get_profile_name(bot, user_id, admin['name']))}\n\n"
+                f"{escape(name)}\n\n"
                 "شما ادمین ربات هستید."
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=admin_keyboard(),
         )
-
         return
 
     await message.answer(
         (
             "سلام!\n\n"
-            "خیلی خوش اومدی به ربات هوشمند صدام بزن آرال .\n\n"
+            "به ربات هوشمند آرال خوش آمدید .\n\n"
             "پیامت رو بفرست تا بررسی بشه و در صورت تأیید در کانال منتشر بشه.\n\n"
             "و حتما قوانین رو رعایت کن 🌹"
         ),
@@ -2377,18 +2408,26 @@ async def start_handler(
     message: Message,
     bot: Bot,
 ):
-    clear_state(
-        message.from_user.id
-    )
+    # پاسخ سریع اول — جلوگیری از «اولی کار نمی‌کند»
+    clear_state(message.from_user.id)
 
-    mark_user_started(
-        message.from_user
-    )
+    try:
+        await show_home(message, bot)
+    except Exception:
+        logger.exception("START HANDLER SHOW_HOME ERROR")
+        try:
+            await message.answer(
+                "به ربات هوشمند آرال خوش آمدید .",
+                reply_markup=user_keyboard(),
+            )
+        except Exception:
+            pass
 
-    await show_home(
-        message,
-        bot,
-    )
+    # کارهای دیتابیس بعد از پاسخ (non-blocking)
+    try:
+        await asyncio.to_thread(mark_user_started, message.from_user)
+    except Exception:
+        logger.exception("START HANDLER MARK STARTED ERROR")
 
 
 @router.message(
@@ -2560,7 +2599,10 @@ async def user_send_start(
 
     if not db.is_bot_enabled():
         clear_state(message.from_user.id)
-        await message.answer(ERROR_MESSAGES["bot_disabled"])
+        await message.answer(
+            "🔴 ربات در حال حاضر غیرفعال است.\n\n"
+            "لطفاً بعداً دوباره امتحان کنید."
+        )
         return
 
 
@@ -4043,23 +4085,70 @@ async def owner_shifts(
     bot: Bot,
 ):
 
-    if not db.is_owner(
-        message.from_user.id
-    ):
+    if not await asyncio.to_thread(db.is_owner, message.from_user.id):
         return
 
-    shifts = db.get_all_shifts()
+    await message.answer(
+        "⏰ شیفت‌های کدام کانال را می‌خواهی ببینی؟",
+        reply_markup=channels_keyboard("shifts_ch"),
+    )
+
+
+@router.callback_query(
+    F.data.startswith("shifts_ch:")
+)
+async def owner_shifts_channel_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+
+    key = callback.data.split(":", 1)[1]
+    if key == "back":
+        await callback.answer()
+        try:
+            await callback.message.edit_text(
+                "⏰ شیفت‌های کدام کانال را می‌خواهی ببینی؟",
+                reply_markup=channels_keyboard("shifts_ch"),
+            )
+        except Exception:
+            await callback.message.answer(
+                "⏰ شیفت‌های کدام کانال را می‌خواهی ببینی؟",
+                reply_markup=channels_keyboard("shifts_ch"),
+            )
+        return
+
+    if key not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+
+    await callback.answer()
+    title = CHANNELS[key]["title"]
+
+    try:
+        shifts = await asyncio.to_thread(db.get_all_shifts)
+    except Exception:
+        logger.exception("OWNER SHIFTS LOAD ERROR")
+        await callback.message.answer(GENERIC_ERROR)
+        return
+
     today = today_string()
-
-    lines = [
-        "⏰ مدیریت شیفت‌ها\n"
-    ]
-
+    lines = [f"⏰ مدیریت شیفت‌ها — «{title}»\n"]
     buttons = []
     shown = 0
 
     for shift in shifts:
-        # شیفت‌های تاریخ‌گذشته نمایش داده نمی‌شوند
+        # فیلتر کانال
+        try:
+            sk = shift["channel_key"]
+        except Exception:
+            sk = None
+        sk = sk or DEFAULT_CHANNEL_KEY
+        if sk != key:
+            continue
+
         if not shift["permanent"]:
             specific = shift["specific_date"] or ""
             if specific and specific < today:
@@ -4067,10 +4156,7 @@ async def owner_shifts(
 
         admin_name = (
             shift["admin_name"]
-            or await get_profile_name(
-                bot,
-                shift["admin_id"],
-            )
+            or await get_profile_name(bot, shift["admin_id"])
         )
 
         date_text = (
@@ -4090,35 +4176,44 @@ async def owner_shifts(
             [
                 InlineKeyboardButton(
                     text=f"🗑 حذف #{shift['id']}",
-                    callback_data=(
-                        f"delete_shift:{shift['id']}"
-                    ),
+                    callback_data=f"delete_shift:{shift['id']}",
                 )
             ]
         )
         shown += 1
 
     if shown == 0:
-        lines.append(
-            "هیچ شیفت فعالی (امروز/آینده یا دائمی) ثبت نشده."
-        )
+        lines.append("هیچ شیفت فعالی برای این کانال ثبت نشده.")
 
     buttons.append(
         [
             InlineKeyboardButton(
                 text="➕ ایجاد شیفت",
-                callback_data="shift:add",
+                callback_data=f"shift:add:{key}",
+            )
+        ]
+    )
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ برگشت به انتخاب کانال",
+                callback_data="shifts_ch:back",
             )
         ]
     )
 
-    await message.answer(
-        "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=buttons
-        ),
-    )
+    try:
+        await callback.message.edit_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+    except Exception:
+        await callback.message.answer(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
 
 
 @router.callback_query(
@@ -4177,25 +4272,33 @@ async def delete_shift_callback(
 
 
 @router.callback_query(
-    F.data == "shift:add"
+    F.data.startswith("shift:add")
 )
 async def shift_add_start(
     callback: CallbackQuery,
 ):
 
-    if not db.is_owner(
-        callback.from_user.id
-    ):
-
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
-
         return
+
+    parts = callback.data.split(":")
+    ch_key = parts[2] if len(parts) >= 3 else DEFAULT_CHANNEL_KEY
+    if ch_key not in CHANNELS:
+        ch_key = DEFAULT_CHANNEL_KEY
+
+    set_state(
+        callback.from_user.id,
+        "create_shift_pre",
+        channel_key=ch_key,
+    )
 
     await callback.answer()
 
+    title = CHANNELS[ch_key]["title"]
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -4214,7 +4317,7 @@ async def shift_add_start(
     )
 
     await callback.message.answer(
-        "⏰ نوع شیفت را انتخاب کن.",
+        f"⏰ نوع شیفت برای «{title}» را انتخاب کن.",
         reply_markup=keyboard,
     )
 
@@ -4227,46 +4330,50 @@ async def shift_type_callback(
     bot: Bot,
 ):
 
-    if not db.is_owner(
-        callback.from_user.id
-    ):
-
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
         await callback.answer(
             "⛔ دسترسی ندارید.",
             show_alert=True,
         )
-
         return
 
-    shift_type = callback.data.split(
-        ":",
-        1,
-    )[1]
+    shift_type = callback.data.split(":", 1)[1]
 
-    admins = db.get_admins(
-        active_only=True
-    )
+    # کانال از state قبلی (اگر از منوی شیفت‌ها آمده)
+    prev = get_state(callback.from_user.id) or {}
+    ch_key = prev.get("channel_key") or DEFAULT_CHANNEL_KEY
 
-    if not admins:
+    try:
+        admins = await asyncio.to_thread(
+            lambda: db.get_admins(active_only=True)
+        )
+    except Exception:
+        admins = []
 
+    # فقط ادمین‌های همان کانال (پشتیبانی چندکاناله)
+    filtered = []
+    for admin in admins or []:
+        keys = admin_channel_keys(admin["user_id"])
+        if ch_key in keys:
+            filtered.append(admin)
+
+    if not filtered:
         await callback.answer(
-            "ابتدا یک ادمین اضافه کن.",
+            "ابتدا یک ادمین برای این کانال اضافه کن.",
             show_alert=True,
         )
-
         return
 
     set_state(
         callback.from_user.id,
         "create_shift",
-        permanent=(
-            shift_type == "permanent"
-        ),
+        permanent=(shift_type == "permanent"),
+        channel_key=ch_key,
     )
 
     buttons = []
 
-    for admin in admins:
+    for admin in filtered:
 
         name = (
             admin["name"]
@@ -5962,88 +6069,148 @@ async def owner_channel(
     bot: Bot,
 ):
 
-    if not db.is_owner(
-        message.from_user.id
-    ):
+    if not await asyncio.to_thread(db.is_owner, message.from_user.id):
         return
 
-    channel_id = db.get_channel_id()
+    await message.answer(
+        "📢 وضعیت کدام کانال را می‌خواهی ببینی؟",
+        reply_markup=channels_keyboard("channel_ch"),
+    )
+
+
+@router.callback_query(
+    F.data.startswith("channel_ch:")
+)
+async def owner_channel_info_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+
+    key = callback.data.split(":", 1)[1]
+    if key not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+
+    await callback.answer()
+    cfg = CHANNELS[key]
+    channel_id = int(cfg["channel_id"])
+    title_cfg = cfg["title"]
 
     try:
-
-        chat = await bot.get_chat(
-            channel_id
-        )
-
+        chat = await bot.get_chat(channel_id)
         title = (
-            getattr(
-                chat,
-                "title",
-                None,
-            )
-            or getattr(
-                chat,
-                "full_name",
-                None,
-            )
-            or "کانال"
+            getattr(chat, "title", None)
+            or getattr(chat, "full_name", None)
+            or title_cfg
         )
-
-        username = getattr(
-            chat,
-            "username",
-            None,
-        )
-
+        username = getattr(chat, "username", None)
         public = (
             f"🔗 @{escape(username)}"
             if username
             else "🔒 کانال خصوصی"
         )
-
-        connection = (
-            "🟢 اتصال Telegram موفق"
-        )
-
+        connection = "🟢 اتصال Telegram موفق"
     except Exception as e:
-
         logger.exception(
-            "CHANNEL GET_CHAT ERROR | "
-            "channel_id=%s | error=%s",
+            "CHANNEL GET_CHAT ERROR | channel_id=%s | error=%s",
             channel_id,
             e,
         )
-
-        title = "کانال تنظیم‌شده"
+        title = title_cfg
         public = "❌ اتصال کانال ناموفق"
-        connection = (
-            f"🔴 خطا: {str(e)[:180]}"
-        )
+        connection = f"🔴 خطا: {str(e)[:180]}"
+
+    text = (
+        f"📢 تنظیمات کانال — <b>{escape(title_cfg)}</b>\n\n"
+        f"🏷 نام: <b>{escape(title)}</b>\n"
+        f"{public}\n"
+        f"🆔 <code>{channel_id}</code>\n\n"
+        f"{connection}\n\n"
+        "⚠️ برای انتشار پیام، ربات باید در این کانال "
+        "ادمین و دارای اجازه ارسال پیام باشد."
+    )
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔄 تغییر کانال",
-                    callback_data="channel:change",
+                    text="🧪 تست ارسال",
+                    callback_data=f"channel_test:{key}",
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ برگشت",
+                    callback_data="channel_ch_back",
+                )
+            ],
         ]
     )
 
-    await message.answer(
-        (
-            "📢 تنظیمات کانال\n\n"
-            f"🏷 نام: "
-            f"<b>{escape(title)}</b>\n"
-            f"{public}\n\n"
-            f"{connection}\n\n"
-            "⚠️ برای انتشار پیام، ربات باید در کانال "
-            "ادمین و دارای اجازه ارسال پیام باشد."
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard,
-    )
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        await callback.message.answer(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+
+
+@router.callback_query(F.data == "channel_ch_back")
+async def owner_channel_back(
+    callback: CallbackQuery,
+):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    await callback.answer()
+    try:
+        await callback.message.edit_text(
+            "📢 وضعیت کدام کانال را می‌خواهی ببینی؟",
+            reply_markup=channels_keyboard("channel_ch"),
+        )
+    except Exception:
+        await callback.message.answer(
+            "📢 وضعیت کدام کانال را می‌خواهی ببینی؟",
+            reply_markup=channels_keyboard("channel_ch"),
+        )
+
+
+@router.callback_query(F.data.startswith("channel_test:"))
+async def owner_channel_test(
+    callback: CallbackQuery,
+    bot: Bot,
+):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+
+    key = callback.data.split(":", 1)[1]
+    if key not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+
+    await callback.answer("⏳ در حال تست...")
+    cfg = CHANNELS[key]
+    try:
+        await bot.send_message(
+            chat_id=int(cfg["channel_id"]),
+            text="test",
+        )
+        await callback.message.answer(f"✅ تست «{cfg['title']}» موفق بود.")
+    except Exception as e:
+        logger.exception("CHANNEL TEST ERROR | %s", key)
+        await callback.message.answer(
+            f"❌ تست «{cfg['title']}» ناموفق:\n{str(e)[:150]}"
+        )
 
 
 @router.message(
@@ -7224,7 +7391,7 @@ async def handle_state(
                         f"⏰ شروع شیفت بعدی: "
                         f"{start_dt.strftime('%Y-%m-%d %H:%M')}"
                     ),
-                    reply_markup=user_keyboard(),
+                    reply_markup=role_keyboard(user_id),
                 )
 
             else:
@@ -7235,7 +7402,7 @@ async def handle_state(
                         "🕐 فعلاً شیفتی برای ارسال پیام وجود ندارد؛ "
                         "پیام حذف نمی‌شود."
                     ),
-                    reply_markup=user_keyboard(),
+                    reply_markup=role_keyboard(user_id),
                 )
 
             clear_state(
@@ -7281,7 +7448,7 @@ async def handle_state(
                     "✅ پیامت با موفقیت ارسال شد.\n\n"
                     "🟡 در انتظار بررسی ادمین است."
                 ),
-                reply_markup=user_keyboard(),
+                reply_markup=role_keyboard(user_id),
             )
 
             clear_state(
@@ -7593,16 +7760,27 @@ async def handle_state(
                     return True
 
             try:
-
-                shift_id = db.create_shift(
-                    start_time=start,
-                    end_time=end,
-                    admin_id=state["admin_id"],
-                    permanent=state["permanent"],
-                    specific_date=state.get(
-                        "specific_date"
-                    ),
+                shift_id = await asyncio.to_thread(
+                    lambda: db.create_shift(
+                        start_time=start,
+                        end_time=end,
+                        admin_id=state["admin_id"],
+                        permanent=state["permanent"],
+                        specific_date=state.get("specific_date"),
+                    )
                 )
+                ch = state.get("channel_key") or DEFAULT_CHANNEL_KEY
+                try:
+                    await db_execute(
+                        "UPDATE shifts SET channel_key = ? WHERE id = ?",
+                        (ch, shift_id),
+                    )
+                    await db_commit()
+                except Exception:
+                    logger.exception(
+                        "OWNER SET SHIFT CHANNEL ERROR | shift_id=%s",
+                        shift_id,
+                    )
 
             except Exception:
 
@@ -7611,14 +7789,13 @@ async def handle_state(
                 )
 
                 await message.answer(
-                    "❌ ایجاد شیفت ناموفق بود."
+                    "❌ ایجاد شیفت ناموفق بود.\n"
+                    "لطفاً چند ثانیه بعد دوباره امتحان کنید."
                 )
 
                 return True
 
-            clear_state(
-                user_id
-            )
+            clear_state(user_id)
 
             await message.answer(
                 (
@@ -7943,14 +8120,18 @@ async def text_router(
     user = message.from_user
     text = message.text
 
-    touch_user(
-        user
-    )
+    # non-blocking — جلوگیری از بلاک شدن روی اولین پیام
+    try:
+        await asyncio.to_thread(touch_user, user)
+    except Exception:
+        logger.exception("TOUCH USER ERROR | user_id=%s", user.id if user else None)
 
-    if await handle_state(
-        message,
-        bot,
-    ):
+    try:
+        if await handle_state(message, bot):
+            return
+    except Exception:
+        logger.exception("HANDLE STATE ERROR | user_id=%s", user.id if user else None)
+        await message.answer(GENERIC_ERROR)
         return
 
     if text == "📝 ارسال پیام":
