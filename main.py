@@ -67,8 +67,8 @@ TZ = ZoneInfo(TIMEZONE)
 
 states: dict[int, dict[str, Any]] = {}
 notified_shifts: set[tuple[str, int]] = set()
-# یادآوری ۱۰ دقیقه قبل از شروع شیفت (کلید: تاریخ + shift_id)
-notified_shift_reminders: set[tuple[str, int]] = set()
+# یادآوری قبل از شیفت (کلید: تاریخ + shift_id + دقیقه)
+notified_shift_reminders: set[tuple] = set()
 
 shift_task: asyncio.Task | None = None
 cleanup_task: asyncio.Task | None = None
@@ -312,6 +312,42 @@ def get_setting(
         return default
 
     return row["value"]
+
+
+def get_int_setting(key: str, default: int) -> int:
+    raw = get_setting(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def rate_limit_max() -> int:
+    return get_int_setting(
+        "rate_limit_max",
+        RATE_LIMIT_MAX_MESSAGES,
+    )
+
+
+def rate_limit_window() -> int:
+    return get_int_setting(
+        "rate_limit_window",
+        RATE_LIMIT_WINDOW_SECONDS,
+    )
+
+
+def anti_dupe_hours() -> int:
+    return get_int_setting("anti_dupe_hours", 24)
+
+
+def anti_dupe_enabled() -> bool:
+    return get_setting("anti_dupe_enabled", "1") != "0"
+
+
+def queue_limit() -> int:
+    return get_int_setting("queue_limit", 100)
 
 
 def set_setting(
@@ -1419,21 +1455,16 @@ def admin_keyboard():
             ],
             [
                 KeyboardButton(
-                    text="📅 برنامه من"
-                ),
-                KeyboardButton(
                     text="📊 عملکرد من"
-                ),
-            ],
-            [
-                KeyboardButton(
-                    text="🔄 درخواست تغییر شیفت"
                 ),
                 KeyboardButton(
                     text="🔔 اعلان‌ها"
                 ),
             ],
             [
+                KeyboardButton(
+                    text="🔄 درخواست تغییر شیفت"
+                ),
                 KeyboardButton(
                     text="❓ راهنما"
                 ),
@@ -1461,12 +1492,12 @@ def owner_keyboard(
                     text="⏰ شیفت‌ها"
                 ),
                 KeyboardButton(
-                    text="📅 برنامه کاری/امروز"
+                    text="📊 آمار و گزارش‌ها"
                 ),
             ],
             [
                 KeyboardButton(
-                    text="📊 آمار و گزارش‌ها"
+                    text="👥 کاربران"
                 ),
                 KeyboardButton(
                     text="📢 کانال"
@@ -1477,7 +1508,7 @@ def owner_keyboard(
                     text="📢 اطلاعیه‌ها"
                 ),
                 KeyboardButton(
-                    text="⚙️ تنظیمات ربات"
+                    text="⚙️ تنظیمات"
                 ),
             ],
             [
@@ -1619,7 +1650,12 @@ async def show_home(
         return
 
     await message.answer(
-        WELCOME_MESSAGE,
+        (
+            "سلام!\n\n"
+            "خیلی خوش اومدی به ربات هوشمند صدام بزن آرال .\n\n"
+            "پیامت رو بفرست تا بررسی بشه و در صورت تأیید در کانال منتشر بشه.\n\n"
+            "و حتما قوانین رو رعایت کن 🌹"
+        ),
         reply_markup=user_keyboard(),
     )
 
@@ -2194,7 +2230,8 @@ async def pending_messages(
 
     if db.is_owner(user_id):
 
-        rows = db.get_all_pending()
+        # مالک: pending + queued + processing
+        rows = get_owner_pending_rows()
 
     elif db.get_admin(user_id):
 
@@ -2438,7 +2475,7 @@ async def approve_callback(
 
         return
 
-    if row["status"] != "pending":
+    if row["status"] not in ("pending", "queued", "processing"):
 
         await callback.answer(
             "این پیام قبلاً بررسی شده.",
@@ -2458,6 +2495,24 @@ async def approve_callback(
         )
 
         return
+
+    # اگر در صف بوده، برای claim به pending برگردان
+    if row["status"] == "queued":
+        try:
+            db.conn.execute(
+                """
+                UPDATE messages
+                SET status = 'pending'
+                WHERE id = ? AND status = 'queued'
+                """,
+                (message_id,),
+            )
+            db.conn.commit()
+        except Exception:
+            logger.exception(
+                "QUEUE TO PENDING ERROR | message_id=%s",
+                message_id,
+            )
 
     if not db.claim_message(
         message_id
@@ -2601,7 +2656,7 @@ async def reject_callback(
 
         return
 
-    if row["status"] != "pending":
+    if row["status"] not in ("pending", "queued", "processing"):
 
         await callback.answer(
             "این پیام قبلاً بررسی شده.",
@@ -2678,7 +2733,7 @@ async def reject_reason_callback(
 
         return
 
-    if row["status"] != "pending":
+    if row["status"] not in ("pending", "queued", "processing"):
 
         await callback.answer(
             "این پیام قبلاً بررسی شده.",
@@ -2698,6 +2753,23 @@ async def reject_reason_callback(
         )
 
         return
+
+    if row["status"] == "queued":
+        try:
+            db.conn.execute(
+                """
+                UPDATE messages
+                SET status = 'pending'
+                WHERE id = ? AND status = 'queued'
+                """,
+                (message_id,),
+            )
+            db.conn.commit()
+        except Exception:
+            logger.exception(
+                "QUEUE TO PENDING REJECT ERROR | message_id=%s",
+                message_id,
+            )
 
     if not db.claim_message(
         message_id
@@ -2735,6 +2807,23 @@ async def reject_reason_callback(
         row,
         text,
     )
+
+    # اطلاع‌رسانی رد به کاربر با دلیل
+    try:
+        await bot.send_message(
+            chat_id=row["user_id"],
+            text=(
+                "🔴 پیام شما رد شد.\n\n"
+                f"دلیل: {reason}\n\n"
+                "می‌توانید با رعایت قوانین دوباره ارسال کنید."
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "USER REJECT NOTIFY ERROR | message_id=%s | user_id=%s",
+            message_id,
+            row["user_id"],
+        )
 
 
 # =========================================================
@@ -2785,52 +2874,7 @@ async def admin_current_shift(
     )
 
 
-@router.message(
-    F.text == "📅 برنامه من",
-    F.chat.type == "private",
-)
-async def admin_schedule(
-    message: Message,
-):
-
-    user_id = message.from_user.id
-
-    if not db.get_admin(user_id):
-        return
-
-    # =====================================================
-    # ادمین فقط برنامه امروز خودش را می‌بیند
-    # =====================================================
-
-    shifts = db.get_admin_today_shifts(
-        user_id,
-        today_string(),
-    )
-
-    lines = [
-        "📅 برنامه کاری امروز\n",
-        f"📆 {today_string()}\n",
-    ]
-
-    if shifts:
-
-        for shift in shifts:
-
-            lines.append(
-                f"⏰ {shift['start_time']} تا "
-                f"{shift['end_time']}"
-            )
-
-    else:
-
-        lines.append(
-            "امروز شیفتی برای شما ثبت نشده."
-        )
-
-    await message.answer(
-        "\n".join(lines),
-        reply_markup=admin_keyboard(),
-    )
+# برنامه من حذف شد — فقط «شیفت من» در پنل ادمین باقی مانده
 
 
 @router.message(
@@ -2846,29 +2890,43 @@ async def admin_stats(
     if not db.get_admin(user_id):
         return
 
-    stats = db.admin_stats(
-        user_id
-    )
+    # محاسبه مستقیم از دیتابیس (بدون وابستگی به متد ناقص)
+    row = db.conn.execute(
+        """
+        SELECT
+            COUNT(CASE WHEN status = 'approved' THEN 1 END) AS approved,
+            COUNT(CASE WHEN status = 'rejected' THEN 1 END) AS rejected,
+            COUNT(CASE WHEN status IN ('approved','rejected') THEN 1 END) AS reviewed,
+            AVG(
+                CASE
+                    WHEN status IN ('approved','rejected')
+                     AND reviewed_at IS NOT NULL
+                     AND submitted_at IS NOT NULL
+                    THEN (
+                        CAST(strftime('%s', reviewed_at) AS REAL)
+                        - CAST(strftime('%s', submitted_at) AS REAL)
+                    )
+                END
+            ) AS avg_seconds
+        FROM messages
+        WHERE admin_id = ?
+        """,
+        (user_id,),
+    ).fetchone()
 
-    reviewed = stats["reviewed"] or 0
-    avg_seconds = stats["avg_seconds"] or 0
-    avg_minutes = (
-        avg_seconds / 60
-        if reviewed
-        else 0
-    )
+    approved = int(row["approved"] or 0) if row else 0
+    rejected = int(row["rejected"] or 0) if row else 0
+    reviewed = int(row["reviewed"] or 0) if row else 0
+    avg_seconds = float(row["avg_seconds"] or 0) if row else 0.0
+    avg_minutes = (avg_seconds / 60.0) if reviewed else 0.0
 
     await message.answer(
         (
             "📊 عملکرد من\n\n"
-            f"📨 بررسی‌شده: "
-            f"{reviewed}\n"
-            f"🟢 تأییدشده: "
-            f"{stats['approved']}\n"
-            f"🔴 ردشده: "
-            f"{stats['rejected']}\n"
-            f"⏱ میانگین بررسی: "
-            f"{avg_minutes:.1f} دقیقه"
+            f"📨 بررسی‌شده: {reviewed}\n"
+            f"🟢 تأییدشده: {approved}\n"
+            f"🔴 ردشده: {rejected}\n"
+            f"⏱ میانگین بررسی: {avg_minutes:.1f} دقیقه"
         ),
         reply_markup=admin_keyboard(),
     )
@@ -3526,15 +3584,17 @@ def group_shift_hourly_keyboard(
         key = f"{start}-{end}"
         if key in taken:
             return [
-                InlineKeyboardButton(
-                    text=f"✅ انتخاب‌شده از قبل — {start} تا {end}",
-                    callback_data=f"group_shift_taken:{start}-{end}",
+                _btn(
+                    f"🔴 انتخاب‌شده — {start} تا {end}",
+                    f"group_shift_taken:{start}-{end}",
+                    style="danger",
                 )
             ]
         return [
-            InlineKeyboardButton(
-                text=f"🟢 {start} تا {end}",
-                callback_data=f"group_shift_time:{start}-{end}",
+            _btn(
+                f"🟢 {start} تا {end}",
+                f"group_shift_time:{start}-{end}",
+                style="success",
             )
         ]
 
@@ -4201,6 +4261,154 @@ def owner_stats_keyboard():
     )
 
 
+def _count_messages(where_sql: str = "", params: tuple = ()) -> dict:
+    try:
+        row = db.conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(CASE WHEN status IN ('pending','queued','processing') THEN 1 END) AS waiting,
+                COUNT(CASE WHEN status = 'approved' THEN 1 END) AS approved,
+                COUNT(CASE WHEN status = 'rejected' THEN 1 END) AS rejected
+            FROM messages
+            {where_sql}
+            """,
+            params,
+        ).fetchone()
+        return {
+            "total": int(row["total"] or 0) if row else 0,
+            "waiting": int(row["waiting"] or 0) if row else 0,
+            "approved": int(row["approved"] or 0) if row else 0,
+            "rejected": int(row["rejected"] or 0) if row else 0,
+        }
+    except Exception:
+        logger.exception("COUNT MESSAGES ERROR | where=%s", where_sql)
+        return {
+            "total": 0,
+            "waiting": 0,
+            "approved": 0,
+            "rejected": 0,
+        }
+
+
+def get_owner_pending_rows():
+    """
+    مالک باید هم pending و هم queued و processing را ببیند.
+    """
+    try:
+        return db.conn.execute(
+            """
+            SELECT *
+            FROM messages
+            WHERE status IN ('pending', 'queued', 'processing')
+            ORDER BY
+                CASE status
+                    WHEN 'pending' THEN 0
+                    WHEN 'processing' THEN 1
+                    WHEN 'queued' THEN 2
+                    ELSE 3
+                END,
+                id ASC
+            """
+        ).fetchall()
+    except Exception:
+        logger.exception("GET OWNER PENDING ERROR")
+        try:
+            return db.get_all_pending()
+        except Exception:
+            return []
+
+
+@router.message(
+    F.text == "👥 کاربران",
+    F.chat.type == "private",
+)
+async def owner_users_panel(
+    message: Message,
+    bot: Bot,
+):
+    if not db.is_owner(message.from_user.id):
+        return
+
+    try:
+        total = get_user_message_stats_count()
+        today = today_string()
+
+        try:
+            active_today = db.conn.execute(
+                """
+                SELECT COUNT(DISTINCT user_id) AS c
+                FROM messages
+                WHERE submitted_at LIKE ?
+                """,
+                (f"{today}%",),
+            ).fetchone()
+        except Exception:
+            active_today = {"c": 0}
+
+        try:
+            active_week = db.conn.execute(
+                """
+                SELECT COUNT(DISTINCT user_id) AS c
+                FROM messages
+                WHERE submitted_at >= datetime('now', '-7 days')
+                """
+            ).fetchone()
+        except Exception:
+            active_week = {"c": 0}
+
+        top_rows = get_user_message_stats(limit=10, offset=0) or []
+
+        lines = [
+            "👥 <b>کاربران</b>\n",
+            f"کل کاربران: <b>{total}</b>",
+            f"فعال امروز: <b>{int((active_today['c'] if active_today else 0) or 0)}</b>",
+            f"فعال این هفته: <b>{int((active_week['c'] if active_week else 0) or 0)}</b>\n",
+            "🏆 <b>بیشترین ارسال</b>:",
+        ]
+
+        buttons = []
+        if not top_rows:
+            lines.append("هنوز پیامی ثبت نشده.")
+        else:
+            for i, row in enumerate(top_rows, 1):
+                label = (
+                    " ".join(
+                        x for x in (row["first_name"], row["last_name"]) if x
+                    ).strip()
+                    or (
+                        f"@{row['username']}"
+                        if row["username"]
+                        else str(row["user_id"])
+                    )
+                )
+                lines.append(
+                    f"{i}. {escape(label)} — {row['message_count']} پیام"
+                )
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"{i}. {label[:28]}",
+                            url=f"tg://user?id={row['user_id']}",
+                        )
+                    ]
+                )
+
+        await message.answer(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+            if buttons
+            else owner_keyboard(db.is_bot_enabled()),
+        )
+    except Exception:
+        logger.exception("OWNER USERS PANEL ERROR")
+        await message.answer(
+            "❌ خطا در بارگذاری آمار کاربران. لاگ ثبت شد.",
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
+
+
 @router.message(
     F.text == "📊 آمار و گزارش‌ها",
     F.chat.type == "private",
@@ -4214,13 +4422,60 @@ async def owner_stats_menu(
     ):
         return
 
-    await message.answer(
-        (
-            "📊 آمار و گزارش‌ها\n\n"
-            "بخش موردنظر را انتخاب کن:"
-        ),
-        reply_markup=owner_stats_keyboard(),
-    )
+    try:
+        overall = _count_messages()
+        today = today_string()
+        today_stats = _count_messages(
+            "WHERE submitted_at LIKE ?",
+            (f"{today}%",),
+        )
+        week_stats = _count_messages(
+            "WHERE submitted_at >= datetime('now', '-7 days')",
+        )
+        month_stats = _count_messages(
+            "WHERE submitted_at >= datetime('now', '-30 days')",
+        )
+
+        users_total = get_user_message_stats_count()
+        try:
+            admins_total = db.count_admins()
+        except Exception:
+            admins_total = 0
+
+        text = (
+            "📊 <b>داشبورد آماری</b>\n\n"
+            f"📨 کل پیام‌ها: <b>{overall['total']}</b>\n"
+            f"🟡 در انتظار: <b>{overall['waiting']}</b>\n"
+            f"🟢 تأیید شده: <b>{overall['approved']}</b>\n"
+            f"🔴 رد شده: <b>{overall['rejected']}</b>\n\n"
+            f"👥 کاربران: <b>{users_total}</b>\n"
+            f"👮 ادمین‌ها: <b>{admins_total}</b>\n\n"
+            f"📅 <b>امروز</b>\n"
+            f"📨 جدید: {today_stats['total']} | "
+            f"🟢 {today_stats['approved']} | "
+            f"🔴 {today_stats['rejected']}\n\n"
+            f"📅 <b>۷ روز اخیر</b>\n"
+            f"📨 {week_stats['total']} | "
+            f"🟢 {week_stats['approved']} | "
+            f"🔴 {week_stats['rejected']}\n\n"
+            f"📅 <b>۳۰ روز اخیر</b>\n"
+            f"📨 {month_stats['total']} | "
+            f"🟢 {month_stats['approved']} | "
+            f"🔴 {month_stats['rejected']}\n\n"
+            "جزئیات بیشتر:"
+        )
+
+        await message.answer(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=owner_stats_keyboard(),
+        )
+    except Exception:
+        logger.exception("OWNER STATS MENU ERROR")
+        await message.answer(
+            "❌ خطا در بارگذاری آمار. لاگ ثبت شد.",
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
 
 
 USER_STATS_PAGE_SIZE = 50
@@ -4904,6 +5159,60 @@ async def owner_channel(
     F.text == "⚙️ تنظیمات ربات",
     F.chat.type == "private",
 )
+def owner_runtime_settings_keyboard():
+    dupe_on = anti_dupe_enabled()
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _btn(
+                    f"🔢 محدودیت پیام: {rate_limit_max()}",
+                    "cfg:rate_max",
+                    style="primary",
+                )
+            ],
+            [
+                _btn(
+                    f"⏱️ بازه محدودیت: {rate_limit_window() // 60} دقیقه",
+                    "cfg:rate_window",
+                    style="primary",
+                )
+            ],
+            [
+                _btn(
+                    f"🔄 ضدتکرار: {'فعال' if dupe_on else 'غیرفعال'}",
+                    "cfg:dupe_toggle",
+                    style="success" if dupe_on else "danger",
+                )
+            ],
+            [
+                _btn(
+                    f"⏳ مدت ضدتکرار: {anti_dupe_hours()} ساعت",
+                    "cfg:dupe_hours",
+                    style="primary",
+                )
+            ],
+            [
+                _btn(
+                    f"📨 سقف صف: {queue_limit()}",
+                    "cfg:queue_limit",
+                    style="primary",
+                )
+            ],
+            [
+                _btn(
+                    f"🤖 ربات: {'روشن' if db.is_bot_enabled() else 'خاموش'}",
+                    "cfg:bot_toggle",
+                    style="success" if db.is_bot_enabled() else "danger",
+                )
+            ],
+        ]
+    )
+
+
+@router.message(
+    F.text.in_({"⚙️ تنظیمات", "⚙️ تنظیمات ربات"}),
+    F.chat.type == "private",
+)
 async def owner_settings(
     message: Message,
 ):
@@ -4917,19 +5226,68 @@ async def owner_settings(
 
     await message.answer(
         (
-            "⚙️ تنظیمات ربات\n\n"
-            f"🟢 وضعیت: "
-            f"{'فعال' if db.is_bot_enabled() else 'غیرفعال'}\n"
-            f"🌐 منطقه زمانی: {TIMEZONE}\n"
-            f"🚦 محدودیت ارسال: "
-            f"{RATE_LIMIT_MAX_MESSAGES} پیام در "
-            f"{RATE_LIMIT_WINDOW_SECONDS // 60} دقیقه\n"
+            "⚙️ <b>تنظیمات قابل تغییر</b>\n\n"
+            f"🌐 منطقه زمانی: <code>{TIMEZONE}</code>\n"
             f"👥 گروه شیفت: "
-            f"{'تنظیم شده' if group_id else 'تنظیم نشده'}"
+            f"{'تنظیم شده' if group_id else 'تنظیم نشده'}\n\n"
+            "برای تغییر هر مورد روی دکمه بزن:"
         ),
-        reply_markup=owner_keyboard(
-            db.is_bot_enabled()
-        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=owner_runtime_settings_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("cfg:"))
+async def owner_cfg_callback(
+    callback: CallbackQuery,
+):
+    if not db.is_owner(callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+
+    action = callback.data.split(":", 1)[1]
+
+    if action == "bot_toggle":
+        new_val = not db.is_bot_enabled()
+        db.set_bot_enabled(new_val)
+        await callback.answer(
+            "روشن شد" if new_val else "خاموش شد"
+        )
+        await callback.message.edit_reply_markup(
+            reply_markup=owner_runtime_settings_keyboard()
+        )
+        return
+
+    if action == "dupe_toggle":
+        new_val = "0" if anti_dupe_enabled() else "1"
+        set_setting("anti_dupe_enabled", new_val)
+        await callback.answer("ذخیره شد")
+        await callback.message.edit_reply_markup(
+            reply_markup=owner_runtime_settings_keyboard()
+        )
+        return
+
+    # مقادیر عددی: ورود به state
+    prompts = {
+        "rate_max": ("rate_limit_max", "عدد محدودیت پیام در بازه را بفرست (مثلاً 10)"),
+        "rate_window": ("rate_limit_window_min", "بازه محدودیت را به دقیقه بفرست (مثلاً 5)"),
+        "dupe_hours": ("anti_dupe_hours", "مدت ضدتکرار را به ساعت بفرست (مثلاً 24)"),
+        "queue_limit": ("queue_limit", "سقف صف را بفرست (مثلاً 100)"),
+    }
+    if action not in prompts:
+        await callback.answer()
+        return
+
+    setting_key, prompt = prompts[action]
+    set_state(
+        callback.from_user.id,
+        "edit_setting",
+        setting_key=setting_key,
+    )
+    await callback.answer()
+    await callback.message.answer(
+        f"✏️ {prompt}",
+        reply_markup=back_keyboard(),
     )
 
 
@@ -5471,6 +5829,48 @@ async def handle_state(
     text = message.text or ""
 
     # =====================================================
+    # OWNER EDIT SETTING
+    # =====================================================
+
+    if kind == "edit_setting":
+        if not db.is_owner(user_id):
+            clear_state(user_id)
+            return True
+        raw = (text or "").strip()
+        if not raw.isdigit():
+            await message.answer("❌ فقط عدد بفرست.")
+            return True
+        value = int(raw)
+        if value < 0:
+            await message.answer("❌ عدد نامعتبر است.")
+            return True
+
+        key = state.get("setting_key")
+        if key == "rate_limit_window_min":
+            set_setting("rate_limit_window", str(value * 60))
+        elif key == "rate_limit_max":
+            set_setting("rate_limit_max", str(value))
+        elif key == "anti_dupe_hours":
+            set_setting("anti_dupe_hours", str(max(1, value)))
+        elif key == "queue_limit":
+            set_setting("queue_limit", str(value))
+        else:
+            await message.answer("❌ تنظیم ناشناخته.")
+            clear_state(user_id)
+            return True
+
+        clear_state(user_id)
+        await message.answer(
+            "✅ تنظیم ذخیره شد.",
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
+        await message.answer(
+            "⚙️ تنظیمات فعلی:",
+            reply_markup=owner_runtime_settings_keyboard(),
+        )
+        return True
+
+    # =====================================================
     # CHANNEL CHANGE
     # =====================================================
 
@@ -5770,10 +6170,10 @@ async def handle_state(
 
         attempts = db.count_recent_attempts(
             user_id,
-            RATE_LIMIT_WINDOW_SECONDS,
+            rate_limit_window(),
         )
 
-        if attempts >= RATE_LIMIT_MAX_MESSAGES:
+        if attempts >= rate_limit_max():
 
             await message.answer(
                 "🚫 محدودیت ارسال. کمی بعد دوباره تلاش کن."
@@ -5797,17 +6197,18 @@ async def handle_state(
 
             return True
 
-        # ضد پیام تکراری — ۲۴ ساعت (فقط برای همین کاربر)
-        if is_duplicate_user_message(
+        # ضد پیام تکراری (قابل تنظیم از پنل مالک)
+        if anti_dupe_enabled() and is_duplicate_user_message(
             user_id,
             message.text or "",
-            hours=24,
+            hours=anti_dupe_hours(),
         ):
+            hrs = anti_dupe_hours()
             await message.answer(
                 (
-                    "🚫 این متن را در ۲۴ ساعت گذشته ارسال کرده‌اید.\n\n"
+                    f"🚫 این متن را در {hrs} ساعت گذشته ارسال کرده‌اید.\n\n"
                     "پیام تکراری به ادمین ارسال نمی‌شود.\n"
-                    "پس از گذشت ۲۴ ساعت می‌توانید دوباره همان متن را بفرستید."
+                    f"پس از گذشت {hrs} ساعت می‌توانید دوباره همان متن را بفرستید."
                 )
             )
             return True
@@ -6466,8 +6867,12 @@ async def help_button(
         await message.answer(
             (
                 "👑 راهنمای مالک\n\n"
-                "ادمین‌ها، شیفت‌ها، آمار، امنیت و تنظیمات "
-                "از منوی مدیریت قابل کنترل هستند."
+                "• پیام‌های در انتظار را بررسی کن\n"
+                "• ادمین اضافه/حذف کن\n"
+                "• شیفت‌ها را مدیریت کن\n"
+                "• آمار، کاربران و تنظیمات را ببین\n"
+                "• اطلاعیه بفرست و کانال را تنظیم کن\n"
+                "• ربات را روشن/خاموش کن"
             ),
             reply_markup=owner_keyboard(
                 db.is_bot_enabled()
@@ -6479,8 +6884,20 @@ async def help_button(
         await message.answer(
             (
                 "👨‍💼 راهنمای ادمین\n\n"
-                "پیام‌های در انتظار، شیفت امروز و عملکرد خودت "
-                "را مدیریت کن."
+                "📥 پیام‌های در انتظار\n"
+                "فقط وقتی داخل شیفت خودت هستی می‌توانی "
+                "پیام‌ها را ببینی، تأیید یا رد کنی.\n\n"
+                "⏰ شیفت من\n"
+                "شیفت‌های امروزت را ببین.\n\n"
+                "📊 عملکرد من\n"
+                "تعداد تأیید/رد و میانگین زمان بررسی.\n\n"
+                "🔔 اعلان‌ها\n"
+                "یادآوری قبل از شیفت و شروع شیفت.\n\n"
+                "🔄 درخواست تغییر شیفت\n"
+                "درخواستت برای مالک ثبت می‌شود.\n\n"
+                "در گروه مدیریت، با فرستادن آیدی ربات "
+                "می‌توانی شیفت ۱۲:۰۰ تا ۰۰:۰۰ را انتخاب کنی. "
+                "بین ۲۲ تا ۰۰ امکان انتخاب فردا هم هست."
             ),
             reply_markup=admin_keyboard(),
         )
@@ -6488,7 +6905,18 @@ async def help_button(
     else:
 
         await message.answer(
-            HELP_MESSAGE,
+            (
+                "📖 راهنمای ارسال پیام\n\n"
+                "برای ارسال پیام این قوانین رو رعایت کن:\n\n"
+                "1️⃣ پیام باید با «صدام بزن» شروع شود.\n"
+                "2️⃣ کل پیام باید Bold باشد.\n"
+                "3️⃣ پیام باید با « .» تمام شود.\n"
+                "4️⃣ ارسال لینک مجاز نیست.\n"
+                "5⃣ ارسال ایموجی مجاز نیست.\n\n"
+                "بعد از ارسال، پیام توسط ادمین بررسی می‌شود "
+                "و نتیجه به شما اطلاع‌رسانی خواهد شد.\n\n"
+                "لطفا از ارسال پیام تکراری خودداری فرمایید."
+            ),
             reply_markup=user_keyboard(),
         )
 
@@ -6552,14 +6980,6 @@ async def text_router(
 
         return
 
-    if text == "📅 برنامه من":
-
-        await admin_schedule(
-            message
-        )
-
-        return
-
     if text == "📊 عملکرد من":
 
         await admin_stats(
@@ -6602,19 +7022,19 @@ async def text_router(
 
         return
 
-    if text == "📅 برنامه کاری/امروز":
-
-        await owner_today_schedule(
-            message,
-            bot,
-        )
-
-        return
-
     if text == "📊 آمار و گزارش‌ها":
 
         await owner_stats_menu(
             message
+        )
+
+        return
+
+    if text == "👥 کاربران":
+
+        await owner_users_panel(
+            message,
+            bot,
         )
 
         return
@@ -6636,7 +7056,7 @@ async def text_router(
 
         return
 
-    if text == "⚙️ تنظیمات ربات":
+    if text in {"⚙️ تنظیمات ربات", "⚙️ تنظیمات"}:
 
         await owner_settings(
             message
@@ -7016,37 +7436,43 @@ async def shift_monitor(
                         ):
                             pass
 
-            # یادآوری ۱۰ دقیقه قبل از شروع شیفت بعدی
+            # یادآوری هر ۱ دقیقه در ۵ دقیقهٔ آخر تا شروع شیفت
             next_item = get_next_shift()
             if next_item:
                 shift, start_dt = next_item
-                remind_key = (
-                    start_dt.strftime("%Y-%m-%d"),
-                    int(shift["id"]),
-                )
                 delta = start_dt - now
+                # بین ۰ تا ۵ دقیقه مانده
                 if (
-                    timedelta(minutes=9) <= delta <= timedelta(minutes=11)
-                    and remind_key not in notified_shift_reminders
+                    timedelta(seconds=0) < delta <= timedelta(minutes=5)
                     and shift["notifications_enabled"]
                 ):
-                    notified_shift_reminders.add(remind_key)
-                    try:
-                        await bot.send_message(
-                            shift["admin_id"],
-                            (
-                                "⏰ <b>یادآوری شیفت</b>\n\n"
-                                "حدود ۱۰ دقیقه تا شروع شیفت شما مانده است.\n\n"
-                                f"🕐 شروع: <b>{start_dt.strftime('%H:%M')}</b>\n"
-                                f"⏰ بازه: {shift['start_time']} تا {shift['end_time']}"
-                            ),
-                            parse_mode=ParseMode.HTML,
-                        )
-                    except (
-                        TelegramForbiddenError,
-                        TelegramBadRequest,
-                    ):
-                        pass
+                    mins_left = max(1, int(delta.total_seconds() // 60) + (
+                        1 if delta.total_seconds() % 60 else 0
+                    ))
+                    # کلید: تاریخ + id + دقیقه باقی‌مانده تا هر دقیقه یک‌بار
+                    remind_key = (
+                        start_dt.strftime("%Y-%m-%d"),
+                        int(shift["id"]),
+                        int(delta.total_seconds() // 60),
+                    )
+                    if remind_key not in notified_shift_reminders:
+                        notified_shift_reminders.add(remind_key)
+                        try:
+                            await bot.send_message(
+                                shift["admin_id"],
+                                (
+                                    "⏰ <b>یادآوری شیفت</b>\n\n"
+                                    f"حدود <b>{mins_left}</b> دقیقه تا شروع شیفت مانده است.\n\n"
+                                    f"🕐 شروع: <b>{start_dt.strftime('%H:%M')}</b>\n"
+                                    f"⏰ بازه: {shift['start_time']} تا {shift['end_time']}"
+                                ),
+                                parse_mode=ParseMode.HTML,
+                            )
+                        except (
+                            TelegramForbiddenError,
+                            TelegramBadRequest,
+                        ):
+                            pass
 
             if len(notified_shifts) > 500:
                 notified_shifts = set(list(notified_shifts)[-150:])
