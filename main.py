@@ -499,6 +499,11 @@ def ensure_runtime_schema():
             (DEFAULT_CHANNEL_KEY,),
         )
 
+    if "rejected_by" not in message_columns:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN rejected_by INTEGER"
+        )
+
     admin_columns = {
         row["name"]
         for row in conn.execute(
@@ -1043,28 +1048,57 @@ def is_duplicate_user_message(
     hours: int = 24,
 ) -> bool:
     """
-    ضد پیام تکراری: اگر همین کاربر دقیقاً همین متن را
-    در ۲۴ ساعت گذشته ارسال کرده باشد (و هنوز در دیتابیس باشد)
-    True برمی‌گرداند. پیام‌هایی که مالک با پاک‌سازی صف حذف کرده
-    دیگر در جدول نیستند و مانع ارسال مجدد نمی‌شوند.
+    ضد پیام تکراری برای همان کاربر + همان متن در بازه زمانی.
+
+    استثنا: اگر تنها سابقهٔ این متن، رد توسط مالک باشد،
+    تکراری حساب نمی‌شود و کاربر می‌تواند دوباره بفرستد.
+    رد توسط ادمین همچنان مانع است.
     """
     cutoff = (local_now() - timedelta(hours=hours)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
-    # submitted_at ممکن است با فرمت‌های مختلف ذخیره شده باشد؛
-    # مقایسه رشته‌ای برای ISO-like کار می‌کند.
-    row = db.conn.execute(
-        """
-        SELECT 1
-        FROM messages
-        WHERE user_id = ?
-          AND content = ?
-          AND submitted_at >= ?
-        LIMIT 1
-        """,
-        (user_id, content, cutoff),
-    ).fetchone()
-    return bool(row)
+    try:
+        rows = db.conn.execute(
+            """
+            SELECT status, rejected_by
+            FROM messages
+            WHERE user_id = ?
+              AND content = ?
+              AND submitted_at >= ?
+            """,
+            (user_id, content, cutoff),
+        ).fetchall()
+    except Exception:
+        # اگر ستون rejected_by هنوز نباشد
+        row = db.conn.execute(
+            """
+            SELECT 1
+            FROM messages
+            WHERE user_id = ?
+              AND content = ?
+              AND submitted_at >= ?
+            LIMIT 1
+            """,
+            (user_id, content, cutoff),
+        ).fetchone()
+        return bool(row)
+
+    if not rows:
+        return False
+
+    for r in rows:
+        st = r["status"] if not isinstance(r, dict) else r.get("status")
+        if st != "rejected":
+            return True
+        rb = r["rejected_by"] if not isinstance(r, dict) else r.get("rejected_by")
+        if rb is None:
+            return True
+        try:
+            if not db.is_owner(int(rb)):
+                return True
+        except Exception:
+            return True
+    return False
 
 
 def create_announcement(
@@ -1210,7 +1244,7 @@ def set_admin_channel(user_id: int, channel_key: str):
     db.conn.commit()
 
 
-PENDING_PAGE_SIZE = 12
+PENDING_PAGE_SIZE = 50
 
 
 def get_pending_rows_for_channel(
@@ -1222,6 +1256,9 @@ def get_pending_rows_for_channel(
     """
     پیام‌های در انتظار یک کانال — صفحه‌بندی برای سرور ضعیف.
     پیام بدون channel_key فقط در کانال پیش‌فرض (صدام بزن) دیده می‌شود.
+
+    اگر admin_id داده شود یعنی ادمین شیفت فعال است؛ همهٔ pending/queued/processing
+    همان کانال را می‌بیند (نه فقط پیام‌هایی که admin_id قبلی‌شان خودش است).
     """
     key = channel_key or DEFAULT_CHANNEL_KEY
     ch_sql = """
@@ -1234,34 +1271,24 @@ def get_pending_rows_for_channel(
         )
     """
     try:
-        if admin_id is None:
-            return db.conn.execute(
-                f"""
-                SELECT *
-                FROM messages
-                WHERE status IN ('pending', 'queued', 'processing')
-                  AND {ch_sql}
-                ORDER BY id ASC
-                LIMIT ? OFFSET ?
-                """,
-                (key, key, DEFAULT_CHANNEL_KEY, limit, offset),
-            ).fetchall()
-
+        # مالک و ادمین شیفت: همه پیام‌های باز همان کانال
         return db.conn.execute(
             f"""
             SELECT *
             FROM messages
             WHERE status IN ('pending', 'queued', 'processing')
               AND {ch_sql}
-              AND (
-                    admin_id IS NULL
-                    OR admin_id = ?
-                    OR status = 'queued'
-                  )
-            ORDER BY id ASC
+            ORDER BY
+                CASE status
+                    WHEN 'pending' THEN 0
+                    WHEN 'processing' THEN 1
+                    WHEN 'queued' THEN 2
+                    ELSE 3
+                END,
+                id ASC
             LIMIT ? OFFSET ?
             """,
-            (key, key, DEFAULT_CHANNEL_KEY, admin_id, limit, offset),
+            (key, key, DEFAULT_CHANNEL_KEY, limit, offset),
         ).fetchall()
     except Exception:
         logger.exception(
@@ -1287,25 +1314,14 @@ def count_pending_for_channel(
         )
     """
     try:
-        if admin_id is None:
-            row = db.conn.execute(
-                f"""
-                SELECT COUNT(*) AS c FROM messages
-                WHERE status IN ('pending', 'queued', 'processing')
-                  AND {ch_sql}
-                """,
-                (key, key, DEFAULT_CHANNEL_KEY),
-            ).fetchone()
-        else:
-            row = db.conn.execute(
-                f"""
-                SELECT COUNT(*) AS c FROM messages
-                WHERE status IN ('pending', 'queued', 'processing')
-                  AND {ch_sql}
-                  AND (admin_id IS NULL OR admin_id = ? OR status = 'queued')
-                """,
-                (key, key, DEFAULT_CHANNEL_KEY, admin_id),
-            ).fetchone()
+        row = db.conn.execute(
+            f"""
+            SELECT COUNT(*) AS c FROM messages
+            WHERE status IN ('pending', 'queued', 'processing')
+              AND {ch_sql}
+            """,
+            (key, key, DEFAULT_CHANNEL_KEY),
+        ).fetchone()
         return int(row["c"] or 0) if row else 0
     except Exception:
         return 0
@@ -3107,22 +3123,14 @@ async def build_channel_post_link(
 async def can_review(user_id: int, row) -> bool:
     """
     مالک همیشه می‌تواند بررسی کند.
-    ادمین فقط اگر پیام برای او باشد و در شیفت فعال خودش باشد.
+    ادمین شیفت فعال همان کانال می‌تواند همه پیام‌های در انتظار همان کانال را بررسی کند
+    (حتی اگر admin_id قبلی روی پیام مانده باشد).
     """
     if db.is_owner(user_id):
         return True
 
     admin = db.get_admin(user_id)
     if not admin:
-        return False
-
-    try:
-        row_admin = row["admin_id"] if not isinstance(row, dict) else row.get("admin_id")
-    except Exception:
-        row_admin = None
-
-    # پیام بدون ادمین (queued) برای ادمین شیفت همان کانال مجاز است
-    if row_admin is not None and int(row_admin) != int(user_id):
         return False
 
     try:
@@ -3238,24 +3246,34 @@ async def deliver_pending_rows(
         if is_owner
         else admin_keyboard()
     )
-    # دکمه صفحه بعد
+    # دکمه‌های صفحه بعد + پاک‌سازی کل صف (مالک)
+    inline_rows = []
     if total_n > shown_to and channel_key:
         next_offset = offset + PENDING_PAGE_SIZE
-        markup_inline = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    _btn(
-                        f"📄 صفحه بعد ({shown_to + 1}…)",
-                        f"pending_more:{channel_key}:{next_offset}:{'1' if is_owner else '0'}",
-                        style="primary",
-                    )
-                ]
+        inline_rows.append(
+            [
+                _btn(
+                    f"📄 صفحه بعد ({shown_to + 1}…)",
+                    f"pending_more:{channel_key}:{next_offset}:{'1' if is_owner else '0'}",
+                    style="primary",
+                )
             ]
         )
+    if is_owner:
+        inline_rows.append(
+            [
+                _btn(
+                    "🗑 پاک‌سازی کل صف",
+                    "pending:clear_all",
+                    style="danger",
+                )
+            ]
+        )
+    if inline_rows:
         await bot.send_message(
             chat_id=user_id,
             text=summary,
-            reply_markup=markup_inline,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_rows),
         )
         await bot.send_message(
             chat_id=user_id,
@@ -3301,6 +3319,16 @@ async def pending_messages(
                 current = cur
                 ch_key = ck
                 break
+        # fallback: شیفت فعال بدون فیلتر کانال (شیفت‌های قدیمی بدون channel_key)
+        if not current:
+            cur = await get_current_shift_safe_async(channel_key=None)
+            if cur and int(cur[0]["admin_id"]) == int(user_id):
+                current = cur
+                try:
+                    sk = cur[0]["channel_key"]
+                except Exception:
+                    sk = None
+                ch_key = sk or (admin_chs[0] if admin_chs else DEFAULT_CHANNEL_KEY)
         if not current or not ch_key:
             await message.answer(
                 (
@@ -3436,6 +3464,14 @@ async def pending_more_callback(
     )
 
 
+def _progress_bar(percent: int) -> str:
+    """نوار پیشرفت متنی — درصد ۰ تا ۱۰۰، گام‌های ۱۰٪."""
+    p = max(0, min(100, int(percent)))
+    filled = p // 10
+    empty = 10 - filled
+    return "▓" * filled + "░" * empty + f" {p}%"
+
+
 @router.callback_query(
     F.data == "pending:clear_all"
 )
@@ -3455,15 +3491,43 @@ async def clear_all_pending_callback(
 
         return
 
-    user_ids = db.clear_pending_messages()
+    await callback.answer("⏳ شروع پاک‌سازی...")
+
+    progress_msg = None
+    try:
+        progress_msg = await callback.message.answer(
+            f"🗑 پاک‌سازی صف...\n{_progress_bar(0)}"
+        )
+    except Exception:
+        pass
+
+    def _set_progress(pct: int, extra: str = ""):
+        async def _do():
+            if not progress_msg:
+                return
+            text = f"🗑 پاک‌سازی صف...\n{_progress_bar(pct)}"
+            if extra:
+                text += f"\n{extra}"
+            try:
+                await progress_msg.edit_text(text)
+            except Exception:
+                pass
+        return _do()
+
+    await _set_progress(10, "در حال خواندن صف...")
+
+    try:
+        user_ids = await asyncio.to_thread(db.clear_pending_messages)
+    except Exception:
+        logger.exception("CLEAR PENDING ERROR")
+        await _set_progress(0, "❌ خطا در پاک‌سازی دیتابیس")
+        await callback.message.answer(GENERIC_ERROR)
+        return
+
+    await _set_progress(20, "صف از دیتابیس پاک شد.")
 
     if not user_ids:
-
-        await callback.answer(
-            "📥 صف پیام‌ها از قبل خالی است.",
-            show_alert=True,
-        )
-
+        await _set_progress(100, "صف از قبل خالی بود.")
         try:
             await callback.message.edit_text(
                 "📥 فعلاً پیام در انتظاری وجود ندارد.",
@@ -3471,7 +3535,10 @@ async def clear_all_pending_callback(
             )
         except Exception:
             pass
-
+        await callback.message.answer(
+            "📥 صف از قبل خالی بود.",
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
         return
 
     notification_text = (
@@ -3483,58 +3550,64 @@ async def clear_all_pending_callback(
 
     notified = 0
     failed = 0
+    total = len(user_ids)
+    last_pct_shown = 20
 
-    for target_user_id in user_ids:
-
+    for i, target_user_id in enumerate(user_ids, 1):
         try:
-
             await bot.send_message(
                 chat_id=target_user_id,
                 text=notification_text,
             )
-
             notified += 1
-
         except Exception:
-
             failed += 1
-
             logger.exception(
-                "CLEAR QUEUE NOTIFICATION ERROR | "
-                "user_id=%s",
+                "CLEAR QUEUE NOTIFICATION ERROR | user_id=%s",
                 target_user_id,
+            )
+
+        # پیشرفت ۲۰٪ تا ۹۰٪ برای اطلاع‌رسانی
+        pct = 20 + int(70 * i / max(total, 1))
+        # فقط هر ۱۰٪ یک‌بار آپدیت
+        step = (pct // 10) * 10
+        if step > last_pct_shown:
+            last_pct_shown = step
+            await _set_progress(
+                step,
+                f"اطلاع‌رسانی به کاربران... ({i}/{total})",
             )
 
         await asyncio.sleep(0.05)
 
-    await callback.answer(
-        "✅ صف با موفقیت پاک‌سازی شد.",
-        show_alert=True,
-    )
+    await _set_progress(100, "تمام شد.")
 
     result_text = (
         "🗑 صف پیام‌های در انتظار پاک‌سازی شد.\n\n"
-        f"📨 تعداد کاربران اطلاع‌رسانی‌شده: {notified}"
+        f"{_progress_bar(100)}\n\n"
+        f"📨 کاربران اطلاع‌رسانی‌شده: {notified}"
     )
 
     if failed:
-
-        result_text += (
-            f"\n⚠️ اطلاع‌رسانی ناموفق: {failed}"
-        )
+        result_text += f"\n⚠️ اطلاع‌رسانی ناموفق: {failed}"
 
     try:
-
-        await callback.message.edit_text(
-            result_text,
-            reply_markup=None,
-        )
-
+        if progress_msg:
+            await progress_msg.edit_text(result_text)
+        else:
+            await callback.message.answer(result_text)
     except Exception:
+        await callback.message.answer(result_text)
 
-        logger.exception(
-            "CLEAR QUEUE EDIT MESSAGE ERROR"
-        )
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        "پنل مالک:",
+        reply_markup=owner_keyboard(db.is_bot_enabled()),
+    )
 
 
 @router.callback_query(
@@ -3877,6 +3950,18 @@ async def reject_reason_callback(
         "rejected",
         reason,
     )
+
+    # ثبت ردکننده برای منطق ضدتکرار (فقط رد مالک اجازه ارسال مجدد می‌دهد)
+    try:
+        await db_execute(
+            "UPDATE messages SET rejected_by = ? WHERE id = ?",
+            (callback.from_user.id, message_id),
+        )
+        await db_commit()
+    except Exception:
+        logger.exception(
+            "SET REJECTED_BY ERROR | message_id=%s", message_id
+        )
 
     await callback.answer(
         "پیام رد شد."
@@ -8909,14 +8994,30 @@ def get_current_shift_safe(channel_key: str | None = None):
     for shift in rows:
         # فیلتر کانال (در صورت مشخص بودن)
         if channel_key:
-            sk = None
+            raw_sk = None
             try:
-                sk = shift["channel_key"]
+                raw_sk = shift["channel_key"]
             except Exception:
-                sk = None
-            sk = sk or DEFAULT_CHANNEL_KEY
-            if sk != channel_key:
-                continue
+                raw_sk = None
+            raw_sk = (str(raw_sk).strip() if raw_sk else "") or ""
+            if raw_sk:
+                if raw_sk != channel_key:
+                    continue
+            else:
+                # شیفت قدیمی بدون channel_key
+                if channel_key == DEFAULT_CHANNEL_KEY:
+                    pass
+                else:
+                    # فقط اگر ادمین صرفاً ادمین همین کانال باشد
+                    try:
+                        a_keys = admin_channel_keys(int(shift["admin_id"]))
+                    except Exception:
+                        a_keys = []
+                    if channel_key not in a_keys:
+                        continue
+                    if len(a_keys) > 1:
+                        # مبهم است؛ به کانال پیش‌فرض نسبت بده نه این کانال
+                        continue
 
         for date in (
             now.date(),
@@ -9078,8 +9179,11 @@ async def dispatch_queued_messages(
     shift,
 ):
     """
-    فقط پیام‌های صف‌شدهٔ همان کانالِ شیفت را به ادمین آن شیفت می‌دهد.
-    پیام کانال دیگر به ادمین شیفت کانال دیگر نمی‌رود.
+    همه پیام‌های باز همان کانال (queued / pending / processing) را
+    به ادمین شیفت فعال می‌دهد و در پیوی‌اش ارسال می‌کند.
+
+    قبلاً فقط status=queued فرستاده می‌شد؛ پیام‌هایی که pending مانده بودند
+    (با admin_id قدیمی) هرگز به ادمین شیفت جدید نمی‌رسیدند.
     """
     try:
         shift_ch = shift["channel_key"]
@@ -9087,13 +9191,14 @@ async def dispatch_queued_messages(
         shift_ch = None
     shift_ch = shift_ch or DEFAULT_CHANNEL_KEY
 
-    # فقط queuedهای همین کانال (+ پیام‌های بدون channel_key فقط برای کانال پیش‌فرض)
+    admin_id = int(shift["admin_id"])
+
     if shift_ch == DEFAULT_CHANNEL_KEY:
         rows = await db_fetchall(
             """
             SELECT *
             FROM messages
-            WHERE status = 'queued'
+            WHERE status IN ('queued', 'pending', 'processing')
               AND (
                     channel_key = ?
                     OR channel_key IS NULL
@@ -9108,17 +9213,49 @@ async def dispatch_queued_messages(
             """
             SELECT *
             FROM messages
-            WHERE status = 'queued'
+            WHERE status IN ('queued', 'pending', 'processing')
               AND channel_key = ?
             ORDER BY submitted_at ASC, id ASC
             """,
             (shift_ch,),
         )
 
+    # جلوگیری از ارسال تکراری همان پیام در یک اجرای مانیتور
+    sent_ids: set[int] = set()
+
     for row in rows:
+        mid = int(row["id"])
+        if mid in sent_ids:
+            continue
+
+        # اگر قبلاً برای همین ادمین admin_message_id دارد، دوباره نفرست
+        try:
+            prev_admin = row["admin_id"]
+            prev_msg = row["admin_message_id"]
+        except Exception:
+            prev_admin, prev_msg = None, None
+        if (
+            prev_admin is not None
+            and int(prev_admin) == admin_id
+            and prev_msg
+            and str(row["status"]) == "pending"
+        ):
+            # قبلاً برای همین ادمین ارسال شده؛ فقط claim را به‌روز کن
+            try:
+                await db_execute(
+                    """
+                    UPDATE messages
+                    SET admin_id = ?, shift_id = ?, status = 'pending'
+                    WHERE id = ? AND status IN ('queued', 'pending', 'processing')
+                    """,
+                    (admin_id, shift["id"], mid),
+                )
+                await db_commit()
+            except Exception:
+                pass
+            continue
 
         try:
-
             await db_execute(
                 """
                 UPDATE messages
@@ -9127,58 +9264,44 @@ async def dispatch_queued_messages(
                     status = 'pending',
                     shift_id = ?
                 WHERE id = ?
-                  AND status = 'queued'
+                  AND status IN ('queued', 'pending', 'processing')
                 """,
                 (
-                    shift["admin_id"],
+                    admin_id,
                     shift["id"],
-                    row["id"],
+                    mid,
                 ),
             )
-
             await db_commit()
 
-            updated = await asyncio.to_thread(db.get_message, row["id"])
+            updated = await asyncio.to_thread(db.get_message, mid)
+            if not updated:
+                continue
 
             sent = await send_review_message(
                 bot,
-                shift["admin_id"],
+                admin_id,
                 updated,
             )
 
             await asyncio.to_thread(
                 db.set_admin_message_id,
-                row["id"],
+                mid,
                 sent.message_id,
             )
+            sent_ids.add(mid)
+            await asyncio.sleep(0.05)
 
         except Exception:
-
             logger.exception(
-                "DISPATCH QUEUED MESSAGE ERROR | "
+                "DISPATCH PENDING MESSAGE ERROR | "
                 "message_id=%s | shift_id=%s | channel=%s",
-                row["id"],
+                mid,
                 shift["id"],
                 shift_ch,
             )
-
-            try:
-                await db_execute(
-                    """
-                    UPDATE messages
-                    SET
-                        status = 'queued',
-                        admin_id = NULL
-                    WHERE id = ?
-                    """,
-                    (row["id"],),
-                )
-                await db_commit()
-            except Exception:
-                logger.exception(
-                    "DISPATCH RESTORE QUEUED ERROR | message_id=%s",
-                    row["id"],
-                )
+            # در صورت خطای ارسال، حداقل admin_id را برای ادمین شیفت نگه دار
+            # تا از پنل 📥 بتواند ببیند
 
 
 # =========================================================
