@@ -172,6 +172,42 @@ CHANNELS: dict[str, dict[str, Any]] = {
 
 DEFAULT_CHANNEL_KEY = "sadambazan"
 
+# ساعات کاری / شیفت هر کانال (شروع شامل، پایان غیرشامل به ساعت)
+# end_hour=24 یعنی تا ۰۰:۰۰
+CHANNEL_HOURS: dict[str, tuple[int, int]] = {
+    "sadambazan": (12, 24),   # ۱۲ ظهر تا ۱۲ شب
+    "inkarbar": (0, 24),      # کل شبانه‌روز
+    "zendegi": (11, 24),      # ۱۱ ظهر تا ۱۲ شب
+}
+
+
+def channel_hours(channel_key: str | None) -> tuple[int, int]:
+    key = channel_key or DEFAULT_CHANNEL_KEY
+    return CHANNEL_HOURS.get(key, (0, 24))
+
+
+def channel_hours_label(channel_key: str | None) -> str:
+    start_h, end_h = channel_hours(channel_key)
+    if start_h == 0 and end_h == 24:
+        return "۰۰:۰۰ تا ۲۴:۰۰ (کل شبانه‌روز)"
+    end_label = "۰۰:۰۰" if end_h == 24 else f"{end_h:02d}:00"
+    return f"{start_h:02d}:00 تا {end_label}"
+
+
+def is_within_channel_hours(channel_key: str | None, when: datetime | None = None) -> bool:
+    """آیا الان داخل ساعات کاری کانال هستیم؟ (برای بازهٔ شبانه end<=start پشتیبانی می‌شود)"""
+    now = when or local_now()
+    start_h, end_h = channel_hours(channel_key)
+    if start_h == 0 and end_h == 24:
+        return True
+    minutes = now.hour * 60 + now.minute
+    start_m = start_h * 60
+    end_m = (end_h % 24) * 60 if end_h < 24 else 24 * 60
+    if end_m <= start_m:
+        # بازه شبانه
+        return minutes >= start_m or minutes < end_m
+    return start_m <= minutes < end_m
+
 
 def channel_keys() -> list[str]:
     return list(CHANNELS.keys())
@@ -940,6 +976,40 @@ def get_admin_shift_ranges_for_date(
         start = str(row["start_time"]).strip()
         end = str(row["end_time"]).strip()
         result.append((start, end))
+    return result
+
+
+def get_admin_shifts_for_date_channel(
+    admin_id: int,
+    for_date: str | None = None,
+    channel_key: str | None = None,
+) -> list:
+    """شیفت‌های یک ادمین در تاریخ+کانال مشخص (شامل دائمی)."""
+    target = for_date or today_string()
+    ch = channel_key or DEFAULT_CHANNEL_KEY
+    rows = db.conn.execute(
+        """
+        SELECT *
+        FROM shifts
+        WHERE admin_id = ?
+          AND (
+                specific_date = ?
+                OR (permanent = 1 AND (specific_date IS NULL OR specific_date = ''))
+              )
+        ORDER BY start_time ASC
+        """,
+        (admin_id, target),
+    ).fetchall()
+    result = []
+    for row in rows:
+        try:
+            sk = row["channel_key"]
+        except Exception:
+            sk = None
+        sk = sk or DEFAULT_CHANNEL_KEY
+        if sk != ch:
+            continue
+        result.append(row)
     return result
 
 
@@ -2263,8 +2333,92 @@ async def group_router(
             return
 
         now = local_now()
-        can_pick_tomorrow = now.hour >= 22
         title = CHANNELS[group_ch]["title"]
+        hours_label = channel_hours_label(group_ch)
+
+        # اگر ادمین از قبل شیفت امروز (یا فردا در صورت مجاز) دارد → نمایش + لغو
+        if admin and not db.is_owner(user.id):
+            today = today_string()
+            my_shifts = get_admin_shifts_for_date_channel(
+                user.id, today, group_ch
+            )
+            tomorrow = (now.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+            my_shifts_tmr = []
+            if now.hour >= 22:
+                my_shifts_tmr = get_admin_shifts_for_date_channel(
+                    user.id, tomorrow, group_ch
+                )
+
+            if my_shifts or my_shifts_tmr:
+                admin_name = (
+                    (admin["name"] if admin else None)
+                    or user.full_name
+                    or str(user.id)
+                )
+                lines = [
+                    f"👨‍💼 <b>{escape(admin_name)}</b>",
+                    f"📺 کانال: <b>{title}</b>\n",
+                ]
+                cancel_buttons = []
+                if my_shifts:
+                    lines.append("📅 <b>شیفت‌های امروز:</b>")
+                    for s in my_shifts:
+                        lines.append(
+                            f"⏰ {s['start_time']} تا {s['end_time']}"
+                        )
+                        cancel_buttons.append(
+                            [
+                                _btn(
+                                    f"🗑 لغو {s['start_time']}–{s['end_time']}",
+                                    f"group_shift_cancel:{s['id']}",
+                                    style="danger",
+                                )
+                            ]
+                        )
+                if my_shifts_tmr:
+                    lines.append("\n📆 <b>شیفت‌های فردا:</b>")
+                    for s in my_shifts_tmr:
+                        lines.append(
+                            f"⏰ {s['start_time']} تا {s['end_time']}"
+                        )
+                        cancel_buttons.append(
+                            [
+                                _btn(
+                                    f"🗑 لغو فردا {s['start_time']}–{s['end_time']}",
+                                    f"group_shift_cancel:{s['id']}",
+                                    style="danger",
+                                )
+                            ]
+                        )
+                cancel_buttons.append(
+                    [
+                        _btn(
+                            "➕ افزودن شیفت جدید",
+                            "group_shift:today",
+                            style="primary",
+                        )
+                    ]
+                )
+                if now.hour >= 22:
+                    cancel_buttons.append(
+                        [
+                            _btn(
+                                "📆 شیفت فردا",
+                                "group_shift:tomorrow",
+                                style="success",
+                            )
+                        ]
+                    )
+                await message.answer(
+                    "\n".join(lines),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=cancel_buttons
+                    ),
+                )
+                return
+
+        can_pick_tomorrow = now.hour >= 22
         if can_pick_tomorrow:
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -2288,7 +2442,7 @@ async def group_router(
                 f"👨‍💼 مدیریت شیفت — <b>{title}</b>\n\n"
                 "الان بین <b>۲۲ تا ۰۰</b> هستید.\n"
                 "می‌توانید شیفت <b>امروز</b> یا <b>فردا</b> را تنظیم کنید.\n\n"
-                "⏱ بازه‌های مجاز: فقط از <b>۱۲:۰۰ تا ۰۰:۰۰</b>"
+                f"⏱ بازه‌های مجاز: <b>{hours_label}</b>"
             )
         else:
             keyboard = InlineKeyboardMarkup(
@@ -2305,7 +2459,7 @@ async def group_router(
             text_out = (
                 f"👨‍💼 مدیریت شیفت — <b>{title}</b>\n\n"
                 "شیفت فقط برای <b>امروز</b> قابل تعیین است.\n\n"
-                "⏱ بازه‌های مجاز: فقط از <b>۱۲:۰۰ تا ۰۰:۰۰</b>"
+                f"⏱ بازه‌های مجاز: <b>{hours_label}</b>"
             )
         await message.answer(
             text_out,
@@ -4708,8 +4862,7 @@ def group_shift_hourly_keyboard(
     channel_key: str | None = None,
 ):
     """
-    صدام بزن: فقط ۱۲:۰۰ تا ۰۰:۰۰
-    این کاربر / تو زندگی بعدی: کل ۲۴ ساعت
+    بازه‌های یک‌ساعته بر اساس CHANNEL_HOURS هر کانال.
     """
     now = local_now()
     target_date = for_date or today_string()
@@ -4739,13 +4892,7 @@ def group_shift_hourly_keyboard(
             )
         ]
 
-    # صدام بزن محدود به ۱۲–۲۴؛ بقیه کانال‌ها ۰–۲۴
-    if ch == "sadambazan":
-        SHIFT_START_HOUR = 12
-        SHIFT_END_HOUR = 24
-    else:
-        SHIFT_START_HOUR = 0
-        SHIFT_END_HOUR = 24
+    SHIFT_START_HOUR, SHIFT_END_HOUR = channel_hours(ch)
 
     if for_tomorrow:
         first_hour = SHIFT_START_HOUR
@@ -4983,10 +5130,7 @@ async def group_shift_callback(
 
     await callback.answer()
 
-    if ch_for_group == "sadambazan":
-        range_hint = "۱۲:۰۰ تا ۰۰:۰۰"
-    else:
-        range_hint = "۰۰:۰۰ تا ۲۴:۰۰ (کل شبانه‌روز)"
+    range_hint = channel_hours_label(ch_for_group)
 
     await callback.message.answer(
         (
@@ -5018,6 +5162,54 @@ async def group_shift_taken_callback(
         "⛔ این بازه قبلاً انتخاب شده و قابل انتخاب مجدد نیست.",
         show_alert=True,
     )
+
+
+@router.callback_query(
+    F.data.startswith("group_shift_cancel:")
+)
+async def group_shift_cancel_callback(
+    callback: CallbackQuery,
+):
+    """لغو شیفت توسط خود ادمین (دکمه قرمز)."""
+    user_id = callback.from_user.id
+    try:
+        shift_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("❌ نامعتبر", show_alert=True)
+        return
+
+    try:
+        shift = await asyncio.to_thread(db.get_shift, shift_id)
+    except Exception:
+        shift = None
+
+    if not shift:
+        await callback.answer("شیفت پیدا نشد.", show_alert=True)
+        return
+
+    if int(shift["admin_id"]) != int(user_id) and not db.is_owner(user_id):
+        await callback.answer("⛔ فقط صاحب شیفت می‌تواند لغو کند.", show_alert=True)
+        return
+
+    try:
+        await asyncio.to_thread(db.delete_shift, shift_id)
+    except Exception:
+        logger.exception("GROUP SHIFT CANCEL ERROR | shift_id=%s", shift_id)
+        await callback.answer(GENERIC_ERROR, show_alert=True)
+        return
+
+    await callback.answer("✅ شیفت لغو شد.", show_alert=True)
+    try:
+        await callback.message.answer(
+            f"✅ شیفت #{shift_id} "
+            f"({shift['start_time']} تا {shift['end_time']}) لغو شد."
+        )
+    except Exception:
+        pass
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 
 @router.callback_query(
@@ -5138,12 +5330,14 @@ async def group_shift_hourly_callback(
         except Exception:
             sh = -1
         # فقط صدام بزن: محدودیت ۱۲–۲۴
-        if ch_key == "sadambazan" and sh < 12:
-            await callback.answer(
-                "⛔ در کانال صدام بزن فقط بازه‌های ۱۲:۰۰ تا ۰۰:۰۰ مجاز است.",
-                show_alert=True,
-            )
-            return
+        start_h, end_h = channel_hours(ch_key)
+        if not (start_h == 0 and end_h == 24):
+            if sh < start_h or (end_h < 24 and sh >= end_h):
+                await callback.answer(
+                    f"⛔ در این کانال فقط بازه‌های {channel_hours_label(ch_key)} مجاز است.",
+                    show_alert=True,
+                )
+                return
 
         # جلوگیری از شیفت تکراری یا هم‌پوشان در همان کانال
         taken = await asyncio.to_thread(
@@ -5298,6 +5492,18 @@ async def group_shift_hourly_callback(
             "✅ شیفت ثبت شد.",
             show_alert=True,
         )
+
+        # همان لحظه پنل ساعت‌ها را قرمز/به‌روز کن
+        try:
+            await callback.message.edit_reply_markup(
+                reply_markup=group_shift_hourly_keyboard(
+                    for_date=specific_date,
+                    for_tomorrow=is_tomorrow,
+                    channel_key=ch_key,
+                )
+            )
+        except Exception:
+            logger.exception("GROUP SHIFT REFRESH KEYBOARD ERROR")
 
         day_label = "فردا" if is_tomorrow else "امروز"
         await callback.message.answer(
@@ -7703,6 +7909,16 @@ async def handle_state(
             )
             return True
 
+        # ساعات کاری کانال — خارج از بازه، پیام قبول نمی‌شود
+        if not is_within_channel_hours(msg_channel):
+            ch_title = CHANNELS.get(msg_channel, {}).get("title", msg_channel)
+            hours_label = channel_hours_label(msg_channel)
+            await message.answer(
+                f"⏰ ساعت کاری «{ch_title}» از {hours_label} می‌باشد.\n\n"
+                "لطفاً در ساعات ذکرشده پیام ارسال کنید."
+            )
+            return True
+
         current = await get_current_shift_safe_async(channel_key=msg_channel)
 
         entities = serialize_entities(
@@ -8269,14 +8485,17 @@ async def handle_state(
                 sh = int(start.split(":")[0])
             except Exception:
                 sh = -1
-            if sh < 12:
-                await message.answer(
-                    "⛔ فقط بازه‌های ۱۲:۰۰ تا ۰۰:۰۰ مجاز است."
-                )
-                return True
+            ch_key_gs = state.get("channel_key") or DEFAULT_CHANNEL_KEY
+            start_h, end_h = channel_hours(ch_key_gs)
+            if not (start_h == 0 and end_h == 24):
+                if sh < start_h or (end_h < 24 and sh >= end_h):
+                    await message.answer(
+                        f"⛔ فقط بازه‌های {channel_hours_label(ch_key_gs)} مجاز است."
+                    )
+                    return True
 
             # جلوگیری از شیفت تکراری یا هم‌پوشان در کانال
-            if is_shift_slot_taken(start, end, specific_date):
+            if is_shift_slot_taken(start, end, specific_date, channel_key=ch_key_gs):
                 await message.answer(
                     "⛔ این بازه با شیفت ثبت‌شدهٔ دیگری هم‌پوشانی دارد و قابل انتخاب نیست."
                 )
