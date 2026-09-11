@@ -520,6 +520,27 @@ def ensure_runtime_schema():
         """
     )
 
+    # جدول انتقادات / پیشنهادات / گزارش مشکل
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            owner_reply TEXT,
+            replied_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_feedback_status
+        ON user_feedback(status, id)
+        """
+    )
+
     conn.commit()
 
 
@@ -576,6 +597,26 @@ def anti_dupe_enabled() -> bool:
 
 def queue_limit() -> int:
     return get_int_setting("queue_limit", 100)
+
+
+def channel_enabled_key(channel_key: str) -> str:
+    return f"channel_enabled_{channel_key}"
+
+
+def is_channel_enabled(channel_key: str | None) -> bool:
+    """اگر کانال خاموش باشد False — پیش‌فرض روشن."""
+    key = channel_key or DEFAULT_CHANNEL_KEY
+    # اگر کل ربات خاموش باشد همه کانال‌ها هم خاموش
+    try:
+        if not db.is_bot_enabled():
+            return False
+    except Exception:
+        pass
+    return get_setting(channel_enabled_key(key), "1") != "0"
+
+
+def set_channel_enabled(channel_key: str, enabled: bool):
+    set_setting(channel_enabled_key(channel_key), "1" if enabled else "0")
 
 
 def set_setting(
@@ -1911,6 +1952,11 @@ def user_keyboard():
             ],
             [
                 KeyboardButton(
+                    text="💬 انتقادات، پیشنهادات، گزارش مشکل"
+                ),
+            ],
+            [
+                KeyboardButton(
                     text="📖 راهنما"
                 ),
             ],
@@ -1924,29 +1970,29 @@ def admin_keyboard():
         keyboard=[
             [
                 KeyboardButton(
-                    text="📝 ارسال پیام"
+                    text="📝 ارسال پیام به صورت کاربر عادی"
                 ),
+            ],
+            [
                 KeyboardButton(
                     text="📥 پیام‌های در انتظار"
                 ),
-            ],
-            [
                 KeyboardButton(
                     text="⏰ شیفت من"
                 ),
+            ],
+            [
                 KeyboardButton(
                     text="📊 عملکرد من"
                 ),
-            ],
-            [
                 KeyboardButton(
                     text="🔔 اعلان‌ها"
                 ),
+            ],
+            [
                 KeyboardButton(
                     text="🔄 درخواست تغییر شیفت"
                 ),
-            ],
-            [
                 KeyboardButton(
                     text="❓ راهنما"
                 ),
@@ -1999,8 +2045,13 @@ def owner_keyboard(
             ],
             [
                 KeyboardButton(
+                    text="📬 مشاهده پیام کاربران"
+                ),
+                KeyboardButton(
                     text="⚙️ تنظیمات"
                 ),
+            ],
+            [
                 KeyboardButton(
                     text="❓ راهنما"
                 ),
@@ -2008,6 +2059,16 @@ def owner_keyboard(
         ],
         resize_keyboard=True,
     )
+
+
+# دلایل رد کوتاه و واضح برای ادمین
+ADMIN_REJECT_REASONS = {
+    "inappropriate": "نامناسب",
+    "profanity": "حاوی کلمات ناسزا",
+    "duplicate": "تکراری",
+    "rules": "عدم رعایت قوانین ارسال",
+    "quality": "کیفیت پایین / نامفهوم",
+}
 
 
 def _btn(text: str, callback_data: str, style: str | None = None) -> InlineKeyboardButton:
@@ -2073,7 +2134,7 @@ def reject_keyboard(
                 )
             ]
             for key, title
-            in REJECT_REASONS.items()
+            in ADMIN_REJECT_REASONS.items()
         ]
     )
 
@@ -2564,7 +2625,10 @@ async def cancel_group(
 # =========================================================
 
 @router.message(
-    F.text == "📝 ارسال پیام",
+    F.text.in_({
+        "📝 ارسال پیام",
+        "📝 ارسال پیام به صورت کاربر عادی",
+    }),
     F.chat.type == "private",
 )
 async def user_send_start(
@@ -2604,6 +2668,151 @@ async def user_send_start(
             "لطفاً بعداً دوباره امتحان کنید."
         )
         return
+
+
+# =========================================================
+# USER FEEDBACK (انتقادات / پیشنهادات / گزارش مشکل)
+# =========================================================
+
+@router.message(
+    F.text == "💬 انتقادات، پیشنهادات، گزارش مشکل",
+    F.chat.type == "private",
+)
+async def user_feedback_start(
+    message: Message,
+):
+    set_state(message.from_user.id, "user_feedback")
+    await message.answer(
+        (
+            "💬 انتقادات، پیشنهادات یا گزارش مشکل\n\n"
+            "پیامت را بنویس و بفرست.\n"
+            "مستقیماً برای مالک ارسال می‌شود."
+        ),
+        reply_markup=back_keyboard(),
+    )
+
+
+@router.message(
+    F.text == "📬 مشاهده پیام کاربران",
+    F.chat.type == "private",
+)
+async def owner_view_feedback(
+    message: Message,
+    bot: Bot,
+):
+    if not await asyncio.to_thread(db.is_owner, message.from_user.id):
+        return
+
+    try:
+        rows = await db_fetchall(
+            """
+            SELECT *
+            FROM user_feedback
+            WHERE status = 'open'
+            ORDER BY id ASC
+            LIMIT 30
+            """
+        )
+    except Exception:
+        logger.exception("OWNER FEEDBACK LIST ERROR")
+        await message.answer(GENERIC_ERROR)
+        return
+
+    if not rows:
+        await message.answer(
+            "📬 پیام باز از کاربران وجود ندارد.",
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
+        return
+
+    await message.answer(f"📬 {len(rows)} پیام باز:")
+
+    for row in rows:
+        try:
+            mention = await mention_user(bot, row["user_id"])
+        except Exception:
+            mention = str(row["user_id"])
+        text = (
+            f"#{row['id']} — {mention}\n"
+            f"🕐 {escape(row['created_at'] or '')}\n\n"
+            f"{escape(row['content'] or '')}"
+        )
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💬 پاسخ",
+                        callback_data=f"fb_reply:{row['id']}",
+                    ),
+                    InlineKeyboardButton(
+                        text="✅ بسته‌شد",
+                        callback_data=f"fb_close:{row['id']}",
+                    ),
+                ]
+            ]
+        )
+        try:
+            await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception:
+            logger.exception("OWNER FEEDBACK SEND ERROR | id=%s", row["id"])
+        await asyncio.sleep(0.05)
+
+
+@router.callback_query(F.data.startswith("fb_reply:"))
+async def owner_feedback_reply_start(
+    callback: CallbackQuery,
+):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    try:
+        fb_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer()
+        return
+    set_state(
+        callback.from_user.id,
+        "owner_feedback_reply",
+        feedback_id=fb_id,
+    )
+    await callback.answer()
+    await callback.message.answer(
+        f"💬 پاسخ برای پیام #{fb_id} را بنویس:",
+        reply_markup=back_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("fb_close:"))
+async def owner_feedback_close(
+    callback: CallbackQuery,
+):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    try:
+        fb_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer()
+        return
+    try:
+        await db_execute(
+            """
+            UPDATE user_feedback
+            SET status = 'closed'
+            WHERE id = ?
+            """,
+            (fb_id,),
+        )
+        await db_commit()
+    except Exception:
+        logger.exception("FEEDBACK CLOSE ERROR | id=%s", fb_id)
+        await callback.answer(GENERIC_ERROR, show_alert=True)
+        return
+    await callback.answer("✅ بسته شد.")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 
 # =========================================================
@@ -3442,9 +3651,9 @@ async def reject_reason_callback(
         await callback.answer()
         return
 
-    reason = REJECT_REASONS.get(
+    reason = ADMIN_REJECT_REASONS.get(
         parts[2],
-        REJECT_REASONS["no_reason"],
+        "رد شده",
     )
 
     row = db.get_message(
@@ -4063,9 +4272,15 @@ async def owner_add_admin_start(
         (
             f"➕ افزودن ادمین برای «{title}»\n\n"
             "آیدی عددی یا username را بفرست.\n\n"
-            "مثال:\n"
+            "می‌توانی چند آیدی عددی را یکجا بفرستی "
+            "(با فاصله، ویرگول یا خط جدید جدا کن).\n\n"
+            "مثال تکی:\n"
             "123456789\n"
             "@sixiren\n\n"
+            "مثال دسته‌جمعی:\n"
+            "123456789 987654321 111222333\n"
+            "یا\n"
+            "123456789,987654321,111222333\n\n"
             "برای username، کاربر باید قبلاً ربات را Start کرده باشد."
         ),
         reply_markup=back_keyboard(),
@@ -6213,65 +6428,78 @@ async def owner_channel_test(
         )
 
 
-@router.message(
-    F.text == "⚙️ تنظیمات ربات",
-    F.chat.type == "private",
-)
 def owner_runtime_settings_keyboard():
     dupe_on = anti_dupe_enabled()
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows = [
+        [
+            _btn(
+                f"🔢 محدودیت پیام: {rate_limit_max()}",
+                "cfg:rate_max",
+                style="primary",
+            )
+        ],
+        [
+            _btn(
+                f"⏱️ بازه محدودیت: {rate_limit_window() // 60} دقیقه",
+                "cfg:rate_window",
+                style="primary",
+            )
+        ],
+        [
+            _btn(
+                f"🔄 ضدتکرار: {'فعال' if dupe_on else 'غیرفعال'}",
+                "cfg:dupe_toggle",
+                style="success" if dupe_on else "danger",
+            )
+        ],
+        [
+            _btn(
+                f"⏳ مدت ضدتکرار: {anti_dupe_hours()} ساعت",
+                "cfg:dupe_hours",
+                style="primary",
+            )
+        ],
+        [
+            _btn(
+                f"📨 سقف صف: {queue_limit()}",
+                "cfg:queue_limit",
+                style="primary",
+            )
+        ],
+        [
+            _btn(
+                f"🤖 کل ربات: {'روشن' if db.is_bot_enabled() else 'خاموش'}",
+                "cfg:bot_toggle",
+                style="success" if db.is_bot_enabled() else "danger",
+            )
+        ],
+    ]
+    # روشن/خاموش جدا برای هر کانال
+    for key, cfg in CHANNELS.items():
+        on = is_channel_enabled(key) if db.is_bot_enabled() else False
+        # وقتی کل ربات خاموش است، کانال‌ها هم خاموش نمایش داده می‌شوند
+        # ولی وضعیت ذخیره‌شده کانال جداست؛ برای نمایش واقعی بدون اثر bot_enabled:
+        raw_on = get_setting(channel_enabled_key(key), "1") != "0"
+        label = f"{'🟢' if raw_on else '🔴'} {cfg['title']}: {'روشن' if raw_on else 'خاموش'}"
+        rows.append(
             [
                 _btn(
-                    f"🔢 محدودیت پیام: {rate_limit_max()}",
-                    "cfg:rate_max",
-                    style="primary",
+                    label,
+                    f"cfg:ch_toggle:{key}",
+                    style="success" if raw_on else "danger",
                 )
-            ],
-            [
-                _btn(
-                    f"⏱️ بازه محدودیت: {rate_limit_window() // 60} دقیقه",
-                    "cfg:rate_window",
-                    style="primary",
-                )
-            ],
-            [
-                _btn(
-                    f"🔄 ضدتکرار: {'فعال' if dupe_on else 'غیرفعال'}",
-                    "cfg:dupe_toggle",
-                    style="success" if dupe_on else "danger",
-                )
-            ],
-            [
-                _btn(
-                    f"⏳ مدت ضدتکرار: {anti_dupe_hours()} ساعت",
-                    "cfg:dupe_hours",
-                    style="primary",
-                )
-            ],
-            [
-                _btn(
-                    f"📨 سقف صف: {queue_limit()}",
-                    "cfg:queue_limit",
-                    style="primary",
-                )
-            ],
-            [
-                _btn(
-                    f"🤖 ربات: {'روشن' if db.is_bot_enabled() else 'خاموش'}",
-                    "cfg:bot_toggle",
-                    style="success" if db.is_bot_enabled() else "danger",
-                )
-            ],
-            [
-                _btn(
-                    "🧪 تست هر ۳ کانال",
-                    "cfg:test_channels",
-                    style="primary",
-                )
-            ],
+            ]
+        )
+    rows.append(
+        [
+            _btn(
+                "🧪 تست هر ۳ کانال",
+                "cfg:test_channels",
+                style="primary",
+            )
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.message(
@@ -6321,6 +6549,26 @@ async def owner_cfg_callback(
         await callback.message.edit_reply_markup(
             reply_markup=owner_runtime_settings_keyboard()
         )
+        return
+
+    # روشن/خاموش جداگانه هر کانال: cfg:ch_toggle:sadambazan
+    if action.startswith("ch_toggle:"):
+        ch = action.split(":", 1)[1]
+        if ch not in CHANNELS:
+            await callback.answer("نامعتبر", show_alert=True)
+            return
+        currently = get_setting(channel_enabled_key(ch), "1") != "0"
+        set_channel_enabled(ch, not currently)
+        title = CHANNELS[ch]["title"]
+        await callback.answer(
+            f"«{title}» {'روشن' if not currently else 'خاموش'} شد"
+        )
+        try:
+            await callback.message.edit_reply_markup(
+                reply_markup=owner_runtime_settings_keyboard()
+            )
+        except Exception:
+            pass
         return
 
     if action == "dupe_toggle":
@@ -6982,6 +7230,126 @@ async def handle_state(
         return True
 
     # =====================================================
+    # USER FEEDBACK
+    # =====================================================
+
+    if kind == "user_feedback":
+        content = (text or "").strip()
+        if not content:
+            await message.answer("❌ متن خالی است. دوباره بنویس.")
+            return True
+        try:
+            await db_execute(
+                """
+                INSERT INTO user_feedback (user_id, content, created_at, status)
+                VALUES (?, ?, ?, 'open')
+                """,
+                (user_id, content, db.now()),
+            )
+            await db_commit()
+        except Exception:
+            logger.exception("USER FEEDBACK SAVE ERROR | user_id=%s", user_id)
+            await message.answer(GENERIC_ERROR)
+            return True
+        clear_state(user_id)
+        await message.answer(
+            "✅ پیام شما برای مالک ارسال شد.\nدر صورت نیاز پاسخ دریافت می‌کنید.",
+            reply_markup=role_keyboard(user_id),
+        )
+        # اطلاع به مالک
+        try:
+            owners = []
+            # مالک از طریق is_owner روی خود message نیست؛ از settings یا همه ادمین‌ها نه —
+            # فقط به کسی که الان پیام را می‌بیند در پنل می‌رسد. اگر OWNER_ID در db باشد:
+            if hasattr(db, "owner_id"):
+                owners = [db.owner_id]
+            else:
+                # fallback: اگر متد get_owner وجود داشته باشد
+                try:
+                    oid = db.conn.execute(
+                        "SELECT value FROM settings WHERE key = 'owner_id'"
+                    ).fetchone()
+                    if oid:
+                        owners = [int(oid["value"])]
+                except Exception:
+                    owners = []
+            for oid in owners:
+                try:
+                    await bot.send_message(
+                        oid,
+                        f"📬 پیام جدید از کاربر {user_id}:\n\n{content[:500]}",
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return True
+
+    # =====================================================
+    # OWNER REPLY TO FEEDBACK
+    # =====================================================
+
+    if kind == "owner_feedback_reply":
+        if not db.is_owner(user_id):
+            clear_state(user_id)
+            return True
+        content = (text or "").strip()
+        if not content:
+            await message.answer("❌ پاسخ خالی است.")
+            return True
+        fb_id = state.get("feedback_id")
+        if not fb_id:
+            clear_state(user_id)
+            await message.answer("❌ نشست منقضی شده.")
+            return True
+        try:
+            row = await db_fetchone(
+                "SELECT * FROM user_feedback WHERE id = ?",
+                (fb_id,),
+            )
+            if not row:
+                clear_state(user_id)
+                await message.answer("❌ پیام پیدا نشد.")
+                return True
+            await db_execute(
+                """
+                UPDATE user_feedback
+                SET owner_reply = ?, replied_at = ?, status = 'replied'
+                WHERE id = ?
+                """,
+                (content, db.now(), fb_id),
+            )
+            await db_commit()
+            target_uid = row["user_id"]
+        except Exception:
+            logger.exception("OWNER FEEDBACK REPLY ERROR | id=%s", fb_id)
+            await message.answer(GENERIC_ERROR)
+            return True
+
+        clear_state(user_id)
+        try:
+            await bot.send_message(
+                target_uid,
+                (
+                    "📬 پاسخ مالک به پیام شما:\n\n"
+                    f"{content}"
+                ),
+            )
+        except Exception:
+            logger.exception("OWNER REPLY DELIVER ERROR | user=%s", target_uid)
+            await message.answer(
+                "⚠️ پاسخ ذخیره شد ولی به کاربر نرسید (احتمالاً ربات را بلاک کرده).",
+                reply_markup=owner_keyboard(db.is_bot_enabled()),
+            )
+            return True
+
+        await message.answer(
+            "✅ پاسخ برای کاربر ارسال شد.",
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
+        return True
+
+    # =====================================================
     # CHANNEL CHANGE
     # =====================================================
 
@@ -7325,6 +7693,16 @@ async def handle_state(
             return True
 
         msg_channel = channel_key_from_prefix(message.text or "") or DEFAULT_CHANNEL_KEY
+
+        # خاموش بودن فقط همان کانال
+        if not is_channel_enabled(msg_channel):
+            ch_title = CHANNELS.get(msg_channel, {}).get("title", msg_channel)
+            await message.answer(
+                f"🔴 کانال «{ch_title}» در حال حاضر غیرفعال است.\n\n"
+                "لطفاً بعداً دوباره امتحان کنید یا برای کانال دیگری پیام بفرستید."
+            )
+            return True
+
         current = await get_current_shift_safe_async(channel_key=msg_channel)
 
         entities = serialize_entities(
@@ -7483,163 +7861,147 @@ async def handle_state(
     if kind == "add_admin":
 
         value = text.strip()
+        ch = state.get("channel_key") or DEFAULT_CHANNEL_KEY
+        ch_title = CHANNELS.get(ch, CHANNELS[DEFAULT_CHANNEL_KEY])["title"]
 
-        admin_id = None
-        name = None
+        async def _resolve_one_admin(raw: str) -> tuple[int | None, str | None, str | None]:
+            """برمی‌گرداند: (admin_id, name, error_msg)"""
+            raw = raw.strip()
+            if not raw:
+                return None, None, None
 
-        if value.startswith("@"):
-
-            row = find_user_by_username(
-                value
-            )
-
-            if not row:
-
-                await message.answer(
-                    (
-                        "❌ این username در دیتابیس پیدا نشد.\n\n"
-                        "کاربر باید ابتدا ربات را Start کند."
-                    )
-                )
-
-                return True
-
-            if not row["started"]:
-
-                await message.answer(
-                    "❌ این کاربر هنوز ربات را Start نکرده."
-                )
-
-                return True
-
-            admin_id = row["user_id"]
-
-            name = " ".join(
-                x
-                for x in (
-                    row["first_name"],
-                    row["last_name"],
-                )
-                if x
-            ).strip()
-
-            if not name:
-                name = (
-                    f"@{row['username']}"
-                )
-
-        elif value.isdigit():
-
-            admin_id = int(
-                value
-            )
-
-            row = db.get_user(
-                admin_id
-            )
-
-            if row:
-
-                name = " ".join(
-                    x
-                    for x in (
-                        row["first_name"],
-                        row["last_name"],
-                    )
-                    if x
+            if raw.startswith("@"):
+                row = find_user_by_username(raw)
+                if not row:
+                    return None, None, f"{raw}: در دیتابیس پیدا نشد (باید Start کرده باشد)"
+                if not row["started"]:
+                    return None, None, f"{raw}: هنوز ربات را Start نکرده"
+                aid = int(row["user_id"])
+                nm = " ".join(
+                    x for x in (row["first_name"], row["last_name"]) if x
                 ).strip()
+                if not nm:
+                    nm = f"@{row['username']}" if row["username"] else "ادمین"
+                return aid, nm, None
 
-                if (
-                    not name
-                    and row["username"]
-                ):
-
-                    name = (
-                        f"@{row['username']}"
-                    )
-
-            if not name:
-
-                try:
-
-                    chat = await bot.get_chat(
-                        admin_id
-                    )
-
-                    name = (
-                        getattr(
-                            chat,
-                            "full_name",
-                            None,
-                        )
-                        or (
-                            f"@{chat.username}"
-                            if getattr(
-                                chat,
-                                "username",
-                                None,
+            if raw.isdigit():
+                aid = int(raw)
+                nm = None
+                row = db.get_user(aid)
+                if row:
+                    nm = " ".join(
+                        x for x in (row["first_name"], row["last_name"]) if x
+                    ).strip()
+                    if not nm and row["username"]:
+                        nm = f"@{row['username']}"
+                if not nm:
+                    try:
+                        chat = await bot.get_chat(aid)
+                        nm = (
+                            getattr(chat, "full_name", None)
+                            or (
+                                f"@{chat.username}"
+                                if getattr(chat, "username", None)
+                                else None
                             )
-                            else None
                         )
-                    )
+                    except Exception:
+                        pass
+                if not nm:
+                    nm = "ادمین"
+                return aid, nm, None
 
-                except Exception:
-                    pass
+            return None, None, f"{raw}: نامعتبر (فقط آیدی عددی یا @username)"
 
-            if not name:
-                name = "ادمین"
+        async def _add_one(aid: int, nm: str) -> str | None:
+            """None = موفق، در غیر این صورت متن خطا"""
+            try:
+                existing = db.get_admin(aid)
+                if not existing:
+                    db.add_admin(aid, nm)
+                set_admin_channel(aid, ch)
+                return None
+            except Exception:
+                logger.exception("ADD ADMIN ERROR | admin_id=%s", aid)
+                return f"{aid}: خطای دیتابیس"
 
-        else:
+        # --- دسته‌جمعی: چند آیدی عددی با فاصله / ویرگول / خط جدید ---
+        # اگر کل متن فقط عدد و جداکننده‌ها باشد → حالت bulk
+        tokens = re.split(r"[\s,،;؛]+", value)
+        tokens = [t for t in tokens if t]
+
+        all_numeric = bool(tokens) and all(t.isdigit() for t in tokens)
+
+        if all_numeric and len(tokens) >= 1:
+            # حذف تکراری با حفظ ترتیب
+            seen: set[int] = set()
+            unique_ids: list[int] = []
+            for t in tokens:
+                i = int(t)
+                if i not in seen:
+                    seen.add(i)
+                    unique_ids.append(i)
+
+            ok_lines: list[str] = []
+            fail_lines: list[str] = []
+
+            for aid in unique_ids:
+                _, nm, err = await _resolve_one_admin(str(aid))
+                if err:
+                    fail_lines.append(f"❌ {err}")
+                    continue
+                add_err = await _add_one(aid, nm or "ادمین")
+                if add_err:
+                    fail_lines.append(f"❌ {add_err}")
+                else:
+                    try:
+                        mention = await mention_user(bot, aid, nm)
+                    except Exception:
+                        mention = f"<code>{aid}</code>"
+                    ok_lines.append(f"✅ {mention}")
+                await asyncio.sleep(0.03)
+
+            clear_state(user_id)
+
+            summary = (
+                f"➕ نتیجه افزودن ادمین به «{ch_title}»\n\n"
+                f"🟢 موفق: {len(ok_lines)}\n"
+                f"🔴 ناموفق: {len(fail_lines)}\n"
+            )
+            if ok_lines:
+                summary += "\n" + "\n".join(ok_lines[:40])
+                if len(ok_lines) > 40:
+                    summary += f"\n… و {len(ok_lines) - 40} مورد دیگر"
+            if fail_lines:
+                summary += "\n\n" + "\n".join(fail_lines[:20])
 
             await message.answer(
-                (
-                    "❌ مقدار نامعتبر است.\n\n"
-                    "مثال:\n"
-                    "123456789\n"
-                    "@sixiren"
-                )
+                summary,
+                parse_mode=ParseMode.HTML,
+                reply_markup=owner_keyboard(db.is_bot_enabled()),
             )
-
             return True
 
-        try:
-            # اگر قبلاً ادمین است، فقط کانال جدید را اضافه می‌کنیم
-            existing = db.get_admin(admin_id)
-            if not existing:
-                db.add_admin(
-                    admin_id,
-                    name,
-                )
-            ch = state.get("channel_key") or DEFAULT_CHANNEL_KEY
-            set_admin_channel(admin_id, ch)
-
-        except Exception:
-
-            logger.exception(
-                "ADD ADMIN ERROR"
+        # --- تکی: یک آیدی یا یک username ---
+        admin_id, name, err = await _resolve_one_admin(value)
+        if err or admin_id is None:
+            await message.answer(
+                f"❌ {err or 'مقدار نامعتبر'}\n\n"
+                "مثال تکی:\n123456789\n@sixiren\n\n"
+                "مثال دسته‌جمعی:\n123 456 789"
             )
+            return True
 
+        add_err = await _add_one(admin_id, name or "ادمین")
+        if add_err:
             await message.answer(
                 "❌ افزودن ادمین ناموفق بود.\n"
                 "لطفاً چند ثانیه بعد دوباره امتحان کنید."
             )
-
             return True
 
-        clear_state(
-            user_id
-        )
-
-        mention = await mention_user(
-            bot,
-            admin_id,
-            name,
-        )
-        ch_title = CHANNELS.get(
-            state.get("channel_key") or DEFAULT_CHANNEL_KEY,
-            CHANNELS[DEFAULT_CHANNEL_KEY],
-        )["title"]
-
+        clear_state(user_id)
+        mention = await mention_user(bot, admin_id, name)
         await message.answer(
             (
                 f"✅ ادمین با موفقیت به «{ch_title}» اضافه شد.\n\n"
@@ -7648,11 +8010,8 @@ async def handle_state(
                 "الان ادمین هر دو کانال است."
             ),
             parse_mode=ParseMode.HTML,
-            reply_markup=owner_keyboard(
-                db.is_bot_enabled()
-            ),
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
         )
-
         return True
 
     # =====================================================
@@ -8134,20 +8493,23 @@ async def text_router(
         await message.answer(GENERIC_ERROR)
         return
 
-    if text == "📝 ارسال پیام":
-
-        await user_send_start(
-            message
-        )
-
+    if text in {
+        "📝 ارسال پیام",
+        "📝 ارسال پیام به صورت کاربر عادی",
+    }:
+        await user_send_start(message)
         return
 
     if text == "📊 وضعیت پیام من":
+        await user_status(message)
+        return
 
-        await user_status(
-            message
-        )
+    if text == "💬 انتقادات، پیشنهادات، گزارش مشکل":
+        await user_feedback_start(message)
+        return
 
+    if text == "📬 مشاهده پیام کاربران":
+        await owner_view_feedback(message, bot)
         return
 
     if text == "📥 پیام‌های در انتظار":
@@ -8414,7 +8776,7 @@ def get_next_shift(channel_key: str | None = None):
             ON a.user_id = s.admin_id
         WHERE a.active = 1
         """
-    ).fetchall()
+    )
 
     candidates = []
 
@@ -8496,15 +8858,43 @@ async def dispatch_queued_messages(
     bot: Bot,
     shift,
 ):
+    """
+    فقط پیام‌های صف‌شدهٔ همان کانالِ شیفت را به ادمین آن شیفت می‌دهد.
+    پیام کانال دیگر به ادمین شیفت کانال دیگر نمی‌رود.
+    """
+    try:
+        shift_ch = shift["channel_key"]
+    except Exception:
+        shift_ch = None
+    shift_ch = shift_ch or DEFAULT_CHANNEL_KEY
 
-    rows = await db_fetchall(
-        """
-        SELECT *
-        FROM messages
-        WHERE status = 'queued'
-        ORDER BY submitted_at ASC, id ASC
-        """
-    )
+    # فقط queuedهای همین کانال (+ پیام‌های بدون channel_key فقط برای کانال پیش‌فرض)
+    if shift_ch == DEFAULT_CHANNEL_KEY:
+        rows = await db_fetchall(
+            """
+            SELECT *
+            FROM messages
+            WHERE status = 'queued'
+              AND (
+                    channel_key = ?
+                    OR channel_key IS NULL
+                    OR channel_key = ''
+                  )
+            ORDER BY submitted_at ASC, id ASC
+            """,
+            (shift_ch,),
+        )
+    else:
+        rows = await db_fetchall(
+            """
+            SELECT *
+            FROM messages
+            WHERE status = 'queued'
+              AND channel_key = ?
+            ORDER BY submitted_at ASC, id ASC
+            """,
+            (shift_ch,),
+        )
 
     for row in rows:
 
@@ -8547,9 +8937,10 @@ async def dispatch_queued_messages(
 
             logger.exception(
                 "DISPATCH QUEUED MESSAGE ERROR | "
-                "message_id=%s | shift_id=%s",
+                "message_id=%s | shift_id=%s | channel=%s",
                 row["id"],
                 shift["id"],
+                shift_ch,
             )
 
             try:
@@ -8593,57 +8984,53 @@ async def shift_monitor(
         try:
 
             now = local_now()
-            current = await get_current_shift_safe_async()
 
-            if current:
+            # برای هر کانال جداگانه شیفت فعال و صف همان کانال را پردازش کن
+            for ch_key in channel_keys():
+                current = await get_current_shift_safe_async(channel_key=ch_key)
+                if not current:
+                    continue
 
                 shift, start_dt = current
-
                 key = (
                     start_dt.strftime("%Y-%m-%d"),
                     int(shift["id"]),
                 )
 
-                await dispatch_queued_messages(
-                    bot,
-                    shift,
-                )
+                await dispatch_queued_messages(bot, shift)
 
                 if (
                     now >= start_dt
                     and now - start_dt < timedelta(minutes=1)
                     and key not in notified_shifts
                 ):
-
                     notified_shifts.add(key)
-
                     if shift["notifications_enabled"]:
-
                         try:
-
+                            ch_title = CHANNELS.get(ch_key, {}).get("title", ch_key)
                             await bot.send_message(
                                 shift["admin_id"],
                                 (
                                     "🔔 <b>شروع شیفت</b>\n\n"
+                                    f"📺 کانال: <b>{ch_title}</b>\n"
                                     f"⏰ {shift['start_time']} تا "
                                     f"{shift['end_time']}\n\n"
-                                    "📥 پیام‌های صف‌شده نیز بررسی شدند."
+                                    "📥 فقط پیام‌های صف‌شدهٔ همین کانال ارسال شد."
                                 ),
                                 parse_mode=ParseMode.HTML,
                             )
-
                         except (
                             TelegramForbiddenError,
                             TelegramBadRequest,
                         ):
                             pass
 
-            # یادآوری هر ۱ دقیقه در ۵ دقیقهٔ آخر تا شروع شیفت
-            next_item = await get_next_shift_async()
-            if next_item:
+                # یادآوری نزدیک شروع شیفت همین کانال
+                next_item = await get_next_shift_async(channel_key=ch_key)
+                if not next_item:
+                    continue
                 shift, start_dt = next_item
                 delta = start_dt - now
-                # بین ۰ تا ۵ دقیقه مانده
                 if (
                     timedelta(seconds=0) < delta <= timedelta(minutes=5)
                     and shift["notifications_enabled"]
@@ -8651,7 +9038,6 @@ async def shift_monitor(
                     mins_left = max(1, int(delta.total_seconds() // 60) + (
                         1 if delta.total_seconds() % 60 else 0
                     ))
-                    # کلید: تاریخ + id + دقیقه باقی‌مانده تا هر دقیقه یک‌بار
                     remind_key = (
                         start_dt.strftime("%Y-%m-%d"),
                         int(shift["id"]),
