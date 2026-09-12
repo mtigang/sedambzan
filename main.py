@@ -20,6 +20,7 @@ from aiogram.types import (
     BotCommand,
     BotCommandScopeDefault,
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -28,6 +29,9 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     User,
 )
+import os
+import tempfile
+from pathlib import Path
 
 from config import (
     BOT_TOKEN,
@@ -2134,6 +2138,14 @@ def owner_keyboard(
                     text="📬 مشاهده پیام کاربران"
                 ),
                 KeyboardButton(
+                    text="🔍 جستجو"
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text="📋 لاگ در لحظه"
+                ),
+                KeyboardButton(
                     text="⚙️ تنظیمات"
                 ),
             ],
@@ -2242,6 +2254,10 @@ async def show_home(
         is_owner = False
 
     if is_owner:
+        try:
+            _register_log_recipient(user_id)
+        except Exception:
+            pass
         try:
             enabled = await asyncio.to_thread(db.is_bot_enabled)
             admins_n = await asyncio.to_thread(db.count_admins)
@@ -3020,7 +3036,8 @@ async def user_status(
     }
 
     lines = [
-        "📊 وضعیت پیام‌های اخیر\n"
+        "📊 وضعیت پیام‌های اخیر",
+        "",
     ]
 
     for row in rows:
@@ -3030,18 +3047,26 @@ async def user_status(
             row["status"],
         )
 
-        lines.append(
-            f"#{row['id']} — {status}"
-        )
+        lines.append(f"🆔 #{row['id']}")
+        lines.append(f"📌 وضعیت: {status}")
+
+        content = (row["content"] or "").strip()
+        if content:
+            preview = content if len(content) <= 180 else content[:180] + "…"
+            lines.append(f"📝 متن:\n{preview}")
 
         if (
             row["status"] == "rejected"
             and row["reject_reason"]
         ):
+            lines.append(f"📋 دلیل رد: {row['reject_reason']}")
 
-            lines.append(
-                f"دلیل: {row['reject_reason']}"
-            )
+        if row["submitted_at"]:
+            lines.append(f"🕐 زمان ارسال: {row['submitted_at']}")
+
+        lines.append("")
+        lines.append("────────────")
+        lines.append("")
 
     await message.answer(
         "\n".join(lines),
@@ -4619,12 +4644,12 @@ async def owner_shifts_channel_callback(
             else f"📅 {shift['specific_date']}"
         )
 
-        lines.append(
-            f"#{shift['id']} — {date_text}\n"
-            f"👤 {escape(admin_name)}\n"
-            f"⏰ {shift['start_time']} تا "
-            f"{shift['end_time']}\n"
-        )
+        lines.append("────────────")
+        lines.append(f"🆔 شیفت #{shift['id']}")
+        lines.append(f"{date_text}")
+        lines.append(f"👤 ادمین: {escape(admin_name)}")
+        lines.append(f"⏰ ساعت: {shift['start_time']} تا {shift['end_time']}")
+        lines.append("")
 
         buttons.append(
             [
@@ -8064,6 +8089,7 @@ async def handle_state(
                 await message.answer(
                     (
                         "✅ پیام ذخیره شد.\n\n"
+                        f"🆔 شماره پیگیری: #{message_id}\n\n"
                         "🕐 در حال حاضر شیفت فعالی وجود ندارد.\n"
                         "پیامت در صف قرار گرفت و در شروع شیفت بعدی "
                         "برای ادمین ارسال می‌شود.\n\n"
@@ -8078,6 +8104,7 @@ async def handle_state(
                 await message.answer(
                     (
                         "✅ پیام ذخیره شد.\n\n"
+                        f"🆔 شماره پیگیری: #{message_id}\n\n"
                         "🕐 فعلاً شیفتی برای ارسال پیام وجود ندارد؛ "
                         "پیام حذف نمی‌شود."
                     ),
@@ -8125,6 +8152,7 @@ async def handle_state(
             await message.answer(
                 (
                     "✅ پیامت با موفقیت ارسال شد.\n\n"
+                    f"🆔 شماره پیگیری: #{message_id}\n\n"
                     "🟡 در انتظار بررسی ادمین است."
                 ),
                 reply_markup=role_keyboard(user_id),
@@ -8661,6 +8689,185 @@ async def handle_state(
 
             return True
 
+    # =====================================================
+    # SEARCH MESSAGE (مالک)
+    # =====================================================
+    if kind == "search_message":
+        if not db.is_owner(user_id):
+            clear_state(user_id)
+            return True
+        raw = (text or "").strip().lstrip("#")
+        if not raw.isdigit():
+            await message.answer("❌ فقط آیدی عددی پیام را بفرست (مثلاً 389).")
+            return True
+        mid = int(raw)
+        try:
+            row = await asyncio.to_thread(db.get_message, mid)
+        except Exception:
+            row = None
+        if not row:
+            await message.answer("❌ پیامی با این آیدی پیدا نشد.")
+            return True
+        clear_state(user_id)
+        st = row["status"]
+        ch = row["channel_key"] or DEFAULT_CHANNEL_KEY
+        ch_title = CHANNELS.get(ch, {}).get("title", ch)
+        sender = row["user_id"]
+        sender_name = "-"
+        try:
+            u = await asyncio.to_thread(db.get_user, sender)
+            if u:
+                sender_name = " ".join(
+                    x for x in (u["first_name"], u["last_name"]) if x
+                ).strip() or (f"@{u['username']}" if u["username"] else str(sender))
+        except Exception:
+            pass
+        admin_id = row["admin_id"]
+        admin_info = str(admin_id) if admin_id else "—"
+        if admin_id:
+            try:
+                ar = await asyncio.to_thread(db.get_admin, int(admin_id))
+                if ar and ar["name"]:
+                    admin_info = f"{ar['name']} ({admin_id})"
+            except Exception:
+                pass
+        content = row["content"] or ""
+        if len(content) > 800:
+            content = content[:800] + "…"
+        body = (
+            f"🔎 نتیجه جستجوی پیام\n\n"
+            f"🆔 آیدی پیام: #{mid}\n"
+            f"👤 فرستنده: {sender_name}\n"
+            f"🔢 آیدی فرستنده: <code>{sender}</code>\n"
+            f"📺 کانال: {ch_title}\n"
+            f"🕐 زمان ارسال: {row['submitted_at'] or '—'}\n"
+            f"📌 وضعیت: {_status_label_fa(st)}\n"
+            f"👨‍💼 ادمین دریافت‌کننده: {admin_info}\n"
+        )
+        if st == "rejected" and row["reject_reason"]:
+            body += f"📋 دلیل رد: {row['reject_reason']}\n"
+        body += f"\n📝 متن پیام:\n{escape(content)}"
+        await message.answer(
+            body,
+            parse_mode=ParseMode.HTML,
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
+        return True
+
+    # =====================================================
+    # SEARCH USER (مالک)
+    # =====================================================
+    if kind == "search_user":
+        if not db.is_owner(user_id):
+            clear_state(user_id)
+            return True
+        raw = (text or "").strip()
+        if not raw.isdigit():
+            await message.answer("❌ فقط آیدی عددی کاربر را بفرست.")
+            return True
+        target = int(raw)
+        clear_state(user_id)
+        try:
+            u = await asyncio.to_thread(db.get_user, target)
+        except Exception:
+            u = None
+        if not u:
+            # حتی بدون رکورد هم شمارش پیام‌ها را نشان بده
+            name = await get_profile_name(bot, target)
+        else:
+            name = " ".join(
+                x for x in (u["first_name"], u["last_name"]) if x
+            ).strip() or (f"@{u['username']}" if u["username"] else str(target))
+        uname = ""
+        if u and u["username"]:
+            uname = f"@{u['username']}"
+        # تاریخ عضویت / اولین فعالیت
+        joined = "-"
+        if u:
+            for key in ("created_at", "joined_at", "first_seen", "started_at"):
+                try:
+                    if u[key]:
+                        joined = u[key]
+                        break
+                except Exception:
+                    pass
+        # تعداد پیام per channel
+        counts = {}
+        for ck, cfg in CHANNELS.items():
+            try:
+                if ck == DEFAULT_CHANNEL_KEY:
+                    r = await db_fetchone(
+                        """
+                        SELECT COUNT(*) AS c FROM messages
+                        WHERE user_id = ?
+                          AND (
+                                channel_key = ?
+                                OR channel_key IS NULL
+                                OR channel_key = ''
+                              )
+                        """,
+                        (target, ck),
+                    )
+                else:
+                    r = await db_fetchone(
+                        """
+                        SELECT COUNT(*) AS c FROM messages
+                        WHERE user_id = ? AND channel_key = ?
+                        """,
+                        (target, ck),
+                    )
+                counts[ck] = int(r["c"] or 0) if r else 0
+            except Exception:
+                counts[ck] = 0
+        total = sum(counts.values())
+        blocked = False
+        try:
+            blocked = bool(db.is_blocked(target))
+        except Exception:
+            pass
+        text_out = (
+            f"👤 مشخصات کاربر\n\n"
+            f"نام: {escape(name)}\n"
+            f"یوزرنیم: {escape(uname) if uname else '—'}\n"
+            f"آیدی: <code>{target}</code>\n"
+            f"تاریخ عضویت/ثبت: {joined}\n"
+            f"وضعیت بن: {'🚫 بن‌شده' if blocked else '✅ فعال'}\n\n"
+            f"📊 تعداد پیام‌ها (کل: {total})\n"
+        )
+        for ck, cfg in CHANNELS.items():
+            text_out += f"• {cfg['title']}: {counts.get(ck, 0)}\n"
+
+        kb_rows = []
+        for ck, cfg in CHANNELS.items():
+            kb_rows.append(
+                [
+                    _btn(
+                        f"📋 {cfg['title']} ({counts.get(ck, 0)})",
+                        f"search_user_ch:{target}:{ck}",
+                        style="primary",
+                    )
+                ]
+            )
+        kb_rows.append(
+            [
+                _btn(
+                    "🚫 بن کاربر از ربات",
+                    f"ban_user:{target}",
+                    style="danger",
+                )
+            ]
+        )
+        await message.answer(
+            text_out,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+        )
+        await message.answer(
+            "پنل مالک:",
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
+        return True
+
     return False
 
 
@@ -8814,6 +9021,14 @@ async def text_router(
 
     if text == "📬 مشاهده پیام کاربران":
         await owner_view_feedback(message, bot)
+        return
+
+    if text == "🔍 جستجو":
+        await owner_search_menu(message)
+        return
+
+    if text == "📋 لاگ در لحظه":
+        await owner_instant_log(message, bot)
         return
 
     if text == "📥 پیام‌های در انتظار":
@@ -9540,6 +9755,631 @@ async def setup_commands(
 # MAIN
 # =========================================================
 
+# =========================================================
+# PERIODIC / INSTANT LOG (12h) — فقط اضافه شده، منطق قبلی دست نخورده
+# =========================================================
+
+_log_in_progress: set[int] = set()
+
+
+def _register_log_recipient(user_id: int):
+    """مالک را در لیست دریافت‌کنندگان لاگ ثبت می‌کند."""
+    try:
+        raw = get_setting("log_recipients", "") or ""
+        ids = {x.strip() for x in raw.split(",") if x.strip().isdigit()}
+        ids.add(str(int(user_id)))
+        set_setting("log_recipients", ",".join(sorted(ids)))
+    except Exception:
+        logger.exception("REGISTER LOG RECIPIENT ERROR")
+
+
+def get_log_recipients() -> list[int]:
+    out: list[int] = []
+    try:
+        raw = get_setting("log_recipients", "") or ""
+        for x in raw.split(","):
+            x = x.strip()
+            if x.isdigit():
+                out.append(int(x))
+    except Exception:
+        pass
+    # یکتا
+    return list(dict.fromkeys(out))
+
+
+def _status_label_fa(st: str) -> str:
+    return {
+        "queued": "در صف",
+        "pending": "در انتظار بررسی",
+        "processing": "در حال بررسی",
+        "approved": "تأیید شده",
+        "rejected": "رد شده",
+    }.get(st or "", st or "نامشخص")
+
+
+def _status_label_en(st: str) -> str:
+    return {
+        "queued": "Queued",
+        "pending": "Pending review",
+        "processing": "Processing",
+        "approved": "Approved",
+        "rejected": "Rejected",
+    }.get(st or "", st or "Unknown")
+
+
+async def _fetch_log_window(since: str | None, until: str | None):
+    """داده‌های بازه زمانی برای لاگ."""
+    params: list[Any] = []
+    where = []
+    if since:
+        where.append("submitted_at >= ?")
+        params.append(since)
+    if until:
+        where.append("submitted_at <= ?")
+        params.append(until)
+    wsql = (" AND " + " AND ".join(where)) if where else ""
+
+    messages = await db_fetchall(
+        f"""
+        SELECT *
+        FROM messages
+        WHERE 1=1 {wsql}
+        ORDER BY id ASC
+        """,
+        tuple(params),
+    )
+
+    # شیفت‌های مرتبط با بازه (بر اساس specific_date یا همه permanent)
+    shifts = await db_fetchall(
+        """
+        SELECT s.*, a.name AS admin_name
+        FROM shifts s
+        LEFT JOIN admins a ON a.user_id = s.admin_id
+        ORDER BY s.id DESC
+        LIMIT 500
+        """
+    )
+
+    # کاربران فعال در بازه (ارسال‌کننده پیام)
+    user_ids = sorted({int(m["user_id"]) for m in messages if m["user_id"] is not None})
+    users = []
+    for uid in user_ids:
+        try:
+            u = await asyncio.to_thread(db.get_user, uid)
+            if u:
+                users.append(u)
+        except Exception:
+            pass
+
+    admins = await db_fetchall(
+        "SELECT * FROM admins ORDER BY user_id ASC"
+    )
+    return messages, shifts, users, admins
+
+
+def _build_log_txt(
+    messages,
+    shifts,
+    users,
+    admins,
+    since: str,
+    until: str,
+) -> str:
+    lines: list[str] = []
+    lines.append("=" * 60)
+    lines.append("گزارش کامل ربات / Full Bot Report")
+    lines.append(f"از / From: {since}")
+    lines.append(f"تا / Until: {until}")
+    lines.append(f"زمان تولید / Generated: {local_now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 60)
+    lines.append("")
+
+    lines.append("──────── پیام‌های کاربران / User Messages ────────")
+    lines.append("")
+    if not messages:
+        lines.append("(خالی / empty)")
+    for m in messages:
+        mid = m["id"]
+        uid = m["user_id"]
+        st = m["status"]
+        ch = m["channel_key"] or DEFAULT_CHANNEL_KEY
+        ch_title = CHANNELS.get(ch, {}).get("title", ch)
+        admin_id = m["admin_id"]
+        content = (m["content"] or "").replace("\n", " ")
+        if len(content) > 200:
+            content = content[:200] + "…"
+        lines.append(f"#{mid}")
+        lines.append(f"  FA | وضعیت: {_status_label_fa(st)} | کانال: {ch_title}")
+        lines.append(f"  EN | Status: {_status_label_en(st)} | Channel: {ch}")
+        lines.append(f"  Sender ID / ایدی فرستنده: {uid}")
+        lines.append(f"  Admin received / ادمین دریافت‌کننده: {admin_id or '-'}")
+        lines.append(f"  Time / زمان: {m['submitted_at'] or '-'}")
+        if st == "rejected" and m["reject_reason"]:
+            lines.append(f"  Reject reason / دلیل رد: {m['reject_reason']}")
+        lines.append(f"  Text / متن: {content}")
+        lines.append("")
+
+    lines.append("──────── شیفت‌ها و فعالیت ادمین / Shifts & Admin Activity ────────")
+    lines.append("")
+    if not shifts:
+        lines.append("(خالی / empty)")
+    for s in shifts:
+        sk = s["channel_key"] or DEFAULT_CHANNEL_KEY
+        lines.append(
+            f"Shift #{s['id']} | Admin {s['admin_id']} ({s['admin_name'] or '-'}) | "
+            f"{s['start_time']}-{s['end_time']} | "
+            f"{'permanent' if s['permanent'] else s['specific_date'] or '-'} | ch={sk}"
+        )
+    lines.append("")
+
+    lines.append("──────── ادمین‌ها / Admins ────────")
+    lines.append("")
+    for a in admins:
+        lines.append(
+            f"Admin {a['user_id']} | name={a['name'] or '-'} | "
+            f"active={a['active']} | channels={a['channel_key'] or '-'}"
+        )
+    lines.append("")
+
+    lines.append("──────── کاربران فعال / Active Users ────────")
+    lines.append("")
+    if not users:
+        lines.append("(خالی / empty)")
+    for u in users:
+        try:
+            uid = u["user_id"]
+            uname = u["username"] or "-"
+            fn = u["first_name"] or ""
+            ln = u["last_name"] or ""
+            started = u["started"] if "started" in u.keys() else "-"
+            lines.append(
+                f"User {uid} | @{uname} | {fn} {ln} | started={started}"
+            )
+        except Exception:
+            lines.append(str(dict(u) if hasattr(u, "keys") else u))
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("پایان گزارش / End of report")
+    return "\n".join(lines)
+
+
+def _build_log_xlsx(
+    path: str,
+    messages,
+    shifts,
+    users,
+    admins,
+    since: str,
+    until: str,
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill
+
+    wb = Workbook()
+
+    # Sheet 1 messages
+    ws = wb.active
+    ws.title = "Messages"
+    headers = [
+        "ID", "Sender ID", "Status FA", "Status EN", "Channel",
+        "Admin ID", "Submitted At", "Reject Reason", "Text",
+    ]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for m in messages:
+        st = m["status"]
+        ch = m["channel_key"] or DEFAULT_CHANNEL_KEY
+        ch_title = CHANNELS.get(ch, {}).get("title", ch)
+        content = (m["content"] or "")[:500]
+        ws.append([
+            m["id"],
+            m["user_id"],
+            _status_label_fa(st),
+            _status_label_en(st),
+            ch_title,
+            m["admin_id"],
+            m["submitted_at"],
+            m["reject_reason"] if st == "rejected" else "",
+            content,
+        ])
+
+    ws2 = wb.create_sheet("Shifts")
+    ws2.append([
+        "Shift ID", "Admin ID", "Admin Name", "Start", "End",
+        "Permanent", "Date", "Channel",
+    ])
+    for cell in ws2[1]:
+        cell.font = Font(bold=True)
+    for s in shifts:
+        ws2.append([
+            s["id"],
+            s["admin_id"],
+            s["admin_name"],
+            s["start_time"],
+            s["end_time"],
+            "yes" if s["permanent"] else "no",
+            s["specific_date"],
+            s["channel_key"] or DEFAULT_CHANNEL_KEY,
+        ])
+
+    ws3 = wb.create_sheet("Admins")
+    ws3.append(["User ID", "Name", "Active", "Channels", "Notifications"])
+    for cell in ws3[1]:
+        cell.font = Font(bold=True)
+    for a in admins:
+        ws3.append([
+            a["user_id"],
+            a["name"],
+            a["active"],
+            a["channel_key"],
+            a["notifications_enabled"] if "notifications_enabled" in a.keys() else "",
+        ])
+
+    ws4 = wb.create_sheet("Users")
+    ws4.append(["User ID", "Username", "First Name", "Last Name", "Started"])
+    for cell in ws4[1]:
+        cell.font = Font(bold=True)
+    for u in users:
+        try:
+            ws4.append([
+                u["user_id"],
+                u["username"],
+                u["first_name"],
+                u["last_name"],
+                u["started"] if "started" in u.keys() else "",
+            ])
+        except Exception:
+            pass
+
+    ws5 = wb.create_sheet("Meta")
+    ws5.append(["Key", "Value"])
+    ws5.append(["From", since])
+    ws5.append(["Until", until])
+    ws5.append(["Generated", local_now().strftime("%Y-%m-%d %H:%M:%S")])
+    ws5.append(["Messages count", len(messages)])
+    ws5.append(["Users count", len(users)])
+    ws5.append(["Shifts count", len(shifts)])
+
+    wb.save(path)
+
+
+async def _progress_edit(msg: Message | None, pct: int, label: str = ""):
+    if not msg:
+        return
+    p = max(0, min(100, int(pct)))
+    filled = p // 10
+    bar = "▓" * filled + "░" * (10 - filled)
+    text = f"📋 آماده‌سازی لاگ...\n{bar} {p}%"
+    if label:
+        text += f"\n{label}"
+    try:
+        await msg.edit_text(text)
+    except Exception:
+        pass
+
+
+async def generate_and_send_log(
+    bot: Bot,
+    recipients: list[int],
+    since: str | None = None,
+    until: str | None = None,
+    progress_to: int | None = None,
+) -> bool:
+    """
+    ساخت فایل متنی + اکسل و ارسال به لیست مالکین.
+    داده لاگ در دیتابیس ذخیره نمی‌شود؛ فقط زمان آخرین ارسال ثبت می‌شود.
+    """
+    progress_msg = None
+    if progress_to:
+        try:
+            progress_msg = await bot.send_message(
+                progress_to,
+                f"📋 آماده‌سازی لاگ...\n{_progress_bar(0)}",
+            )
+        except Exception:
+            progress_msg = None
+
+    try:
+        await _progress_edit(progress_msg, 10, "تعیین بازه زمانی...")
+        until = until or local_now().strftime("%Y-%m-%d %H:%M:%S")
+        if not since:
+            since = get_setting("last_log_sent_at") or (
+                local_now() - timedelta(hours=12)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+
+        await _progress_edit(progress_msg, 30, "خواندن پیام‌ها و کاربران...")
+        messages, shifts, users, admins = await _fetch_log_window(since, until)
+
+        await _progress_edit(progress_msg, 50, "ساخت فایل متنی...")
+        txt_body = await asyncio.to_thread(
+            _build_log_txt, messages, shifts, users, admins, since, until
+        )
+
+        stamp = local_now().strftime("%Y%m%d_%H%M%S")
+        tmpdir = tempfile.mkdtemp(prefix="botlog_")
+        txt_path = os.path.join(tmpdir, f"log_{stamp}.txt")
+        xlsx_path = os.path.join(tmpdir, f"log_{stamp}.xlsx")
+
+        def _write_txt():
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(txt_body)
+
+        await asyncio.to_thread(_write_txt)
+
+        await _progress_edit(progress_msg, 70, "ساخت فایل اکسل...")
+        await asyncio.to_thread(
+            _build_log_xlsx, xlsx_path, messages, shifts, users, admins, since, until
+        )
+
+        await _progress_edit(progress_msg, 85, "ارسال به مالکین...")
+        caption = (
+            f"📋 لاگ ربات\n"
+            f"🕐 از: {since}\n"
+            f"🕐 تا: {until}\n"
+            f"📨 پیام‌ها: {len(messages)}\n"
+            f"👤 کاربران فعال: {len(users)}"
+        )
+
+        if not recipients:
+            recipients = get_log_recipients()
+
+        for rid in recipients:
+            try:
+                await bot.send_document(
+                    rid,
+                    document=FSInputFile(txt_path),
+                    caption=caption + "\n📄 نسخه متنی / Text",
+                )
+                await asyncio.sleep(0.2)
+                await bot.send_document(
+                    rid,
+                    document=FSInputFile(xlsx_path),
+                    caption="📊 نسخه اکسل / Excel",
+                )
+                await asyncio.sleep(0.2)
+            except Exception:
+                logger.exception("SEND LOG TO OWNER ERROR | owner=%s", rid)
+
+        set_setting("last_log_sent_at", until)
+        # اسلات زمان‌بندی (برای جلوگیری از ارسال تکراری ۱۲/۰۰)
+        set_setting(
+            "last_log_slot",
+            local_now().strftime("%Y-%m-%d %H"),
+        )
+
+        await _progress_edit(progress_msg, 100, "✅ ارسال شد")
+        if progress_msg:
+            try:
+                await progress_msg.edit_text(
+                    f"✅ لاگ با موفقیت ارسال شد.\n"
+                    f"📨 {len(messages)} پیام | 👤 {len(users)} کاربر\n"
+                    f"🕐 {since} → {until}"
+                )
+            except Exception:
+                pass
+
+        # پاک کردن فایل‌های موقت — در DB ذخیره نمی‌شوند
+        for p in (txt_path, xlsx_path):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        try:
+            os.rmdir(tmpdir)
+        except Exception:
+            pass
+
+        return True
+    except Exception:
+        logger.exception("GENERATE LOG ERROR")
+        if progress_msg:
+            try:
+                await progress_msg.edit_text("❌ ساخت/ارسال لاگ ناموفق بود.")
+            except Exception:
+                pass
+        return False
+
+
+async def log_scheduler(bot: Bot):
+    """ارسال خودکار لاگ هر روز ساعت ۱۲:۰۰ و ۰۰:۰۰ به وقت محلی."""
+    while True:
+        try:
+            now = local_now()
+            if now.hour in (0, 12) and now.minute < 2:
+                slot = now.strftime("%Y-%m-%d %H")
+                last = get_setting("last_log_slot", "")
+                if last != slot:
+                    recipients = get_log_recipients()
+                    if recipients:
+                        await generate_and_send_log(bot, recipients)
+                    else:
+                        logger.warning("LOG SCHEDULER: no recipients registered")
+            await asyncio.sleep(40)
+        except Exception:
+            logger.exception("LOG SCHEDULER ERROR")
+            await asyncio.sleep(60)
+
+
+@router.message(
+    F.text == "📋 لاگ در لحظه",
+    F.chat.type == "private",
+)
+async def owner_instant_log(
+    message: Message,
+    bot: Bot,
+):
+    if not await asyncio.to_thread(db.is_owner, message.from_user.id):
+        return
+
+    uid = message.from_user.id
+    _register_log_recipient(uid)
+
+    if uid in _log_in_progress:
+        await message.answer(
+            "⏳ لاگ در حال آماده‌سازی است. لطفاً صبر کنید.",
+            reply_markup=owner_keyboard(db.is_bot_enabled()),
+        )
+        return
+
+    _log_in_progress.add(uid)
+    try:
+        await generate_and_send_log(
+            bot,
+            recipients=[uid],
+            progress_to=uid,
+        )
+    finally:
+        _log_in_progress.discard(uid)
+
+    await message.answer(
+        "پنل مالک:",
+        reply_markup=owner_keyboard(db.is_bot_enabled()),
+    )
+
+
+# =========================================================
+# OWNER SEARCH (پیام / کاربر)
+# =========================================================
+
+@router.message(
+    F.text == "🔍 جستجو",
+    F.chat.type == "private",
+)
+async def owner_search_menu(
+    message: Message,
+):
+    if not await asyncio.to_thread(db.is_owner, message.from_user.id):
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _btn("🔎 جستجو پیام", "search:msg", style="primary"),
+            ],
+            [
+                _btn("👤 جستجو کاربر", "search:user", style="primary"),
+            ],
+        ]
+    )
+    await message.answer(
+        "🔍 چه چیزی را می‌خواهی جستجو کنی؟",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data == "search:msg")
+async def search_msg_start(callback: CallbackQuery):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    set_state(callback.from_user.id, "search_message")
+    await callback.answer()
+    await callback.message.answer(
+        "🔎 آیدی عددی پیام را بفرست (مثلاً 389):",
+        reply_markup=back_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "search:user")
+async def search_user_start(callback: CallbackQuery):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    set_state(callback.from_user.id, "search_user")
+    await callback.answer()
+    await callback.message.answer(
+        "👤 آیدی عددی کاربر را بفرست:",
+        reply_markup=back_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("search_user_ch:"))
+async def search_user_channel_msgs(callback: CallbackQuery, bot: Bot):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    try:
+        target = int(parts[1])
+        ch = parts[2]
+    except Exception:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    if ch not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    await callback.answer()
+    rows = await db_fetchall(
+        """
+        SELECT id, status, submitted_at, content, reject_reason
+        FROM messages
+        WHERE user_id = ?
+          AND (
+                channel_key = ?
+                OR (? = ? AND (channel_key IS NULL OR channel_key = ''))
+              )
+        ORDER BY id DESC
+        LIMIT 30
+        """,
+        (target, ch, ch, DEFAULT_CHANNEL_KEY),
+    )
+    title = CHANNELS[ch]["title"]
+    if not rows:
+        await callback.message.answer(f"پیامی در «{title}» یافت نشد.")
+        return
+    lines = [f"📋 پیام‌های کاربر {target} — {title}\n"]
+    for r in rows:
+        st = _status_label_fa(r["status"])
+        preview = (r["content"] or "")[:80].replace("\n", " ")
+        lines.append(f"#{r['id']} | {st}")
+        lines.append(f"🕐 {r['submitted_at'] or '-'}")
+        lines.append(f"📝 {preview}")
+        if r["status"] == "rejected" and r["reject_reason"]:
+            lines.append(f"دلیل: {r['reject_reason']}")
+        lines.append("")
+    # split if too long
+    text = "\n".join(lines)
+    if len(text) > 3500:
+        text = text[:3500] + "\n…"
+    await callback.message.answer(text)
+
+
+@router.callback_query(F.data.startswith("ban_user:"))
+async def owner_ban_user(callback: CallbackQuery):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    try:
+        target = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer()
+        return
+    if db.is_owner(target):
+        await callback.answer("نمی‌توان مالک را بن کرد.", show_alert=True)
+        return
+    try:
+        if hasattr(db, "block_user"):
+            await asyncio.to_thread(db.block_user, target)
+        else:
+            await db_execute(
+                "UPDATE users SET blocked = 1 WHERE user_id = ?",
+                (target,),
+            )
+            await db_commit()
+    except Exception:
+        logger.exception("BAN USER ERROR | %s", target)
+        await callback.answer(GENERIC_ERROR, show_alert=True)
+        return
+    await callback.answer("کاربر بن شد.", show_alert=True)
+    try:
+        await callback.message.answer(f"🚫 کاربر `{target}` از ربات بن شد.")
+    except Exception:
+        pass
+
+
 async def main():
 
     global shift_task
@@ -9590,6 +10430,10 @@ async def main():
 
     ann_task = asyncio.create_task(
         announcement_monitor(bot)
+    )
+
+    log_task = asyncio.create_task(
+        log_scheduler(bot)
     )
 
     try:
