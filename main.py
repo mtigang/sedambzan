@@ -1438,6 +1438,83 @@ def current_time_string() -> str:
     )
 
 
+_JALALI_MONTHS = (
+    "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+    "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
+)
+
+
+def _gregorian_to_jalali(gy: int, gm: int, gd: int) -> tuple[int, int, int]:
+    """تبدیل میلادی به شمسی بدون وابستگی خارجی."""
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    if gy > 1600:
+        jy = 979
+        gy -= 1600
+    else:
+        jy = 0
+        gy -= 621
+    gy2 = gy + 1 if gm > 2 else gy
+    days = (
+        365 * gy
+        + (gy2 + 3) // 4
+        - (gy2 + 99) // 100
+        + (gy2 + 399) // 400
+        - 80
+        + gd
+        + g_d_m[gm - 1]
+    )
+    jy += 33 * (days // 12053)
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        jm = 1 + days // 31
+        jd = 1 + days % 31
+    else:
+        jm = 7 + (days - 186) // 30
+        jd = 1 + (days - 186) % 30
+    return jy, jm, jd
+
+
+def format_dt_fa(value) -> str:
+    """
+    هر تاریخ/زمانی را مرتب و شمسی می‌کند.
+    ورودی: datetime یا رشته ISO مثل 2026-09-12T20:24:32
+    خروجی نمونه: ۱ شهریور ۱۴۰۵ — ۲۰:۲۴
+    """
+    if value is None or value == "":
+        return "—"
+    dt = None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        s = str(value).strip().replace("T", " ").replace("Z", "")
+        s = s.split(".")[0]
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y/%m/%d",
+        ):
+            try:
+                dt = datetime.strptime(s, fmt)
+                break
+            except Exception:
+                continue
+    if dt is None:
+        return str(value)
+    jy, jm, jd = _gregorian_to_jalali(dt.year, dt.month, dt.day)
+    month = _JALALI_MONTHS[jm - 1]
+    # ارقام فارسی اختیاری نیست؛ خوانا با اعداد معمول
+    if dt.hour or dt.minute or dt.second or (" " in str(value) or "T" in str(value)):
+        return f"{jd} {month} {jy} — {dt.hour:02d}:{dt.minute:02d}"
+    return f"{jd} {month} {jy}"
+
+
 def full_name(user: User) -> str:
     name = " ".join(
         x
@@ -2130,13 +2207,18 @@ def owner_keyboard(
                     text="📢 اطلاعیه‌ها"
                 ),
                 KeyboardButton(
-                    text="🔍 جستجو"
+                    text="📬 پیام کاربران"
                 ),
             ],
             [
                 KeyboardButton(
+                    text="🔍 جستجو"
+                ),
+                KeyboardButton(
                     text="⚙️ مدیریت سیستم"
                 ),
+            ],
+            [
                 KeyboardButton(
                     text="❓ راهنما"
                 ),
@@ -2681,8 +2763,15 @@ async def help_command(
 
         text = (
             "👑 راهنمای مالک\n\n"
-            "از منوی مدیریت می‌توانی ادمین‌ها، "
-            "شیفت‌ها، آمار، امنیت و تنظیمات را مدیریت کنی."
+            "از این پنل کل ربات را کنترل می‌کنی:\n\n"
+            "📥 صف هر کانال را باز کن و پیام‌ها را تأیید یا رد کن\n"
+            "👥 ادمین جدید اضافه کن یا ادمین فعلی را حذف کن\n"
+            "⏰ شیفت‌ها را ببین، بساز یا لغو کن\n"
+            "📊 آمار امروز و عملکرد کل سیستم را چک کن\n"
+            "📬 به انتقاد و پیشنهاد کاربران جواب بده\n"
+            "🔍 با آیدی پیام یا کاربر، جزئیات کامل را پیدا کن\n"
+            "⚙️ از «مدیریت سیستم» کانال‌ها، تنظیمات و تست‌ها را ببین\n"
+            "📋 لاگ خودکار ۱۲ ساعته و گزارش شبانه شیفت‌ها فعال است"
         )
 
         keyboard = owner_keyboard(
@@ -2866,7 +2955,7 @@ async def user_feedback_start(
 
 
 @router.message(
-    F.text == "📬 مشاهده پیام کاربران",
+    F.text.in_({"📬 مشاهده پیام کاربران", "📬 پیام کاربران"}),
     F.chat.type == "private",
 )
 async def owner_view_feedback(
@@ -3046,7 +3135,7 @@ async def user_status(
             lines.append(f"دلیل: {row['reject_reason']}")
 
         if row["submitted_at"]:
-            lines.append(f"🕐 {row['submitted_at']}")
+            lines.append(f"🕐 {format_dt_fa(row['submitted_at'])}")
 
     await message.answer(
         "\n".join(lines),
@@ -5751,42 +5840,12 @@ async def shift_request_start(
 # =========================================================
 
 def owner_stats_keyboard():
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                _btn(
-                    "📊 آمار امروز",
-                    "stats:today",
-                    style="primary",
-                )
-            ],
-            [
-                _btn(
-                    "📋 لاگ",
-                    "stats:log",
-                    style="primary",
-                )
-            ],
-            [
-                _btn(
-                    "📁 گزارش‌ها و پیام کاربران",
-                    "stats:reports",
-                    style="primary",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👤 آمار پیام کاربران",
-                    callback_data="stats:users",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🛡 آمار ادمین‌ها",
-                    callback_data="stats:admins",
-                )
-            ],
+            [_btn("📊 آمار کل", "stats:overall", style="primary")],
+            [_btn("📋 لاگ", "stats:log", style="primary")],
+            [_btn("👤 آمار کاربران", "stats:users", style="primary")],
+            [_btn("🛡 آمار ادمین‌ها", "stats:admins", style="primary")],
         ]
     )
 
@@ -5794,43 +5853,27 @@ def owner_stats_keyboard():
 def owner_system_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                _btn("📢 کانال‌ها", "sys:channels", style="primary"),
-            ],
-            [
-                _btn("⚙️ تنظیمات", "sys:settings", style="primary"),
-            ],
-            [
-                _btn("🧪 تست سیستم", "sys:tests", style="primary"),
-            ],
+            [_btn("📢 کانال‌ها", "sys:channels", style="primary")],
+            [_btn("⚙️ تنظیمات", "sys:settings", style="primary")],
+            [_btn("🧪 تست سیستم", "sys:tests", style="primary")],
+            [_btn("📤 ارسال به کانال‌ها", "sys:broadcast_menu", style="primary")],
         ]
     )
 
 
 def owner_tests_keyboard():
-    rows = [
-        [_btn("🔌 تست اتصال کل ربات", "test:bot", style="primary")],
-    ]
-    for i, (key, cfg) in enumerate(CHANNELS.items(), 1):
-        rows.append(
-            [
-                _btn(
-                    f"📺 تست کانال {i}: {cfg['title']}",
-                    f"test:channel:{key}",
-                    style="primary",
-                )
-            ]
-        )
-    rows.extend(
-        [
-            [_btn("📨 تست ارسال پیام", "test:send", style="primary")],
-            [_btn("📥 تست صف", "test:queue", style="primary")],
-            [_btn("⏰ تست شیفت", "test:shift", style="primary")],
-            [_btn("🗄 تست دیتابیس", "test:db", style="primary")],
+    """تست‌های واحد — بدون تکرار با تست کانال‌های تنظیمات."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("🔌 اتصال ربات", "test:bot", style="primary")],
+            [_btn("📺 اتصال هر ۳ کانال", "test:all_channels", style="primary")],
+            [_btn("📨 ارسال پیوی", "test:send", style="primary")],
+            [_btn("📥 صف پیام‌ها", "test:queue", style="primary")],
+            [_btn("⏰ شیفت فعال", "test:shift", style="primary")],
+            [_btn("🗄 دیتابیس", "test:db", style="primary")],
             [_btn("🔙 بازگشت", "sys:menu", style="danger")],
         ]
     )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _count_messages(where_sql: str = "", params: tuple = ()) -> dict:
@@ -6014,58 +6057,83 @@ async def owner_stats_menu(
     )
 
 
-@router.callback_query(F.data == "stats:today")
-async def stats_today_callback(callback: CallbackQuery):
+@router.callback_query(F.data.in_({"stats:today", "stats:overall"}))
+async def stats_overall_callback(callback: CallbackQuery):
     if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
         await callback.answer("⛔ فقط مالک.", show_alert=True)
         return
     await callback.answer()
     try:
+        overall = _count_messages()
         today = today_string()
         today_stats = _count_messages(
             "WHERE submitted_at LIKE ?",
             (f"{today}%",),
         )
-        overall = _count_messages()
-        # شیفت‌های امروز
-        shifts = await db_fetchall(
-            """
-            SELECT s.*, a.name AS admin_name
-            FROM shifts s
-            LEFT JOIN admins a ON a.user_id = s.admin_id
-            WHERE s.specific_date = ?
-               OR (s.permanent = 1 AND (s.specific_date IS NULL OR s.specific_date = ''))
-            ORDER BY s.start_time ASC
-            LIMIT 40
-            """,
-            (today,),
+        week_from = (local_now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        month_from = (local_now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        week_stats = _count_messages(
+            "WHERE submitted_at >= ?",
+            (week_from,),
         )
-        lines = [
-            f"📊 <b>آمار امروز</b> — {today}\n",
-            f"📨 پیام‌های امروز: <b>{today_stats['total']}</b>",
-            f"🟡 در انتظار (کل سیستم): <b>{overall['waiting']}</b>",
-            f"🟢 تأیید امروز: <b>{today_stats['approved']}</b>",
-            f"🔴 رد امروز: <b>{today_stats['rejected']}</b>\n",
-            "⏰ <b>شیفت‌های امروز</b>:",
-        ]
-        if not shifts:
-            lines.append("شیفتی ثبت نشده.")
-        else:
-            for s in shifts:
-                sk = s["channel_key"] or DEFAULT_CHANNEL_KEY
-                title = CHANNELS.get(sk, {}).get("title", sk)
-                name = s["admin_name"] or s["admin_id"]
-                lines.append(
-                    f"• {title} | {name} | {s['start_time']}–{s['end_time']}"
-                )
+        month_stats = _count_messages(
+            "WHERE submitted_at >= ?",
+            (month_from,),
+        )
+        users_total = get_user_message_stats_count()
+        try:
+            admins_total = db.count_admins()
+        except Exception:
+            admins_total = 0
+
+        text = (
+            "📊 <b>داشبورد آماری</b>\n\n"
+            f"📨 کل پیام‌ها: <b>{overall['total']}</b>\n"
+            f"🟡 در انتظار: <b>{overall['waiting']}</b>\n"
+            f"🟢 تأیید شده: <b>{overall['approved']}</b>\n"
+            f"🔴 رد شده: <b>{overall['rejected']}</b>\n\n"
+            f"👥 کاربران: <b>{users_total}</b>\n"
+            f"👮 ادمین‌ها: <b>{admins_total}</b>\n\n"
+            f"📅 <b>امروز</b> ({format_dt_fa(today)})\n"
+            f"📨 جدید: {today_stats['total']} | "
+            f"🟢 {today_stats['approved']} | "
+            f"🔴 {today_stats['rejected']}\n\n"
+            f"📅 <b>۷ روز اخیر</b>\n"
+            f"📨 {week_stats['total']} | "
+            f"🟢 {week_stats['approved']} | "
+            f"🔴 {week_stats['rejected']}\n\n"
+            f"📅 <b>۳۰ روز اخیر</b>\n"
+            f"📨 {month_stats['total']} | "
+            f"🟢 {month_stats['approved']} | "
+            f"🔴 {month_stats['rejected']}"
+        )
+        # فقط دکمه بازگشت به منوی آمار — بدون دکمه‌های چسبیده شیشه‌ای
+        back_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [_btn("🔙 منوی آمار", "stats:menu", style="primary")]
+            ]
+        )
         await callback.message.answer(
-            "\n".join(lines),
+            text,
             parse_mode=ParseMode.HTML,
-            reply_markup=owner_stats_keyboard(),
+            reply_markup=back_kb,
         )
     except Exception:
-        logger.exception("STATS TODAY ERROR")
+        logger.exception("STATS OVERALL ERROR")
         await callback.message.answer(GENERIC_ERROR)
+
+
+@router.callback_query(F.data == "stats:menu")
+async def stats_menu_callback(callback: CallbackQuery):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
+        "📊 <b>آمار و گزارش‌ها</b>\n\nیکی از بخش‌ها را انتخاب کن:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=owner_stats_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "stats:log")
@@ -6252,6 +6320,54 @@ async def sys_settings_callback(callback: CallbackQuery):
     )
 
 
+@router.callback_query(F.data == "sys:broadcast_menu")
+async def sys_broadcast_menu(callback: CallbackQuery):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    await callback.answer()
+    rows = []
+    for key, cfg in CHANNELS.items():
+        rows.append(
+            [
+                _btn(
+                    f"📤 {cfg['title']}",
+                    f"sys:sendch:{key}",
+                    style="primary",
+                )
+            ]
+        )
+    rows.append([_btn("🔙 بازگشت", "sys:menu", style="danger")])
+    await callback.message.answer(
+        "📤 ارسال مستقیم به کدام کانال؟",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("sys:sendch:"))
+async def sys_send_channel_start(callback: CallbackQuery):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    key = callback.data.split(":")[-1]
+    if key not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    set_state(
+        callback.from_user.id,
+        "owner_send_channel",
+        channel_key=key,
+    )
+    await callback.answer()
+    title = CHANNELS[key]["title"]
+    await callback.message.answer(
+        f"📤 ارسال مستقیم به «{title}»\n\n"
+        "متن پیام را بفرست.\n"
+        "بعد از ارسال، در کانال منتشر می‌شود.",
+        reply_markup=back_keyboard(),
+    )
+
+
 @router.callback_query(F.data == "sys:tests")
 async def sys_tests_callback(callback: CallbackQuery):
     if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
@@ -6287,6 +6403,17 @@ async def owner_run_test(callback: CallbackQuery, bot: Bot):
             results.append(
                 f"✅ اتصال ربات OK\n@{me.username} | id={me.id}"
             )
+
+        elif action == "all_channels":
+            for key, cfg in CHANNELS.items():
+                try:
+                    chat = await bot.get_chat(int(cfg["channel_id"]))
+                    results.append(
+                        f"✅ {cfg['title']}: OK "
+                        f"({getattr(chat, 'title', '-')})"
+                    )
+                except Exception as e:
+                    results.append(f"❌ {cfg['title']}: {str(e)[:100]}")
 
         elif action.startswith("channel:"):
             key = action.split(":", 1)[1]
@@ -9065,6 +9192,73 @@ async def handle_state(
             return True
 
     # =====================================================
+    # OWNER SEND TO CHANNEL
+    # =====================================================
+    if kind == "owner_send_channel":
+        if not db.is_owner(user_id):
+            clear_state(user_id)
+            return True
+        ch = state.get("channel_key") or DEFAULT_CHANNEL_KEY
+        if ch not in CHANNELS:
+            clear_state(user_id)
+            await message.answer("❌ کانال نامعتبر.")
+            return True
+        body = (text or "").strip()
+        if not body:
+            await message.answer("❌ متن خالی است.")
+            return True
+        try:
+            await bot.send_message(
+                chat_id=int(CHANNELS[ch]["channel_id"]),
+                text=body,
+            )
+            clear_state(user_id)
+            await message.answer(
+                f"✅ پیام در «{CHANNELS[ch]['title']}» منتشر شد.",
+                reply_markup=owner_keyboard(db.is_bot_enabled()),
+            )
+        except Exception:
+            logger.exception("OWNER SEND CHANNEL ERROR | ch=%s", ch)
+            await message.answer(
+                "❌ ارسال ناموفق بود. دسترسی ربات به کانال را چک کن.",
+                reply_markup=owner_keyboard(db.is_bot_enabled()),
+            )
+        return True
+
+    # =====================================================
+    # OWNER SEND TO CHANNEL
+    # =====================================================
+    if kind == "owner_send_channel":
+        if not db.is_owner(user_id):
+            clear_state(user_id)
+            return True
+        ch = state.get("channel_key") or DEFAULT_CHANNEL_KEY
+        if ch not in CHANNELS:
+            clear_state(user_id)
+            await message.answer("❌ کانال نامعتبر.")
+            return True
+        body = (text or "").strip()
+        if not body:
+            await message.answer("❌ متن خالی است.")
+            return True
+        try:
+            await bot.send_message(
+                chat_id=int(CHANNELS[ch]["channel_id"]),
+                text=body,
+            )
+            clear_state(user_id)
+            await message.answer(
+                f"✅ پیام در «{CHANNELS[ch]['title']}» منتشر شد.",
+                reply_markup=owner_keyboard(db.is_bot_enabled()),
+            )
+        except Exception as e:
+            logger.exception("OWNER SEND CHANNEL ERROR | ch=%s", ch)
+            await message.answer(
+                f"❌ ارسال ناموفق:\n{str(e)[:150]}\n\nدوباره متن را بفرست یا بازگشت بزن."
+            )
+        return True
+
+    # =====================================================
     # SEARCH MESSAGE (مالک)
     # =====================================================
     if kind == "search_message":
@@ -9115,7 +9309,7 @@ async def handle_state(
             f"👤 فرستنده: {sender_name}\n"
             f"🔢 آیدی فرستنده: <code>{sender}</code>\n"
             f"📺 کانال: {ch_title}\n"
-            f"🕐 زمان ارسال: {row['submitted_at'] or '—'}\n"
+            f"🕐 زمان ارسال: {format_dt_fa(row['submitted_at'])}\n"
             f"📌 وضعیت: {_status_label_fa(st)}\n"
             f"👨‍💼 ادمین دریافت‌کننده: {admin_info}\n"
         )
@@ -9413,7 +9607,7 @@ async def text_router(
         await user_feedback_start(message)
         return
 
-    if text == "📬 مشاهده پیام کاربران":
+    if text in {"📬 مشاهده پیام کاربران", "📬 پیام کاربران"}:
         await owner_view_feedback(message, bot)
         return
 
@@ -9526,7 +9720,7 @@ async def text_router(
         await owner_instant_log(message, bot)
         return
 
-    if text == "📬 مشاهده پیام کاربران":
+    if text in {"📬 مشاهده پیام کاربران", "📬 پیام کاربران"}:
         await owner_view_feedback(message, bot)
         return
 
@@ -10216,14 +10410,23 @@ def _status_label_en(st: str) -> str:
 
 async def _fetch_log_window(since: str | None, until: str | None):
     """داده‌های بازه زمانی برای لاگ."""
+    def _norm(ts: str | None) -> str | None:
+        if not ts:
+            return None
+        return str(ts).replace("T", " ").replace("Z", "").strip()[:19]
+
+    since_n = _norm(since)
+    until_n = _norm(until)
     params: list[Any] = []
     where = []
-    if since:
-        where.append("submitted_at >= ?")
-        params.append(since)
-    if until:
-        where.append("submitted_at <= ?")
-        params.append(until)
+    # submitted_at ممکن است با T یا فاصله ذخیره شده باشد
+    ts_expr = "REPLACE(REPLACE(COALESCE(submitted_at,''), 'T', ' '), 'Z', '')"
+    if since_n:
+        where.append(f"{ts_expr} >= ?")
+        params.append(since_n)
+    if until_n:
+        where.append(f"{ts_expr} <= ?")
+        params.append(until_n)
     wsql = (" AND " + " AND ".join(where)) if where else ""
 
     messages = await db_fetchall(
@@ -10300,7 +10503,7 @@ def _build_log_txt(
         lines.append(f"  EN | Status: {_status_label_en(st)} | Channel: {ch}")
         lines.append(f"  Sender ID / ایدی فرستنده: {uid}")
         lines.append(f"  Admin received / ادمین دریافت‌کننده: {admin_id or '-'}")
-        lines.append(f"  Time / زمان: {m['submitted_at'] or '-'}")
+        lines.append(f"  Time / زمان: {format_dt_fa(m['submitted_at'])}")
         if st == "rejected" and m["reject_reason"]:
             lines.append(f"  Reject reason / دلیل رد: {m['reject_reason']}")
         lines.append(f"  Text / متن: {content}")
@@ -10381,6 +10584,10 @@ def _build_log_xlsx(
     # Sheet 1 messages
     ws = wb.active
     ws.title = "Messages"
+    try:
+        ws.sheet_view.rightToLeft = True
+    except Exception:
+        pass
     headers = [
         "ID", "Sender ID", "Status FA", "Status EN", "Channel",
         "Admin ID", "Submitted At", "Reject Reason", "Text",
@@ -10388,6 +10595,14 @@ def _build_log_xlsx(
     ws.append(headers)
     for cell in ws[1]:
         cell.font = fa_bold
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    # عرض ستون‌ها برای فارسی
+    col_widths = {
+        "A": 10, "B": 14, "C": 16, "D": 16, "E": 18,
+        "F": 12, "G": 22, "H": 18, "I": 50,
+    }
+    for col, w in col_widths.items():
+        ws.column_dimensions[col].width = w
     for m in messages:
         st = m["status"]
         ch = m["channel_key"] or DEFAULT_CHANNEL_KEY
@@ -10400,13 +10615,16 @@ def _build_log_xlsx(
             _clean(_status_label_en(st)),
             _clean(ch_title),
             m["admin_id"],
-            _clean(m["submitted_at"]),
+            _clean(format_dt_fa(m["submitted_at"])),
             _clean(m["reject_reason"] if st == "rejected" else ""),
             _clean(content),
         ]
         ws.append(row_vals)
         for cell in ws[ws.max_row]:
             cell.font = fa_font
+            cell.alignment = Alignment(
+                wrap_text=True, vertical="top", readingOrder=2
+            )
 
     ws2 = wb.create_sheet("Shifts")
     ws2.append([
@@ -10464,12 +10682,24 @@ def _build_log_xlsx(
 
     ws5 = wb.create_sheet("Meta")
     ws5.append(["Key", "Value"])
-    ws5.append(["From", since])
-    ws5.append(["Until", until])
-    ws5.append(["Generated", local_now().strftime("%Y-%m-%d %H:%M:%S")])
+    ws5.append(["From", format_dt_fa(since)])
+    ws5.append(["Until", format_dt_fa(until)])
+    ws5.append(["Generated", format_dt_fa(local_now())])
     ws5.append(["Messages count", len(messages)])
     ws5.append(["Users count", len(users)])
     ws5.append(["Shifts count", len(shifts)])
+
+    # عرض ستون‌ها برای فارسی خوانا
+    for sheet in wb.worksheets:
+        for col in sheet.columns:
+            letter = col[0].column_letter
+            max_len = 12
+            for cell in col:
+                try:
+                    max_len = max(max_len, min(len(str(cell.value or "")), 60))
+                except Exception:
+                    pass
+            sheet.column_dimensions[letter].width = max_len + 2
 
     wb.save(path)
 
@@ -10515,6 +10745,8 @@ async def generate_and_send_log(
         until = until or local_now().strftime("%Y-%m-%d %H:%M:%S")
         if not since:
             # از نزدیک‌ترین مرز ۱۲:۰۰ یا ۰۰:۰۰ گذشته
+            # اگر تازه به مرز رسیده‌ایم (کمتر از ۳۰ دقیقه)، دورهٔ قبلی را بگیر
+            # تا لاگ خالی نشود (مثلاً ۱۲:۰۰:۲۴ → از ۰۰:۰۰ همان روز)
             now = local_now()
             if now.hour >= 12:
                 boundary = now.replace(
@@ -10524,6 +10756,8 @@ async def generate_and_send_log(
                 boundary = now.replace(
                     hour=0, minute=0, second=0, microsecond=0
                 )
+            if (now - boundary) < timedelta(minutes=30):
+                boundary = boundary - timedelta(hours=12)
             since = boundary.strftime("%Y-%m-%d %H:%M:%S")
 
         await _progress_edit(progress_msg, 30, "خواندن پیام‌ها و کاربران...")
@@ -10554,8 +10788,8 @@ async def generate_and_send_log(
         await _progress_edit(progress_msg, 85, "ارسال به مالکین...")
         caption = (
             f"📋 لاگ ربات\n"
-            f"🕐 از: {since}\n"
-            f"🕐 تا: {until}\n"
+            f"🕐 از: {format_dt_fa(since)}\n"
+            f"🕐 تا: {format_dt_fa(until)}\n"
             f"📨 پیام‌ها: {len(messages)}\n"
             f"👤 کاربران فعال: {len(users)}"
         )
@@ -10621,99 +10855,137 @@ async def generate_and_send_log(
 
 
 async def send_daily_shift_report(bot: Bot):
-    """لیست شیفت امروز + عملکرد ادمین‌ها برای مالکین."""
-    recipients = get_log_recipients()
-    if not recipients:
-        return
+    """
+    ۱ دقیقه مانده به پایان روز:
+    برای هر گروه شیفت کانال، گزارش شیفت‌ها و عملکرد ادمین‌های همان کانال.
+    """
     today = today_string()
-    try:
-        shifts = await db_fetchall(
-            """
-            SELECT s.*, a.name AS admin_name
-            FROM shifts s
-            LEFT JOIN admins a ON a.user_id = s.admin_id
-            WHERE s.specific_date = ?
-               OR (s.permanent = 1 AND (s.specific_date IS NULL OR s.specific_date = ''))
-            ORDER BY s.start_time ASC
-            """,
-            (today,),
-        )
-    except Exception:
-        logger.exception("DAILY SHIFT REPORT LOAD ERROR")
-        shifts = []
+    fa_today = format_dt_fa(today)
 
-    lines = [
-        f"📅 گزارش روزانه شیفت‌ها — {today}",
-        "━━━━━━━━━━━━━━",
-        "",
-    ]
-    if not shifts:
-        lines.append("شیفتی برای امروز ثبت نشده.")
-    else:
-        for s in shifts:
-            sk = s["channel_key"] or DEFAULT_CHANNEL_KEY
-            title = CHANNELS.get(sk, {}).get("title", sk)
-            name = s["admin_name"] or str(s["admin_id"])
-            perm = "دائمی" if s["permanent"] else "موقت"
-            lines.append(
-                f"#{s['id']} | {title}\n"
-                f"👤 {name} (`{s['admin_id']}`)\n"
-                f"⏰ {s['start_time']}–{s['end_time']} ({perm})\n"
-            )
-
-    lines.append("━━━━━━━━━━━━━━")
-    lines.append("🛡 عملکرد ادمین‌ها (امروز)")
-    lines.append("")
-
-    try:
-        perf = await db_fetchall(
-            """
-            SELECT
-                admin_id,
-                COUNT(CASE WHEN status = 'approved' THEN 1 END) AS approved,
-                COUNT(CASE WHEN status = 'rejected' THEN 1 END) AS rejected,
-                COUNT(*) AS total
-            FROM messages
-            WHERE admin_id IS NOT NULL
-              AND submitted_at LIKE ?
-              AND status IN ('approved', 'rejected', 'pending', 'processing')
-            GROUP BY admin_id
-            ORDER BY total DESC
-            """,
-            (f"{today}%",),
-        )
-    except Exception:
-        logger.exception("DAILY ADMIN PERF ERROR")
-        perf = []
-
-    if not perf:
-        lines.append("فعالییت بررسی ثبت نشده.")
-    else:
-        for p in perf:
-            aid = p["admin_id"]
-            aname = str(aid)
-            try:
-                ar = await asyncio.to_thread(db.get_admin, int(aid))
-                if ar and ar["name"]:
-                    aname = ar["name"]
-            except Exception:
-                pass
-            lines.append(
-                f"👤 {aname} (`{aid}`)\n"
-                f"✅ {p['approved']} | ❌ {p['rejected']} | "
-                f"کل مرتبط: {p['total']}\n"
-            )
-
-    text = "\n".join(lines)
-    if len(text) > 3500:
-        text = text[:3500] + "\n…"
-
-    for rid in recipients:
+    for ch_key, cfg in CHANNELS.items():
+        group_id = cfg.get("group_id")
+        if not group_id:
+            continue
+        title = cfg["title"]
         try:
-            await bot.send_message(rid, text, parse_mode=ParseMode.HTML)
-            await asyncio.sleep(0.15)
+            shifts = await db_fetchall(
+                """
+                SELECT s.*, a.name AS admin_name
+                FROM shifts s
+                LEFT JOIN admins a ON a.user_id = s.admin_id
+                WHERE (
+                        s.specific_date = ?
+                        OR (s.permanent = 1 AND (s.specific_date IS NULL OR s.specific_date = ''))
+                      )
+                  AND (
+                        s.channel_key = ?
+                        OR (
+                            (? = ?)
+                            AND (s.channel_key IS NULL OR s.channel_key = '')
+                        )
+                      )
+                ORDER BY s.start_time ASC
+                """,
+                (today, ch_key, ch_key, DEFAULT_CHANNEL_KEY),
+            )
         except Exception:
-            logger.exception("DAILY REPORT SEND ERROR | %s", rid)
+            logger.exception("DAILY SHIFT LOAD | ch=%s", ch_key)
+            shifts = []
+
+        lines = [
+            f"📅 گزارش پایان روز — {title}",
+            f"🗓 {fa_today}",
+            "━━━━━━━━━━━━━━",
+            "",
+            "⏰ شیفت‌های امروز:",
+        ]
+        if not shifts:
+            lines.append("شیفتی ثبت نشده.")
+        else:
+            for s in shifts:
+                name = s["admin_name"] or str(s["admin_id"])
+                lines.append(
+                    f"• {s['start_time']}–{s['end_time']} | {name}"
+                )
+
+        lines.append("")
+        lines.append("🛡 عملکرد ادمین‌ها:")
+        try:
+            if ch_key == DEFAULT_CHANNEL_KEY:
+                perf = await db_fetchall(
+                    """
+                    SELECT
+                        admin_id,
+                        COUNT(CASE WHEN status = 'approved' THEN 1 END) AS approved,
+                        COUNT(CASE WHEN status = 'rejected' THEN 1 END) AS rejected
+                    FROM messages
+                    WHERE admin_id IS NOT NULL
+                      AND submitted_at LIKE ?
+                      AND status IN ('approved', 'rejected')
+                      AND (
+                            channel_key = ?
+                            OR channel_key IS NULL
+                            OR channel_key = ''
+                          )
+                    GROUP BY admin_id
+                    """,
+                    (f"{today}%", ch_key),
+                )
+            else:
+                perf = await db_fetchall(
+                    """
+                    SELECT
+                        admin_id,
+                        COUNT(CASE WHEN status = 'approved' THEN 1 END) AS approved,
+                        COUNT(CASE WHEN status = 'rejected' THEN 1 END) AS rejected
+                    FROM messages
+                    WHERE admin_id IS NOT NULL
+                      AND submitted_at LIKE ?
+                      AND status IN ('approved', 'rejected')
+                      AND channel_key = ?
+                    GROUP BY admin_id
+                    """,
+                    (f"{today}%", ch_key),
+                )
+        except Exception:
+            logger.exception("DAILY PERF | ch=%s", ch_key)
+            perf = []
+
+        if not perf:
+            lines.append("بررسی ثبت‌شده‌ای نبود.")
+        else:
+            for p in perf:
+                aid = p["admin_id"]
+                aname = str(aid)
+                try:
+                    ar = await asyncio.to_thread(db.get_admin, int(aid))
+                    if ar and ar["name"]:
+                        aname = ar["name"]
+                except Exception:
+                    pass
+                lines.append(
+                    f"• {aname}: ✅ {p['approved']} تأیید | ❌ {p['rejected']} رد"
+                )
+
+        text = "\n".join(lines)
+        try:
+            await bot.send_message(int(group_id), text)
+            await asyncio.sleep(0.2)
+        except Exception:
+            logger.exception(
+                "DAILY REPORT GROUP SEND | ch=%s group=%s", ch_key, group_id
+            )
+
+    # برای مالکین هم یک نسخه خلاصه
+    for rid in get_log_recipients():
+        try:
+            await bot.send_message(
+                rid,
+                f"📅 گزارش پایان روز ارسال شد.\n🗓 {fa_today}\n"
+                "نسخهٔ هر کانال در گروه شیفت همان کانال قرار گرفت.",
+            )
+        except Exception:
+            pass
 
 
 async def log_scheduler(bot: Bot):
@@ -10727,7 +10999,25 @@ async def log_scheduler(bot: Bot):
                 if last != slot:
                     recipients = get_log_recipients()
                     if recipients:
-                        await generate_and_send_log(bot, recipients)
+                        # بازهٔ کامل ۱۲ ساعتهٔ قبلی — نه از همین لحظه
+                        # ۱۲:۰۰ → از ۰۰:۰۰ تا ۱۲:۰۰
+                        # ۰۰:۰۰ → از ۱۲:۰۰ دیروز تا ۰۰:۰۰
+                        if now.hour >= 12:
+                            until_dt = now.replace(
+                                hour=12, minute=0, second=0, microsecond=0
+                            )
+                            since_dt = until_dt - timedelta(hours=12)
+                        else:
+                            until_dt = now.replace(
+                                hour=0, minute=0, second=0, microsecond=0
+                            )
+                            since_dt = until_dt - timedelta(hours=12)
+                        await generate_and_send_log(
+                            bot,
+                            recipients,
+                            since=since_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                            until=until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        )
                     else:
                         logger.warning("LOG SCHEDULER: no recipients registered")
 
