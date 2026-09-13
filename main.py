@@ -3010,7 +3010,13 @@ async def owner_view_feedback(
                         text="✅ بسته‌شد",
                         callback_data=f"fb_close:{row['id']}",
                     ),
-                ]
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👤 مشاهده کاربر",
+                        callback_data=f"fb_user:{row['user_id']}",
+                    ),
+                ],
             ]
         )
         try:
@@ -3018,6 +3024,216 @@ async def owner_view_feedback(
         except Exception:
             logger.exception("OWNER FEEDBACK SEND ERROR | id=%s", row["id"])
         await asyncio.sleep(0.05)
+
+
+@router.callback_query(F.data.startswith("fb_user:"))
+async def owner_feedback_view_user(callback: CallbackQuery, bot: Bot):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    try:
+        target = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer()
+        return
+    await callback.answer()
+    name = await get_profile_name(bot, target)
+    try:
+        u = await asyncio.to_thread(db.get_user, target)
+        if u:
+            name = " ".join(
+                x for x in (u["first_name"], u["last_name"]) if x
+            ).strip() or name
+            uname = f"@{u['username']}" if u["username"] else "—"
+        else:
+            uname = "—"
+    except Exception:
+        uname = "—"
+    try:
+        msgs = db.get_user_messages(target, 100)
+    except TypeError:
+        msgs = db.get_user_messages(target)
+    except Exception:
+        msgs = []
+    lines = [
+        f"👤 کاربر",
+        f"نام: {escape(name)}",
+        f"یوزرنیم: {escape(uname)}",
+        f"آیدی: <code>{target}</code>",
+        f"تعداد پیام: {len(msgs) if msgs else 0}",
+        "",
+        "📋 پیام‌ها:",
+    ]
+    if not msgs:
+        lines.append("پیامی ثبت نشده.")
+    else:
+        for m in msgs[:50]:
+            st = _status_label_fa(m["status"])
+            preview = (m["content"] or "")[:60].replace("\n", " ")
+            lines.append(f"#{m['id']} | {st}")
+            if preview:
+                lines.append(f"  {escape(preview)}")
+    text = "\n".join(lines)
+    if len(text) > 3500:
+        text = text[:3500] + "\n…"
+    await callback.message.answer(text, parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data.startswith("msg_admin:"))
+async def search_msg_admin_info(callback: CallbackQuery, bot: Bot):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    try:
+        mid = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer()
+        return
+    row = await asyncio.to_thread(db.get_message, mid)
+    if not row:
+        await callback.answer("پیام پیدا نشد.", show_alert=True)
+        return
+    admin_id = row["admin_id"]
+    if not admin_id:
+        await callback.answer("ادمینی روی این پیام ثبت نشده.", show_alert=True)
+        return
+    await callback.answer()
+    aid = int(admin_id)
+    name = await get_profile_name(bot, aid)
+    try:
+        ar = await asyncio.to_thread(db.get_admin, aid)
+        if ar and ar["name"]:
+            name = ar["name"]
+    except Exception:
+        pass
+    # عکس پروفایل
+    photo_file = None
+    try:
+        photos = await bot.get_user_profile_photos(aid, limit=1)
+        if photos.total_count > 0:
+            photo_file = photos.photos[0][-1].file_id
+    except Exception:
+        pass
+    st = row["status"]
+    # شیفت مرتبط
+    shift_info = "—"
+    try:
+        sid = row["shift_id"]
+    except Exception:
+        sid = None
+    if sid:
+        try:
+            sh = await asyncio.to_thread(db.get_shift, int(sid))
+            if sh:
+                shift_info = (
+                    f"{sh['start_time']} تا {sh['end_time']}"
+                    f" ({sh['specific_date'] or 'دائمی'})"
+                )
+        except Exception:
+            pass
+    if shift_info == "—":
+        # شیفت‌های همان روز ادمین
+        try:
+            day = str(row["submitted_at"] or "")[:10]
+            shs = get_admin_shifts_for_date_channel(
+                aid, day, row["channel_key"] or DEFAULT_CHANNEL_KEY
+            )
+            if shs:
+                shift_info = " | ".join(
+                    f"{s['start_time']}–{s['end_time']}" for s in shs[:3]
+                )
+        except Exception:
+            pass
+
+    caption = (
+        f"👨‍💼 ادمین بررسی‌کننده\n\n"
+        f"نام: {escape(name)}\n"
+        f"آیدی: <code>{aid}</code>\n"
+        f"پیام: #{mid}\n"
+        f"وضعیت: {_status_label_fa(st)}\n"
+    )
+    if st == "rejected" and row["reject_reason"]:
+        caption += f"دلیل رد: {escape(row['reject_reason'])}\n"
+    caption += (
+        f"شیفت: {escape(str(shift_info))}\n"
+        f"زمان ارسال کاربر: {format_dt_fa(row['submitted_at'])}\n"
+    )
+    try:
+        reviewed = row["reviewed_at"] if "reviewed_at" in row.keys() else None
+    except Exception:
+        reviewed = None
+    if reviewed:
+        caption += f"زمان بررسی: {format_dt_fa(reviewed)}\n"
+
+    if photo_file:
+        try:
+            await callback.message.answer_photo(
+                photo=photo_file,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        except Exception:
+            pass
+    await callback.message.answer(caption, parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data.startswith("msg_sender:"))
+async def search_msg_sender_info(callback: CallbackQuery, bot: Bot):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    try:
+        mid = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer()
+        return
+    row = await asyncio.to_thread(db.get_message, mid)
+    if not row:
+        await callback.answer("پیام پیدا نشد.", show_alert=True)
+        return
+    uid = int(row["user_id"])
+    await callback.answer()
+    name = await get_profile_name(bot, uid)
+    uname = "—"
+    try:
+        u = await asyncio.to_thread(db.get_user, uid)
+        if u:
+            name = " ".join(
+                x for x in (u["first_name"], u["last_name"]) if x
+            ).strip() or name
+            if u["username"]:
+                uname = f"@{u['username']}"
+    except Exception:
+        pass
+    photo_file = None
+    try:
+        photos = await bot.get_user_profile_photos(uid, limit=1)
+        if photos.total_count > 0:
+            photo_file = photos.photos[0][-1].file_id
+    except Exception:
+        pass
+    text = (
+        f"👤 کاربر ارسال‌کننده\n\n"
+        f"نام: {escape(name)}\n"
+        f"یوزرنیم: {escape(uname)}\n"
+        f"آیدی: <code>{uid}</code>\n"
+        f"پیام: #{mid}\n"
+        f"زمان ارسال: {format_dt_fa(row['submitted_at'])}\n"
+        f"وضعیت: {_status_label_fa(row['status'])}\n"
+        f"کانال: {CHANNELS.get(row['channel_key'] or DEFAULT_CHANNEL_KEY, {}).get('title', '-')}\n"
+    )
+    if photo_file:
+        try:
+            await callback.message.answer_photo(
+                photo=photo_file,
+                caption=text,
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        except Exception:
+            pass
+    await callback.message.answer(text, parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data.startswith("fb_reply:"))
@@ -3088,19 +3304,20 @@ async def owner_feedback_close(
 async def user_status(
     message: Message,
 ):
-
-    rows = db.get_user_messages(
-        message.from_user.id,
-        3,
-    )
+    # همه پیام‌های کاربر (سقف منطقی برای تلگرام)
+    try:
+        rows = db.get_user_messages(
+            message.from_user.id,
+            200,
+        )
+    except TypeError:
+        rows = db.get_user_messages(message.from_user.id)
 
     if not rows:
-
         await message.answer(
             "📊 هنوز پیامی ارسال نکرده‌ای.",
             reply_markup=user_keyboard(),
         )
-
         return
 
     status_map = {
@@ -3111,36 +3328,38 @@ async def user_status(
         "rejected": "🔴 رد شد",
     }
 
-    lines = ["📊 ۳ پیام اخیر"]
+    chunks: list[str] = []
+    lines = [f"📊 پیام‌های شما ({len(rows)} مورد)\n"]
 
     for row in rows:
-
-        status = status_map.get(
-            row["status"],
-            row["status"],
-        )
-
-        lines.append("────────────")
-        lines.append(f"#{row['id']} | {status}")
-
+        status = status_map.get(row["status"], row["status"])
+        block = [f"#{row['id']} | {status}"]
         content = (row["content"] or "").strip()
         if content:
-            preview = content if len(content) <= 120 else content[:120] + "…"
-            lines.append(preview)
-
-        if (
-            row["status"] == "rejected"
-            and row["reject_reason"]
-        ):
-            lines.append(f"دلیل: {row['reject_reason']}")
-
+            preview = content if len(content) <= 100 else content[:100] + "…"
+            block.append(preview)
+        if row["status"] == "rejected" and row["reject_reason"]:
+            block.append(f"دلیل: {row['reject_reason']}")
         if row["submitted_at"]:
-            lines.append(f"🕐 {format_dt_fa(row['submitted_at'])}")
+            block.append(f"🕐 {format_dt_fa(row['submitted_at'])}")
+        block.append("────────────")
+        piece = "\n".join(block)
+        # اگر از سقف پیام تلگرام رد شد، بفرست و از نو
+        if sum(len(x) for x in lines) + len(piece) > 3500:
+            chunks.append("\n".join(lines))
+            lines = [piece]
+        else:
+            lines.append(piece)
 
-    await message.answer(
-        "\n".join(lines),
-        reply_markup=user_keyboard(),
-    )
+    if lines:
+        chunks.append("\n".join(lines))
+
+    for i, chunk in enumerate(chunks):
+        await message.answer(
+            chunk,
+            reply_markup=user_keyboard() if i == len(chunks) - 1 else None,
+        )
+        await asyncio.sleep(0.05)
 
 
 # =========================================================
@@ -6243,7 +6462,13 @@ async def stats_feedback_callback(callback: CallbackQuery, bot: Bot):
                         text="✅ بسته‌شد",
                         callback_data=f"fb_close:{row['id']}",
                     ),
-                ]
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👤 مشاهده کاربر",
+                        callback_data=f"fb_user:{row['user_id']}",
+                    ),
+                ],
             ]
         )
         try:
@@ -9265,18 +9490,57 @@ async def handle_state(
         if not db.is_owner(user_id):
             clear_state(user_id)
             return True
-        raw = (text or "").strip().lstrip("#")
-        if not raw.isdigit():
-            await message.answer("❌ فقط آیدی عددی پیام را بفرست (مثلاً 389).")
-            return True
-        mid = int(raw)
-        try:
-            row = await asyncio.to_thread(db.get_message, mid)
-        except Exception:
-            row = None
-        if not row:
-            await message.answer("❌ پیامی با این آیدی پیدا نشد.")
-            return True
+        raw = (text or "").strip()
+        mid = None
+        row = None
+
+        # لینک کانال: https://t.me/xxx/123 یا https://t.me/c/123/456
+        link_m = re.search(
+            r"(?:https?://)?t\.me/(?:c/(\d+)/(\d+)|([A-Za-z0-9_]+)/(\d+))",
+            raw,
+        )
+        if link_m:
+            if link_m.group(1) and link_m.group(2):
+                # t.me/c/internal_id/msg_id
+                post_id = int(link_m.group(2))
+            else:
+                post_id = int(link_m.group(4))
+            try:
+                row = await db_fetchone(
+                    """
+                    SELECT * FROM messages
+                    WHERE channel_message_id = ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (post_id,),
+                )
+            except Exception:
+                logger.exception("SEARCH BY CHANNEL MSG ID ERROR")
+                row = None
+            if not row:
+                await message.answer(
+                    "❌ پیامی با این لینک در دیتابیس پیدا نشد.\n"
+                    "فقط پست‌هایی که از طریق ربات منتشر شده‌اند قابل جستجو هستند."
+                )
+                return True
+            mid = int(row["id"])
+        else:
+            raw_id = raw.lstrip("#")
+            if not raw_id.isdigit():
+                await message.answer(
+                    "❌ آیدی عددی پیام یا لینک پست کانال را بفرست.\n\n"
+                    "مثال:\n389\nhttps://t.me/callMeArail/82174"
+                )
+                return True
+            mid = int(raw_id)
+            try:
+                row = await asyncio.to_thread(db.get_message, mid)
+            except Exception:
+                row = None
+            if not row:
+                await message.answer("❌ پیامی با این آیدی پیدا نشد.")
+                return True
+
         clear_state(user_id)
         st = row["status"]
         ch = row["channel_key"] or DEFAULT_CHANNEL_KEY
@@ -9306,35 +9570,48 @@ async def handle_state(
         body = (
             f"🔎 نتیجه جستجوی پیام\n\n"
             f"🆔 آیدی پیام: #{mid}\n"
-            f"👤 فرستنده: {sender_name}\n"
+            f"👤 فرستنده: {escape(sender_name)}\n"
             f"🔢 آیدی فرستنده: <code>{sender}</code>\n"
             f"📺 کانال: {ch_title}\n"
             f"🕐 زمان ارسال: {format_dt_fa(row['submitted_at'])}\n"
             f"📌 وضعیت: {_status_label_fa(st)}\n"
-            f"👨‍💼 ادمین دریافت‌کننده: {admin_info}\n"
+            f"👨‍💼 ادمین: {escape(str(admin_info))}\n"
         )
         if st == "rejected" and row["reject_reason"]:
-            body += f"📋 دلیل رد: {row['reject_reason']}\n"
-        body += f"\n📝 متن پیام:\n{escape(content)}"
+            body += f"📋 دلیل رد: {escape(row['reject_reason'])}\n"
+        body += f"\n📝 متن:\n{escape(content)}"
 
-        extra_kb = None
+        kb_rows = [
+            [
+                _btn(
+                    "👨‍💼 مشاهده ادمین تأیید/ردکننده",
+                    f"msg_admin:{mid}",
+                    style="primary",
+                )
+            ],
+            [
+                _btn(
+                    "👤 کاربر ارسال‌کننده",
+                    f"msg_sender:{mid}",
+                    style="primary",
+                )
+            ],
+        ]
         if st in ("pending", "queued", "processing"):
-            extra_kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        _btn(
-                            "✅ تأیید و انتشار",
-                            f"approve:{mid}",
-                            style="success",
-                        )
-                    ]
+            kb_rows.append(
+                [
+                    _btn(
+                        "✅ تأیید و انتشار",
+                        f"approve:{mid}",
+                        style="success",
+                    )
                 ]
             )
 
         await message.answer(
             body,
             parse_mode=ParseMode.HTML,
-            reply_markup=extra_kb,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
         )
         await message.answer(
             "پنل مالک:",
@@ -10438,6 +10715,21 @@ async def _fetch_log_window(since: str | None, until: str | None):
         """,
         tuple(params),
     )
+    # اگر با فیلتر زمان چیزی نیامد، بدون فیلتر زمانی آخرین پیام‌ها را بردار (fallback)
+    if not messages and (since_n or until_n):
+        logger.warning(
+            "LOG WINDOW EMPTY | since=%s until=%s — fallback last 500",
+            since_n,
+            until_n,
+        )
+        messages = await db_fetchall(
+            """
+            SELECT * FROM messages
+            ORDER BY id DESC
+            LIMIT 500
+            """
+        )
+        messages = list(reversed(messages or []))
 
     # شیفت‌های مرتبط با بازه (بر اساس specific_date یا همه permanent)
     shifts = await db_fetchall(
@@ -10485,28 +10777,36 @@ def _build_log_txt(
     lines.append("")
 
     lines.append("──────── پیام‌های کاربران / User Messages ────────")
+    lines.append(f"تعداد / Count: {len(messages) if messages else 0}")
     lines.append("")
     if not messages:
         lines.append("(خالی / empty)")
     for m in messages:
-        mid = m["id"]
-        uid = m["user_id"]
-        st = m["status"]
-        ch = m["channel_key"] or DEFAULT_CHANNEL_KEY
+        def _g(key, default=None):
+            try:
+                v = m[key]
+                return default if v is None else v
+            except Exception:
+                return default
+
+        mid = _g("id", "?")
+        uid = _g("user_id", "-")
+        st = str(_g("status", "") or "")
+        ch = _g("channel_key") or DEFAULT_CHANNEL_KEY
         ch_title = CHANNELS.get(ch, {}).get("title", ch)
-        admin_id = m["admin_id"]
-        content = (m["content"] or "").replace("\n", " ")
+        admin_id = _g("admin_id", "-")
+        content = str(_g("content", "") or "").replace("\n", " ").strip()
         if len(content) > 200:
             content = content[:200] + "…"
         lines.append(f"#{mid}")
         lines.append(f"  FA | وضعیت: {_status_label_fa(st)} | کانال: {ch_title}")
         lines.append(f"  EN | Status: {_status_label_en(st)} | Channel: {ch}")
         lines.append(f"  Sender ID / ایدی فرستنده: {uid}")
-        lines.append(f"  Admin received / ادمین دریافت‌کننده: {admin_id or '-'}")
-        lines.append(f"  Time / زمان: {format_dt_fa(m['submitted_at'])}")
-        if st == "rejected" and m["reject_reason"]:
-            lines.append(f"  Reject reason / دلیل رد: {m['reject_reason']}")
-        lines.append(f"  Text / متن: {content}")
+        lines.append(f"  Admin / ادمین: {admin_id}")
+        lines.append(f"  Time / زمان: {format_dt_fa(_g('submitted_at'))}")
+        if st == "rejected" and _g("reject_reason"):
+            lines.append(f"  Reject reason / دلیل رد: {_g('reject_reason')}")
+        lines.append(f"  Text / متن: {content or '(بدون متن)'}")
         lines.append("")
 
     lines.append("──────── شیفت‌ها و فعالیت ادمین / Shifts & Admin Activity ────────")
@@ -11109,7 +11409,8 @@ async def search_msg_start(callback: CallbackQuery):
     set_state(callback.from_user.id, "search_message")
     await callback.answer()
     await callback.message.answer(
-        "🔎 آیدی عددی پیام را بفرست (مثلاً 389):",
+        "🔎 آیدی پیام یا لینک پست کانال را بفرست.\n\n"
+        "مثال:\n389\nhttps://t.me/callMeArail/82174",
         reply_markup=back_keyboard(),
     )
 
