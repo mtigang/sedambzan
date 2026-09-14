@@ -2478,12 +2478,15 @@ async def show_home(
     F.chat.type.in_({
         "group",
         "supergroup",
-    })
+    }),
+    F.text,
+    ~F.text.startswith("/"),
 )
 async def group_router(
     message: Message,
     bot: Bot,
 ):
+    # دستورات مثل /shift توسط handlerهای Command جداگانه پردازش می‌شوند
 
     text = message.text or ""
     user = message.from_user
@@ -2962,88 +2965,6 @@ async def group_shift_command(message: Message, bot: Bot):
     except Exception:
         try:
             await message.answer(text_out)
-        except Exception:
-            pass
-
-
-@router.message(
-    Command("shift"),
-    F.chat.type.in_({"group", "supergroup"}),
-)
-async def group_shift_command(message: Message, bot: Bot):
-    """
-    /shift یا /shift@BotName در گروه شیفت کانال مربوطه.
-    لیست شیفت‌های همان روز همان کانال را نشان می‌دهد (با آخرین تعویض‌ها).
-    """
-    ch = channel_key_for_group(message.chat.id)
-    if not ch:
-        try:
-            await message.reply(
-                "این گروه به هیچ‌کدام از کانال‌های ربات وصل نیست."
-            )
-        except Exception:
-            pass
-        return
-
-    today = today_string()
-    title = CHANNELS.get(ch, {}).get("title", ch)
-    try:
-        rows = await db_fetchall(
-            """
-            SELECT s.*, a.name AS admin_name
-            FROM shifts s
-            LEFT JOIN admins a ON a.user_id = s.admin_id
-            WHERE (
-                    s.specific_date = ?
-                    OR (s.permanent = 1 AND (s.specific_date IS NULL OR s.specific_date = ''))
-                  )
-              AND (
-                    s.channel_key = ?
-                    OR (? = ? AND (s.channel_key IS NULL OR s.channel_key = ''))
-                  )
-            ORDER BY s.start_time ASC
-            LIMIT 40
-            """,
-            (today, ch, ch, DEFAULT_CHANNEL_KEY),
-        )
-    except Exception:
-        logger.exception("GROUP SHIFT COMMAND ERROR | ch=%s", ch)
-        try:
-            await message.reply(GENERIC_ERROR)
-        except Exception:
-            pass
-        return
-
-    lines = [
-        f"⏰ شیفت‌های امروز — «{title}»",
-        f"📅 {format_dt_fa(today)}",
-        "━━━━━━━━━━━━━━",
-        "",
-    ]
-    if not rows:
-        lines.append("برای امروز شیفتی ثبت نشده.")
-    else:
-        # شیفت فعال فعلی
-        current = await get_current_shift_safe_async(channel_key=ch)
-        active_id = int(current[0]["id"]) if current else None
-        for s in rows:
-            name = s["admin_name"] or await get_profile_name(bot, s["admin_id"])
-            mark = "🟢" if active_id and int(s["id"]) == active_id else "▫️"
-            lines.append(
-                f"{mark} {s['start_time']}–{s['end_time']}\n"
-                f"   👤 {name}"
-            )
-            lines.append("")
-        lines.append("🟢 = شیفت فعال الان")
-
-    text = "\n".join(lines)
-    if len(text) > 3500:
-        text = text[:3500] + "\n…"
-    try:
-        await message.reply(text)
-    except Exception:
-        try:
-            await message.answer(text)
         except Exception:
             pass
 
