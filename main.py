@@ -586,6 +586,22 @@ def ensure_runtime_schema():
         """
     )
 
+    # درخواست تعویض شیفت بین ادمین‌ها
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shift_swaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            requester_id INTEGER NOT NULL,
+            target_admin_id INTEGER NOT NULL,
+            requester_shift_id INTEGER NOT NULL,
+            target_shift_id INTEGER NOT NULL,
+            channel_key TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
     conn.commit()
 
 
@@ -1481,9 +1497,9 @@ def _gregorian_to_jalali(gy: int, gm: int, gd: int) -> tuple[int, int, int]:
 
 def format_dt_fa(value) -> str:
     """
-    هر تاریخ/زمانی را مرتب و شمسی می‌کند.
+    هر تاریخ/زمانی را مرتب و شمسی می‌کند (به وقت محلی ربات).
     ورودی: datetime یا رشته ISO مثل 2026-09-12T20:24:32
-    خروجی نمونه: ۱ شهریور ۱۴۰۵ — ۲۰:۲۴
+    خروجی نمونه: ۲۳ شهریور ۱۴۰۵ — ۱۲:۴۹
     """
     if value is None or value == "":
         return "—"
@@ -1493,6 +1509,8 @@ def format_dt_fa(value) -> str:
     else:
         s = str(value).strip().replace("T", " ").replace("Z", "")
         s = s.split(".")[0]
+        if "+" in s[10:]:
+            s = s.split("+", 1)[0].strip()
         for fmt in (
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M",
@@ -1507,10 +1525,19 @@ def format_dt_fa(value) -> str:
                 continue
     if dt is None:
         return str(value)
+    # زمان ذخیره‌شده در DB معمولاً UTC است → تبدیل به منطقه زمانی ربات
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(TZ)
+        else:
+            dt = dt.astimezone(TZ)
+    except Exception:
+        pass
     jy, jm, jd = _gregorian_to_jalali(dt.year, dt.month, dt.day)
     month = _JALALI_MONTHS[jm - 1]
-    # ارقام فارسی اختیاری نیست؛ خوانا با اعداد معمول
-    if dt.hour or dt.minute or dt.second or (" " in str(value) or "T" in str(value)):
+    if dt.hour or dt.minute or dt.second or (
+        isinstance(value, str) and (" " in value or "T" in value)
+    ):
         return f"{jd} {month} {jy} — {dt.hour:02d}:{dt.minute:02d}"
     return f"{jd} {month} {jy}"
 
@@ -2150,6 +2177,14 @@ def admin_keyboard():
             ],
             [
                 KeyboardButton(
+                    text="🟢 انتخاب شیفت"
+                ),
+                KeyboardButton(
+                    text="🔄 درخواست تغییر شیفت"
+                ),
+            ],
+            [
+                KeyboardButton(
                     text="📊 عملکرد من"
                 ),
                 KeyboardButton(
@@ -2157,9 +2192,6 @@ def admin_keyboard():
                 ),
             ],
             [
-                KeyboardButton(
-                    text="🔄 درخواست تغییر شیفت"
-                ),
                 KeyboardButton(
                     text="❓ راهنما"
                 ),
@@ -3049,34 +3081,54 @@ async def owner_feedback_view_user(callback: CallbackQuery, bot: Bot):
             uname = "—"
     except Exception:
         uname = "—"
+    cutoff = (local_now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        msgs = db.get_user_messages(target, 100)
-    except TypeError:
-        msgs = db.get_user_messages(target)
+        msgs = await db_fetchall(
+            """
+            SELECT * FROM messages
+            WHERE user_id = ?
+              AND REPLACE(REPLACE(COALESCE(submitted_at,''), 'T', ' '), 'Z', '') >= ?
+            ORDER BY id DESC
+            LIMIT 200
+            """,
+            (target, cutoff),
+        )
     except Exception:
         msgs = []
-    lines = [
-        f"👤 کاربر",
-        f"نام: {escape(name)}",
-        f"یوزرنیم: {escape(uname)}",
-        f"آیدی: <code>{target}</code>",
-        f"تعداد پیام: {len(msgs) if msgs else 0}",
-        "",
-        "📋 پیام‌ها:",
-    ]
+    header = (
+        f"👤 کاربر\n"
+        f"نام: {escape(name)}\n"
+        f"یوزرنیم: {escape(uname)}\n"
+        f"آیدی: <code>{target}</code>\n"
+        f"تعداد پیام (۱۰ روز): {len(msgs) if msgs else 0}\n\n"
+        "📋 پیام‌ها:"
+    )
+    await callback.message.answer(header, parse_mode=ParseMode.HTML)
     if not msgs:
-        lines.append("پیامی ثبت نشده.")
-    else:
-        for m in msgs[:50]:
-            st = _status_label_fa(m["status"])
-            preview = (m["content"] or "")[:60].replace("\n", " ")
-            lines.append(f"#{m['id']} | {st}")
-            if preview:
-                lines.append(f"  {escape(preview)}")
-    text = "\n".join(lines)
-    if len(text) > 3500:
-        text = text[:3500] + "\n…"
-    await callback.message.answer(text, parse_mode=ParseMode.HTML)
+        await callback.message.answer("پیامی در ۱۰ روز اخیر نیست.")
+        return
+    buf: list[str] = []
+    size = 0
+    for m in msgs:
+        st = _status_label_fa(m["status"])
+        content = (m["content"] or "").strip()
+        # متن کامل؛ در چند پیام تقسیم می‌شود
+        piece = (
+            f"#{m['id']} | {st}\n"
+            f"🕐 {format_dt_fa(m['submitted_at'])}\n"
+            f"{escape(content)}\n"
+            f"────────────"
+        )
+        if size + len(piece) > 3500 and buf:
+            await callback.message.answer("\n".join(buf), parse_mode=ParseMode.HTML)
+            buf = [piece]
+            size = len(piece)
+            await asyncio.sleep(0.05)
+        else:
+            buf.append(piece)
+            size += len(piece)
+    if buf:
+        await callback.message.answer("\n".join(buf), parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data.startswith("msg_admin:"))
@@ -3304,18 +3356,30 @@ async def owner_feedback_close(
 async def user_status(
     message: Message,
 ):
-    # همه پیام‌های کاربر (سقف منطقی برای تلگرام)
+    # پیام‌های ۱۰ روز اخیر کاربر (بعد از ۱۰ روز از DB پاک می‌شوند)
+    cutoff = (local_now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        rows = db.get_user_messages(
-            message.from_user.id,
-            200,
+        rows = await db_fetchall(
+            """
+            SELECT *
+            FROM messages
+            WHERE user_id = ?
+              AND REPLACE(REPLACE(COALESCE(submitted_at,''), 'T', ' '), 'Z', '') >= ?
+            ORDER BY id DESC
+            LIMIT 300
+            """,
+            (message.from_user.id, cutoff),
         )
-    except TypeError:
-        rows = db.get_user_messages(message.from_user.id)
+    except Exception:
+        logger.exception("USER STATUS LOAD ERROR")
+        try:
+            rows = db.get_user_messages(message.from_user.id, 200)
+        except Exception:
+            rows = []
 
     if not rows:
         await message.answer(
-            "📊 هنوز پیامی ارسال نکرده‌ای.",
+            "📊 در ۱۰ روز اخیر پیامی ثبت نشده.",
             reply_markup=user_keyboard(),
         )
         return
@@ -3329,14 +3393,15 @@ async def user_status(
     }
 
     chunks: list[str] = []
-    lines = [f"📊 پیام‌های شما ({len(rows)} مورد)\n"]
+    lines = [f"📊 پیام‌های ۱۰ روز اخیر ({len(rows)} مورد)\n"]
 
     for row in rows:
         status = status_map.get(row["status"], row["status"])
         block = [f"#{row['id']} | {status}"]
         content = (row["content"] or "").strip()
         if content:
-            preview = content if len(content) <= 100 else content[:100] + "…"
+            # متن کامل‌تر؛ تکه تکه در چند پیام
+            preview = content if len(content) <= 400 else content[:400] + "…"
             block.append(preview)
         if row["status"] == "rejected" and row["reject_reason"]:
             block.append(f"دلیل: {row['reject_reason']}")
@@ -3344,7 +3409,6 @@ async def user_status(
             block.append(f"🕐 {format_dt_fa(row['submitted_at'])}")
         block.append("────────────")
         piece = "\n".join(block)
-        # اگر از سقف پیام تلگرام رد شد، بفرست و از نو
         if sum(len(x) for x in lines) + len(piece) > 3500:
             chunks.append("\n".join(lines))
             lines = [piece]
@@ -4955,6 +5019,14 @@ async def owner_shifts_channel_callback(
     buttons.append(
         [
             InlineKeyboardButton(
+                text="📅 شیفت‌های ۷ روز گذشته",
+                callback_data=f"shifts_hist:{key}",
+            )
+        ]
+    )
+    buttons.append(
+        [
+            InlineKeyboardButton(
                 text="➕ ایجاد شیفت",
                 callback_data=f"shift:add:{key}",
             )
@@ -4981,6 +5053,63 @@ async def owner_shifts_channel_callback(
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         )
+
+
+@router.callback_query(F.data.startswith("shifts_hist:"))
+async def owner_shifts_history(callback: CallbackQuery, bot: Bot):
+    if not await asyncio.to_thread(db.is_owner, callback.from_user.id):
+        await callback.answer("⛔ فقط مالک.", show_alert=True)
+        return
+    key = callback.data.split(":", 1)[1]
+    if key not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    await callback.answer()
+    title = CHANNELS[key]["title"]
+    from_date = (local_now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    today = today_string()
+    try:
+        rows = await db_fetchall(
+            """
+            SELECT s.*, a.name AS admin_name
+            FROM shifts s
+            LEFT JOIN admins a ON a.user_id = s.admin_id
+            WHERE s.permanent = 0
+              AND s.specific_date IS NOT NULL
+              AND s.specific_date != ''
+              AND s.specific_date >= ?
+              AND s.specific_date < ?
+              AND (
+                    s.channel_key = ?
+                    OR (? = ? AND (s.channel_key IS NULL OR s.channel_key = ''))
+                  )
+            ORDER BY s.specific_date DESC, s.start_time ASC
+            LIMIT 80
+            """,
+            (from_date, today, key, key, DEFAULT_CHANNEL_KEY),
+        )
+    except Exception:
+        logger.exception("SHIFTS HIST ERROR")
+        rows = []
+    lines = [
+        f"📅 شیفت‌های ۷ روز گذشته — «{title}»",
+        f"از {format_dt_fa(from_date)} تا قبل از امروز",
+        "━━━━━━━━━━━━━━",
+        "",
+    ]
+    if not rows:
+        lines.append("موردی ثبت نشده.")
+    else:
+        for s in rows:
+            name = s["admin_name"] or s["admin_id"]
+            lines.append(
+                f"#{s['id']} | 📅 {s['specific_date']}\n"
+                f"👤 {name} | ⏰ {s['start_time']}–{s['end_time']}\n"
+            )
+    text = "\n".join(lines)
+    if len(text) > 3500:
+        text = text[:3500] + "\n…"
+    await callback.message.answer(text)
 
 
 @router.callback_query(
@@ -6037,21 +6166,625 @@ async def notification_callback(
 async def shift_request_start(
     message: Message,
 ):
-
-    if not db.get_admin(
-        message.from_user.id
-    ):
+    """درخواست تعویض شیفت — انتخاب کانال → شیفت‌ها → ارسال به طرف مقابل."""
+    uid = message.from_user.id
+    if not db.get_admin(uid):
         return
 
-    set_state(
-        message.from_user.id,
-        "shift_request",
+    # فقط یک درخواست باز
+    try:
+        open_req = await db_fetchone(
+            """
+            SELECT id FROM shift_swaps
+            WHERE requester_id = ? AND status = 'pending'
+            LIMIT 1
+            """,
+            (uid,),
+        )
+    except Exception:
+        open_req = None
+    if open_req:
+        await message.answer(
+            "⚠️ شما یک درخواست باز دارید.\n"
+            "تا تعیین‌تکلیف آن، درخواست جدید ممکن نیست.",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    keys = admin_channel_keys(uid)
+    if not keys:
+        await message.answer("❌ کانالی برای شما ثبت نشده.")
+        return
+    if len(keys) == 1:
+        # مستقیم لیست شیفت‌های کانال
+        await _show_swap_shifts_for_channel(message, uid, keys[0])
+        return
+    rows = [
+        [
+            _btn(
+                CHANNELS[k]["title"],
+                f"swap_ch:{k}",
+                style="primary",
+            )
+        ]
+        for k in keys
+    ]
+    await message.answer(
+        "🔄 تغییر شیفت برای کدام کانال؟",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
+
+async def _show_swap_shifts_for_channel(message: Message, uid: int, ch: str):
+    today = today_string()
+    my = get_admin_shifts_for_date_channel(uid, today, ch) or []
+    try:
+        others = await db_fetchall(
+            """
+            SELECT s.*, a.name AS admin_name
+            FROM shifts s
+            LEFT JOIN admins a ON a.user_id = s.admin_id
+            WHERE s.admin_id != ?
+              AND (
+                    s.specific_date = ?
+                    OR (s.permanent = 1 AND (s.specific_date IS NULL OR s.specific_date = ''))
+                  )
+              AND (
+                    s.channel_key = ?
+                    OR (? = ? AND (s.channel_key IS NULL OR s.channel_key = ''))
+                  )
+            ORDER BY s.start_time ASC
+            """,
+            (uid, today, ch, ch, DEFAULT_CHANNEL_KEY),
+        )
+    except Exception:
+        others = []
+
+    if not my:
+        await message.answer(
+            "شیفتی برای امروز در این کانال ندارید.",
+            reply_markup=admin_keyboard(),
+        )
+        return
+    if not others:
+        await message.answer(
+            "شیفت دیگری برای تعویض در این کانال امروز نیست.",
+            reply_markup=admin_keyboard(),
+        )
+        return
+
+    lines = [
+        f"🔄 تعویض شیفت — {CHANNELS.get(ch, {}).get('title', ch)}",
+        "اول شیفت خودت را انتخاب کن:",
+        "",
+    ]
+    kb = []
+    for s in my:
+        lines.append(
+            f"شیفت شما #{s['id']}: {s['start_time']}–{s['end_time']}"
+        )
+        kb.append(
+            [
+                _btn(
+                    f"من: {s['start_time']}–{s['end_time']}",
+                    f"swap_my:{ch}:{s['id']}",
+                    style="primary",
+                )
+            ]
+        )
     await message.answer(
-        "🔄 توضیح درخواست تغییر شیفت را بنویس.",
-        reply_markup=back_keyboard(),
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
     )
+
+
+@router.callback_query(F.data.startswith("swap_ch:"))
+async def swap_channel_pick(callback: CallbackQuery):
+    if not db.get_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+    ch = callback.data.split(":", 1)[1]
+    if ch not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    await callback.answer()
+    await _show_swap_shifts_for_channel(
+        callback.message, callback.from_user.id, ch
+    )
+
+
+@router.callback_query(F.data.startswith("swap_my:"))
+async def swap_my_shift_pick(callback: CallbackQuery):
+    if not db.get_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    ch, my_sid = parts[1], int(parts[2])
+    await callback.answer()
+    today = today_string()
+    uid = callback.from_user.id
+    try:
+        others = await db_fetchall(
+            """
+            SELECT s.*, a.name AS admin_name
+            FROM shifts s
+            LEFT JOIN admins a ON a.user_id = s.admin_id
+            WHERE s.admin_id != ?
+              AND (
+                    s.specific_date = ?
+                    OR (s.permanent = 1 AND (s.specific_date IS NULL OR s.specific_date = ''))
+                  )
+              AND (
+                    s.channel_key = ?
+                    OR (? = ? AND (s.channel_key IS NULL OR s.channel_key = ''))
+                  )
+            ORDER BY s.start_time ASC
+            """,
+            (uid, today, ch, ch, DEFAULT_CHANNEL_KEY),
+        )
+    except Exception:
+        others = []
+    if not others:
+        await callback.message.answer("شیفت دیگری برای تعویض نیست.")
+        return
+    kb = []
+    lines = ["حالا شیفت طرف مقابل را انتخاب کن:"]
+    for s in others:
+        name = s["admin_name"] or s["admin_id"]
+        lines.append(
+            f"#{s['id']} | {name} | {s['start_time']}–{s['end_time']}"
+        )
+        kb.append(
+            [
+                _btn(
+                    f"{name}: {s['start_time']}–{s['end_time']}",
+                    f"swap_req:{ch}:{my_sid}:{s['id']}",
+                    style="primary",
+                )
+            ]
+        )
+    await callback.message.answer(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+    )
+
+
+@router.callback_query(F.data.startswith("swap_req:"))
+async def swap_send_request(callback: CallbackQuery, bot: Bot):
+    if not db.get_admin(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    ch, my_sid, their_sid = parts[1], int(parts[2]), int(parts[3])
+    uid = callback.from_user.id
+    # یک درخواست باز
+    open_req = await db_fetchone(
+        "SELECT id FROM shift_swaps WHERE requester_id = ? AND status = 'pending' LIMIT 1",
+        (uid,),
+    )
+    if open_req:
+        await callback.answer("درخواست باز دارید.", show_alert=True)
+        return
+    my_sh = await asyncio.to_thread(db.get_shift, my_sid) if hasattr(db, "get_shift") else None
+    if not my_sh:
+        my_sh = await db_fetchone("SELECT * FROM shifts WHERE id = ?", (my_sid,))
+    their_sh = await db_fetchone("SELECT * FROM shifts WHERE id = ?", (their_sid,))
+    if not my_sh or not their_sh:
+        await callback.answer("شیفت پیدا نشد.", show_alert=True)
+        return
+    if int(my_sh["admin_id"]) != uid:
+        await callback.answer("این شیفت مال شما نیست.", show_alert=True)
+        return
+    target_admin = int(their_sh["admin_id"])
+    await db_execute(
+        """
+        INSERT INTO shift_swaps
+        (requester_id, target_admin_id, requester_shift_id, target_shift_id, channel_key, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?)
+        """,
+        (
+            uid,
+            target_admin,
+            my_sid,
+            their_sid,
+            ch,
+            local_now().strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+    await db_commit()
+    row = await db_fetchone(
+        "SELECT id FROM shift_swaps WHERE requester_id = ? ORDER BY id DESC LIMIT 1",
+        (uid,),
+    )
+    swap_id = row["id"] if row else 0
+    await callback.answer("درخواست ارسال شد.")
+    req_name = await get_profile_name(bot, uid)
+    try:
+        await bot.send_message(
+            target_admin,
+            (
+                f"🔄 درخواست تعویض شیفت\n\n"
+                f"از: {req_name} (`{uid}`)\n"
+                f"کانال: {CHANNELS.get(ch, {}).get('title', ch)}\n"
+                f"شیفت او: {my_sh['start_time']}–{my_sh['end_time']}\n"
+                f"شیفت شما: {their_sh['start_time']}–{their_sh['end_time']}\n\n"
+                "اگر موافقید تأیید کنید."
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        _btn("✅ تأیید تعویض", f"swap_ok:{swap_id}", style="success"),
+                        _btn("❌ رد", f"swap_no:{swap_id}", style="danger"),
+                    ]
+                ]
+            ),
+        )
+    except Exception:
+        logger.exception("SWAP NOTIFY ERROR")
+        await callback.message.answer("درخواست ثبت شد ولی اطلاع به طرف مقابل ناموفق بود.")
+        return
+    await callback.message.answer(
+        "✅ درخواست تعویض ارسال شد. منتظر پاسخ طرف مقابل بمانید.\n"
+        "(فقط یک درخواست همزمان مجاز است)",
+        reply_markup=admin_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("swap_ok:"))
+async def swap_accept(callback: CallbackQuery, bot: Bot):
+    try:
+        swap_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer()
+        return
+    row = await db_fetchone(
+        "SELECT * FROM shift_swaps WHERE id = ? AND status = 'pending'",
+        (swap_id,),
+    )
+    if not row:
+        await callback.answer("درخواست معتبر نیست.", show_alert=True)
+        return
+    if int(row["target_admin_id"]) != callback.from_user.id:
+        await callback.answer("⛔ فقط گیرنده می‌تواند تأیید کند.", show_alert=True)
+        return
+    my_sid = int(row["requester_shift_id"])
+    their_sid = int(row["target_shift_id"])
+    requester = int(row["requester_id"])
+    target = int(row["target_admin_id"])
+    # جابجایی admin_id
+    try:
+        await db_execute(
+            "UPDATE shifts SET admin_id = ? WHERE id = ?",
+            (target, my_sid),
+        )
+        await db_execute(
+            "UPDATE shifts SET admin_id = ? WHERE id = ?",
+            (requester, their_sid),
+        )
+        await db_execute(
+            "UPDATE shift_swaps SET status = 'accepted' WHERE id = ?",
+            (swap_id,),
+        )
+        await db_commit()
+    except Exception:
+        logger.exception("SWAP APPLY ERROR")
+        await callback.answer("خطا در جابجایی.", show_alert=True)
+        return
+    await callback.answer("تعویض انجام شد.")
+    try:
+        await callback.message.edit_text("✅ تعویض شیفت تأیید و اعمال شد.")
+    except Exception:
+        pass
+    try:
+        await bot.send_message(
+            requester,
+            "✅ درخواست تعویض شیفت تأیید شد و شیفت‌ها جابه‌جا شدند.",
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("swap_no:"))
+async def swap_reject(callback: CallbackQuery, bot: Bot):
+    try:
+        swap_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer()
+        return
+    row = await db_fetchone(
+        "SELECT * FROM shift_swaps WHERE id = ? AND status = 'pending'",
+        (swap_id,),
+    )
+    if not row:
+        await callback.answer("معتبر نیست.", show_alert=True)
+        return
+    if int(row["target_admin_id"]) != callback.from_user.id:
+        await callback.answer("⛔", show_alert=True)
+        return
+    await db_execute(
+        "UPDATE shift_swaps SET status = 'rejected' WHERE id = ?",
+        (swap_id,),
+    )
+    await db_commit()
+    await callback.answer("رد شد.")
+    try:
+        await callback.message.edit_text("❌ درخواست تعویض رد شد.")
+    except Exception:
+        pass
+    try:
+        await bot.send_message(
+            int(row["requester_id"]),
+            "❌ درخواست تعویض شیفت شما رد شد.",
+        )
+    except Exception:
+        pass
+
+
+# =========================================================
+# ADMIN PRIVATE SHIFT SELECT
+# =========================================================
+
+@router.message(
+    F.text == "🟢 انتخاب شیفت",
+    F.chat.type == "private",
+)
+async def admin_priv_shift_start(message: Message):
+    uid = message.from_user.id
+    if not db.get_admin(uid) and not db.is_owner(uid):
+        return
+    keys = admin_channel_keys(uid)
+    if not keys:
+        await message.answer("❌ کانالی برای شما ثبت نشده.")
+        return
+    if len(keys) == 1:
+        await _priv_shift_show_dates(message, keys[0])
+        return
+    rows = [
+        [_btn(CHANNELS[k]["title"], f"priv_ch:{k}", style="primary")]
+        for k in keys
+    ]
+    await message.answer(
+        "🟢 انتخاب شیفت برای کدام کانال؟",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("priv_ch:"))
+async def priv_shift_channel(callback: CallbackQuery):
+    if not db.get_admin(callback.from_user.id) and not db.is_owner(
+        callback.from_user.id
+    ):
+        await callback.answer("⛔", show_alert=True)
+        return
+    ch = callback.data.split(":", 1)[1]
+    if ch not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    await callback.answer()
+    await _priv_shift_show_dates(callback.message, ch)
+
+
+async def _priv_shift_show_dates(message: Message, ch: str):
+    now = local_now()
+    today = today_string()
+    tomorrow = (now.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+    rows = [
+        [
+            _btn(
+                f"📅 امروز ({format_dt_fa(today)})",
+                f"priv_day:{ch}:today",
+                style="primary",
+            )
+        ]
+    ]
+    # فقط از ساعت ۲۲ به بعد می‌تواند فردا را انتخاب کند
+    if now.hour >= 22:
+        rows.append(
+            [
+                _btn(
+                    f"📅 فردا ({format_dt_fa(tomorrow)})",
+                    f"priv_day:{ch}:tmr",
+                    style="primary",
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔒 فردا (فقط از ۲۲:۰۰)",
+                    callback_data="priv_day:locked",
+                )
+            ]
+        )
+    await message.answer(
+        f"🟢 انتخاب شیفت — {CHANNELS[ch]['title']}\n"
+        "روز موردنظر را انتخاب کن:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("priv_day:"))
+async def priv_shift_day(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) < 2:
+        await callback.answer()
+        return
+    if parts[1] == "locked":
+        await callback.answer(
+            "انتخاب شیفت فردا فقط از ساعت ۲۲:۰۰ ممکن است.",
+            show_alert=True,
+        )
+        return
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    ch, mode = parts[1], parts[2]
+    if ch not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    if not db.get_admin(callback.from_user.id) and not db.is_owner(
+        callback.from_user.id
+    ):
+        await callback.answer("⛔", show_alert=True)
+        return
+    now = local_now()
+    if mode == "tmr":
+        if now.hour < 22:
+            await callback.answer(
+                "انتخاب فردا فقط از ۲۲:۰۰.",
+                show_alert=True,
+            )
+            return
+        for_date = (now.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+        for_tomorrow = True
+    else:
+        for_date = today_string()
+        for_tomorrow = False
+    await callback.answer()
+    kb = group_shift_hourly_keyboard(
+        for_date=for_date,
+        for_tomorrow=for_tomorrow,
+        channel_key=ch,
+    )
+    # جایگزین callbackهای گروهی با priv
+    # چون keyboard از group_shift استفاده می‌کند، handler گروهی group را چک می‌کند
+    # پس دکمه‌های priv جدا می‌سازیم:
+    existing = get_shift_ranges_for_date(for_date, channel_key=ch)
+    SHIFT_START_HOUR, SHIFT_END_HOUR = channel_hours(ch)
+    buttons = []
+    hours_range = range(SHIFT_START_HOUR, SHIFT_END_HOUR)
+    if not for_tomorrow and now.hour >= SHIFT_START_HOUR:
+        start_h = now.hour + (1 if now.minute > 0 else 0)
+        hours_range = range(max(start_h, SHIFT_START_HOUR), SHIFT_END_HOUR)
+    for hour in hours_range:
+        start_time = f"{hour:02d}:00"
+        end_time = f"{(hour + 1) % 24:02d}:00"
+        blocked = any(
+            _ranges_overlap(start_time, end_time, es, ee)
+            for es, ee in existing
+        )
+        if blocked:
+            buttons.append(
+                [
+                    _btn(
+                        f"🔴 {start_time}–{end_time}",
+                        "priv_taken",
+                        style="danger",
+                    )
+                ]
+            )
+        else:
+            buttons.append(
+                [
+                    _btn(
+                        f"🟢 {start_time}–{end_time}",
+                        f"priv_time:{ch}:{for_date}:{start_time}-{end_time}",
+                        style="success",
+                    )
+                ]
+            )
+    if not buttons:
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    text="⛔ بازه خالی نیست",
+                    callback_data="priv_taken",
+                )
+            ]
+        ]
+    await callback.message.answer(
+        f"ساعت شیفت را انتخاب کن\n📅 {format_dt_fa(for_date)}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data == "priv_taken")
+async def priv_taken_cb(callback: CallbackQuery):
+    await callback.answer("این بازه پر است.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("priv_time:"))
+async def priv_time_pick(callback: CallbackQuery, bot: Bot):
+    # priv_time:ch:YYYY-MM-DD:HH:MM-HH:MM
+    data = callback.data
+    try:
+        rest = data[len("priv_time:") :]
+        ch, for_date, rng = rest.split(":", 2)
+        start, end = rng.split("-", 1)
+    except Exception:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    uid = callback.from_user.id
+    if not db.get_admin(uid) and not db.is_owner(uid):
+        await callback.answer("⛔", show_alert=True)
+        return
+    if ch not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    # فردا فقط از ۲۲
+    now = local_now()
+    tomorrow = (now.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+    if for_date == tomorrow and now.hour < 22:
+        await callback.answer("فردا فقط از ۲۲:۰۰.", show_alert=True)
+        return
+    # همپوشانی
+    existing = get_shift_ranges_for_date(for_date, channel_key=ch)
+    if any(_ranges_overlap(start, end, es, ee) for es, ee in existing):
+        await callback.answer("این بازه الان پر شد.", show_alert=True)
+        return
+    # همپوشانی با شیفت‌های خود ادمین در همه کانال‌ها
+    try:
+        my_ranges = get_admin_shift_ranges_for_date(uid, for_date)
+        if any(_ranges_overlap(start, end, es, ee) for es, ee in my_ranges):
+            await callback.answer(
+                "با شیفت دیگر شما هم‌پوشانی دارد.",
+                show_alert=True,
+            )
+            return
+    except Exception:
+        pass
+    try:
+        shift_id = await asyncio.to_thread(
+            lambda: db.create_shift(
+                admin_id=uid,
+                start_time=start,
+                end_time=end,
+                permanent=False,
+                specific_date=for_date,
+            )
+        )
+        try:
+            await db_execute(
+                "UPDATE shifts SET channel_key = ? WHERE id = ?",
+                (ch, shift_id),
+            )
+            await db_commit()
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("PRIV SHIFT CREATE ERROR")
+        await callback.answer("خطا در ثبت.", show_alert=True)
+        return
+    await callback.answer("ثبت شد.")
+    try:
+        await callback.message.edit_text(
+            f"✅ شیفت ثبت شد\n"
+            f"📺 {CHANNELS[ch]['title']}\n"
+            f"📅 {format_dt_fa(for_date)}\n"
+            f"⏰ {start} تا {end}"
+        )
+    except Exception:
+        await callback.message.answer(
+            f"✅ شیفت ثبت شد: {start}–{end}"
+        )
 
 
 # =========================================================
@@ -8281,6 +9014,19 @@ async def handle_state(
         if not content:
             await message.answer("❌ متن خالی است. دوباره بنویس.")
             return True
+        # جلوگیری از ارسال اشتباه پیام کانال از مسیر فیدبک
+        lowered = content
+        for _k, cfg in CHANNELS.items():
+            for pfx in cfg.get("prefixes") or ():
+                if lowered.startswith(pfx) or lowered.startswith(pfx + " "):
+                    await message.answer(
+                        "❌ این بخش برای انتقاد و پیشنهاد است.\n\n"
+                        "برای ارسال پیام به کانال‌ها از گزینه\n"
+                        "📝 ارسال پیام\n"
+                        "استفاده کن.",
+                        reply_markup=role_keyboard(user_id),
+                    )
+                    return True
         try:
             await db_execute(
                 """
@@ -9075,29 +9821,12 @@ async def handle_state(
     # =====================================================
 
     if kind == "shift_request":
-
-        if not text.strip():
-
-            await message.answer(
-                "❌ متن درخواست خالی است."
-            )
-
-            return True
-
-        db.create_shift_request(
-            user_id,
-            text.strip(),
-        )
-
-        clear_state(
-            user_id
-        )
-
+        # مسیر قدیمی متن آزاد حذف شد؛ به جریان دکمه‌ای هدایت می‌شود
+        clear_state(user_id)
         await message.answer(
-            "✅ درخواست تغییر شیفت ثبت شد.",
+            "برای تعویض شیفت دوباره روی «🔄 درخواست تغییر شیفت» بزن.",
             reply_markup=admin_keyboard(),
         )
-
         return True
 
     # =====================================================
@@ -10588,6 +11317,40 @@ async def cleanup_loop():
             logger.exception(
                 "CLEANUP ERROR"
             )
+
+        # حذف پیام‌های قدیمی‌تر از ۱۰ روز (بررسی‌شده)
+        try:
+            cutoff = (local_now() - timedelta(days=10)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            await db_execute(
+                """
+                DELETE FROM messages
+                WHERE status IN ('approved', 'rejected')
+                  AND REPLACE(REPLACE(COALESCE(submitted_at,''), 'T', ' '), 'Z', '') < ?
+                """,
+                (cutoff,),
+            )
+            await db_commit()
+        except Exception:
+            logger.exception("CLEANUP OLD MESSAGES 10D ERROR")
+
+        # شیفت‌های تاریخ‌دار قدیمی‌تر از ۷ روز
+        try:
+            cutoff_d = (local_now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            await db_execute(
+                """
+                DELETE FROM shifts
+                WHERE permanent = 0
+                  AND specific_date IS NOT NULL
+                  AND specific_date != ''
+                  AND specific_date < ?
+                """,
+                (cutoff_d,),
+            )
+            await db_commit()
+        except Exception:
+            logger.exception("CLEANUP OLD SHIFTS 7D ERROR")
 
         await asyncio.sleep(
             30 * 60
