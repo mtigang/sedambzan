@@ -1541,51 +1541,72 @@ def _gregorian_to_jalali(gy: int, gm: int, gd: int) -> tuple[int, int, int]:
     return jy, jm, jd
 
 
-def format_dt_fa(value) -> str:
+def format_dt_fa(value, *, assume_utc: bool | None = None) -> str:
     """
-    هر تاریخ/زمانی را مرتب و شمسی می‌کند (به وقت محلی ربات).
-    ورودی: datetime یا رشته ISO مثل 2026-09-12T20:24:32
-    خروجی نمونه: ۲۳ شهریور ۱۴۰۵ — ۱۲:۴۹
+    تاریخ/زمان را شمسی و به وقت ایران (TIMEZONE) نشان می‌دهد.
+
+    - فقط تاریخ (مثل 2026-09-14): بدون جابه‌جایی ساعت → «۲۳ شهریور ۱۴۰۵»
+    - datetime با tz: تبدیل به وقت ایران
+    - datetime/رشته با ساعت بدون tz:
+        * assume_utc=True یا پیش‌فرض برای زمان‌های دیتابیس → UTC به ایران
+        * assume_utc=False → همان ساعت محلی ایران فرض می‌شود
     """
     if value is None or value == "":
         return "—"
     dt = None
+    parsed_as_date_only = False
     if isinstance(value, datetime):
         dt = value
     else:
         s = str(value).strip().replace("T", " ").replace("Z", "")
         s = s.split(".")[0]
-        if "+" in s[10:]:
+        if len(s) > 10 and "+" in s[10:]:
             s = s.split("+", 1)[0].strip()
-        for fmt in (
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%d",
-            "%Y/%m/%d %H:%M:%S",
-            "%Y/%m/%d",
-        ):
-            try:
-                dt = datetime.strptime(s, fmt)
-                break
-            except Exception:
-                continue
+        # تشخیص فقط-تاریخ
+        if len(s) <= 10 or (len(s) == 10 and s[4] in "-/"):
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+                try:
+                    dt = datetime.strptime(s[:10].replace("/", "-"), "%Y-%m-%d")
+                    parsed_as_date_only = True
+                    break
+                except Exception:
+                    continue
+        if dt is None:
+            for fmt in (
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M",
+                "%Y/%m/%d %H:%M:%S",
+                "%Y/%m/%d %H:%M",
+            ):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    break
+                except Exception:
+                    continue
     if dt is None:
         return str(value)
-    # زمان ذخیره‌شده در DB معمولاً UTC است → تبدیل به منطقه زمانی ربات
+
+    # فقط تاریخ تقویمی — بدون تبدیل TZ (تا 00:00 UTC نشود 03:30 تهران)
+    if parsed_as_date_only and assume_utc is not True:
+        jy, jm, jd = _gregorian_to_jalali(dt.year, dt.month, dt.day)
+        return f"{jd} {_JALALI_MONTHS[jm - 1]} {jy}"
+
     try:
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(TZ)
-        else:
+        if dt.tzinfo is not None:
             dt = dt.astimezone(TZ)
+        else:
+            # پیش‌فرض: زمان‌های خام دیتابیس = UTC
+            use_utc = True if assume_utc is None else bool(assume_utc)
+            if use_utc:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(TZ)
+            else:
+                dt = dt.replace(tzinfo=TZ)
     except Exception:
         pass
+
     jy, jm, jd = _gregorian_to_jalali(dt.year, dt.month, dt.day)
     month = _JALALI_MONTHS[jm - 1]
-    if dt.hour or dt.minute or dt.second or (
-        isinstance(value, str) and (" " in value or "T" in value)
-    ):
-        return f"{jd} {month} {jy} — {dt.hour:02d}:{dt.minute:02d}"
-    return f"{jd} {month} {jy}"
+    return f"{jd} {month} {jy} — {dt.hour:02d}:{dt.minute:02d}"
 
 
 def full_name(user: User) -> str:
@@ -3167,7 +3188,7 @@ async def owner_view_feedback(
             mention = str(row["user_id"])
         text = (
             f"#{row['id']} — {mention}\n"
-            f"🕐 {escape(row['created_at'] or '')}\n\n"
+            f"🕐 {format_dt_fa(row['created_at'])}\n\n"
             f"{escape(row['content'] or '')}"
         )
         kb = InlineKeyboardMarkup(
@@ -7749,7 +7770,7 @@ async def stats_feedback_callback(callback: CallbackQuery, bot: Bot):
             mention = str(row["user_id"])
         text = (
             f"#{row['id']} — {mention}\n"
-            f"🕐 {escape(row['created_at'] or '')}\n\n"
+            f"🕐 {format_dt_fa(row['created_at'])}\n\n"
             f"{escape(row['content'] or '')}"
         )
         kb = InlineKeyboardMarkup(
@@ -10014,7 +10035,7 @@ async def handle_state(
             await message.answer(
                 (
                     f"✅ اطلاعیه یک‌باره ثبت شد.\n\n"
-                    f"🕐 {dt.strftime('%Y-%m-%d %H:%M')}"
+                    f"🕐 {format_dt_fa(dt, assume_utc=False)}"
                 ),
                 reply_markup=owner_keyboard(db.is_bot_enabled()),
             )
@@ -10233,7 +10254,7 @@ async def handle_state(
                         f"👥 حدود <b>{ahead}</b> پیام جلوتر از تو در صفه.\n\n"
                         "با شروع شیفت بعدی برای ادمین می‌رود.\n"
                         f"⏰ شروع شیفت بعدی: "
-                        f"{format_dt_fa(start_dt.strftime('%Y-%m-%d %H:%M:%S'))}"
+                        f"{format_dt_fa(start_dt, assume_utc=False)}"
                     ),
                     parse_mode=ParseMode.HTML,
                     reply_markup=role_keyboard(user_id),
@@ -11103,7 +11124,7 @@ async def handle_state(
             f"نام: {escape(name)}\n"
             f"یوزرنیم: {escape(uname) if uname else '—'}\n"
             f"آیدی: <code>{target}</code>\n"
-            f"تاریخ عضویت/ثبت: {joined}\n"
+            f"تاریخ عضویت/ثبت: {format_dt_fa(joined)}\n"
             f"وضعیت بن: {'🚫 بن‌شده' if blocked else '✅ فعال'}\n\n"
             f"📊 تعداد پیام‌ها (کل: {total})\n"
         )
@@ -11933,7 +11954,7 @@ async def shift_monitor(
                                 (
                                     "⏰ <b>یادآوری شیفت</b>\n\n"
                                     f"حدود <b>{mins_left}</b> دقیقه تا شروع شیفت مانده است.\n\n"
-                                    f"🕐 شروع: <b>{start_dt2.strftime('%H:%M')}</b>\n"
+                                    f"🕐 شروع: <b>{format_dt_fa(start_dt2, assume_utc=False)}</b>\n"
                                     f"⏰ بازه: {shift2['start_time']} تا {shift2['end_time']}"
                                 ),
                                 parse_mode=ParseMode.HTML,
@@ -12335,7 +12356,7 @@ def _build_log_txt(
     lines.append("گزارش کامل ربات / Full Bot Report")
     lines.append(f"از / From: {since}")
     lines.append(f"تا / Until: {until}")
-    lines.append(f"زمان تولید / Generated: {local_now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"زمان تولید / Generated: {format_dt_fa(local_now(), assume_utc=False)}")
     lines.append("=" * 60)
     lines.append("")
 
@@ -13033,7 +13054,7 @@ async def search_user_channel_msgs(callback: CallbackQuery, bot: Bot):
         st = _status_label_fa(r["status"])
         preview = (r["content"] or "")[:80].replace("\n", " ")
         lines.append(f"#{r['id']} | {st}")
-        lines.append(f"🕐 {r['submitted_at'] or '-'}")
+        lines.append(f"🕐 {format_dt_fa(r['submitted_at'])}")
         lines.append(f"📝 {preview}")
         if r["status"] == "rejected" and r["reject_reason"]:
             lines.append(f"دلیل: {r['reject_reason']}")
