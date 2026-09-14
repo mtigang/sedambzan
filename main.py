@@ -10232,6 +10232,10 @@ async def handle_state(
                     (message_id,),
                 )
                 await db_commit()
+                try:
+                    await trim_messages_to_limit_async()
+                except Exception:
+                    pass
             except Exception:
                 logger.exception("USER SEND CREATE QUEUED ERROR | user_id=%s", user_id)
                 await message.answer(GENERIC_ERROR)
@@ -10291,6 +10295,10 @@ async def handle_state(
                 admin_id,
             )
             await _set_msg_channel(message_id)
+            try:
+                await trim_messages_to_limit_async()
+            except Exception:
+                pass
             row = await asyncio.to_thread(db.get_message, message_id)
         except Exception:
             logger.exception("USER SEND CREATE PENDING ERROR | user_id=%s", user_id)
@@ -12109,6 +12117,53 @@ async def owner_today_schedule(
 # CLEANUP
 # =========================================================
 
+# سقف نگهداشت پیام‌ها — بیش از این، قدیمی‌ترین‌ها حذف می‌شوند
+MESSAGES_MAX_KEEP = 200_000
+
+
+def trim_messages_to_limit(limit: int = MESSAGES_MAX_KEEP) -> int:
+    """
+    اگر تعداد پیام‌ها از limit بیشتر شد، از قدیمی‌ترین (کمترین id) حذف کن
+    تا دقیقاً limit تا باقی بماند.
+    """
+    try:
+        row = db.conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()
+        total = int(row["c"] or 0) if row else 0
+        if total <= limit:
+            return 0
+        excess = total - limit
+        db.conn.execute(
+            """
+            DELETE FROM messages
+            WHERE id IN (
+                SELECT id FROM messages
+                ORDER BY id ASC
+                LIMIT ?
+            )
+            """,
+            (excess,),
+        )
+        db.conn.commit()
+        logger.info(
+            "TRIM MESSAGES | deleted=%s remaining_cap=%s was=%s",
+            excess,
+            limit,
+            total,
+        )
+        return excess
+    except Exception:
+        logger.exception("TRIM MESSAGES ERROR")
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        return 0
+
+
+async def trim_messages_to_limit_async(limit: int = MESSAGES_MAX_KEEP) -> int:
+    return await asyncio.to_thread(trim_messages_to_limit, limit)
+
+
 async def cleanup_loop():
 
     while True:
@@ -12123,22 +12178,11 @@ async def cleanup_loop():
                 "CLEANUP ERROR"
             )
 
-        # حذف پیام‌های قدیمی‌تر از ۱۰ روز (بررسی‌شده)
+        # سقف ۲۰۰ هزار پیام — قدیمی‌ترین‌ها حذف می‌شوند
         try:
-            cutoff = (local_now() - timedelta(days=10)).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-            await db_execute(
-                """
-                DELETE FROM messages
-                WHERE status IN ('approved', 'rejected')
-                  AND REPLACE(REPLACE(COALESCE(submitted_at,''), 'T', ' '), 'Z', '') < ?
-                """,
-                (cutoff,),
-            )
-            await db_commit()
+            await trim_messages_to_limit_async(MESSAGES_MAX_KEEP)
         except Exception:
-            logger.exception("CLEANUP OLD MESSAGES 10D ERROR")
+            logger.exception("CLEANUP TRIM MESSAGES ERROR")
 
         # شیفت‌های تاریخ‌دار قدیمی‌تر از ۷ روز
         try:
