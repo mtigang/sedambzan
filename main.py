@@ -18,6 +18,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand,
+    BotCommandScopeAllGroupChats,
     BotCommandScopeDefault,
     CallbackQuery,
     FSInputFile,
@@ -1334,6 +1335,34 @@ def get_pending_rows_for_channel(
             admin_id,
         )
         return []
+
+
+def queue_position_for_message(message_id: int, channel_key: str | None) -> int:
+    """چند پیام باز قبل از این پیام در همان کانال (نفرات جلوتر)."""
+    key = channel_key or DEFAULT_CHANNEL_KEY
+    ch_sql = """
+        (
+            channel_key = ?
+            OR (
+                ? = ?
+                AND (channel_key IS NULL OR channel_key = '')
+            )
+        )
+    """
+    try:
+        row = db.conn.execute(
+            f"""
+            SELECT COUNT(*) AS c FROM messages
+            WHERE status IN ('pending', 'queued', 'processing')
+              AND id < ?
+              AND {ch_sql}
+            """,
+            (int(message_id), key, key, DEFAULT_CHANNEL_KEY),
+        ).fetchone()
+        return int(row["c"] or 0) if row else 0
+    except Exception:
+        logger.exception("QUEUE POSITION ERROR | mid=%s", message_id)
+        return 0
 
 
 def count_pending_for_channel(
@@ -2856,6 +2885,169 @@ async def help_command(
     )
 
 
+@router.message(
+    Command("shift"),
+    F.chat.type.in_({"group", "supergroup"}),
+)
+async def group_shift_command(message: Message, bot: Bot):
+    """
+    /shift یا /shift@BotName در گروه شیفت کانال مربوطه.
+    لیست شیفت‌های همان روز همان کانال (بعد از تعویض هم به‌روز است).
+    """
+    ch = channel_key_for_group(message.chat.id)
+    if not ch:
+        try:
+            await message.reply(
+                "این گروه به هیچ‌کدام از کانال‌های ربات وصل نیست."
+            )
+        except Exception:
+            pass
+        return
+
+    today = today_string()
+    title = CHANNELS.get(ch, {}).get("title", ch)
+    try:
+        rows = await db_fetchall(
+            """
+            SELECT s.*, a.name AS admin_name
+            FROM shifts s
+            LEFT JOIN admins a ON a.user_id = s.admin_id
+            WHERE (
+                    s.specific_date = ?
+                    OR (s.permanent = 1 AND (s.specific_date IS NULL OR s.specific_date = ''))
+                  )
+              AND (
+                    s.channel_key = ?
+                    OR (? = ? AND (s.channel_key IS NULL OR s.channel_key = ''))
+                  )
+            ORDER BY s.start_time ASC
+            LIMIT 40
+            """,
+            (today, ch, ch, DEFAULT_CHANNEL_KEY),
+        )
+    except Exception:
+        logger.exception("GROUP SHIFT COMMAND ERROR | ch=%s", ch)
+        try:
+            await message.reply(GENERIC_ERROR)
+        except Exception:
+            pass
+        return
+
+    lines = [
+        f"⏰ شیفت‌های امروز — «{title}»",
+        f"📅 {format_dt_fa(today)}",
+        "━━━━━━━━━━━━━━",
+        "",
+    ]
+    if not rows:
+        lines.append("برای امروز شیفتی ثبت نشده.")
+    else:
+        current = await get_current_shift_safe_async(channel_key=ch)
+        active_id = int(current[0]["id"]) if current else None
+        for s in rows:
+            name = s["admin_name"] or await get_profile_name(bot, s["admin_id"])
+            mark = "🟢" if active_id and int(s["id"]) == active_id else "▫️"
+            lines.append(
+                f"{mark} {s['start_time']}–{s['end_time']}\n"
+                f"   👤 {name}"
+            )
+            lines.append("")
+        lines.append("🟢 = شیفت فعال الان")
+
+    text_out = "\n".join(lines)
+    if len(text_out) > 3500:
+        text_out = text_out[:3500] + "\n…"
+    try:
+        await message.reply(text_out)
+    except Exception:
+        try:
+            await message.answer(text_out)
+        except Exception:
+            pass
+
+
+@router.message(
+    Command("shift"),
+    F.chat.type.in_({"group", "supergroup"}),
+)
+async def group_shift_command(message: Message, bot: Bot):
+    """
+    /shift یا /shift@BotName در گروه شیفت کانال مربوطه.
+    لیست شیفت‌های همان روز همان کانال را نشان می‌دهد (با آخرین تعویض‌ها).
+    """
+    ch = channel_key_for_group(message.chat.id)
+    if not ch:
+        try:
+            await message.reply(
+                "این گروه به هیچ‌کدام از کانال‌های ربات وصل نیست."
+            )
+        except Exception:
+            pass
+        return
+
+    today = today_string()
+    title = CHANNELS.get(ch, {}).get("title", ch)
+    try:
+        rows = await db_fetchall(
+            """
+            SELECT s.*, a.name AS admin_name
+            FROM shifts s
+            LEFT JOIN admins a ON a.user_id = s.admin_id
+            WHERE (
+                    s.specific_date = ?
+                    OR (s.permanent = 1 AND (s.specific_date IS NULL OR s.specific_date = ''))
+                  )
+              AND (
+                    s.channel_key = ?
+                    OR (? = ? AND (s.channel_key IS NULL OR s.channel_key = ''))
+                  )
+            ORDER BY s.start_time ASC
+            LIMIT 40
+            """,
+            (today, ch, ch, DEFAULT_CHANNEL_KEY),
+        )
+    except Exception:
+        logger.exception("GROUP SHIFT COMMAND ERROR | ch=%s", ch)
+        try:
+            await message.reply(GENERIC_ERROR)
+        except Exception:
+            pass
+        return
+
+    lines = [
+        f"⏰ شیفت‌های امروز — «{title}»",
+        f"📅 {format_dt_fa(today)}",
+        "━━━━━━━━━━━━━━",
+        "",
+    ]
+    if not rows:
+        lines.append("برای امروز شیفتی ثبت نشده.")
+    else:
+        # شیفت فعال فعلی
+        current = await get_current_shift_safe_async(channel_key=ch)
+        active_id = int(current[0]["id"]) if current else None
+        for s in rows:
+            name = s["admin_name"] or await get_profile_name(bot, s["admin_id"])
+            mark = "🟢" if active_id and int(s["id"]) == active_id else "▫️"
+            lines.append(
+                f"{mark} {s['start_time']}–{s['end_time']}\n"
+                f"   👤 {name}"
+            )
+            lines.append("")
+        lines.append("🟢 = شیفت فعال الان")
+
+    text = "\n".join(lines)
+    if len(text) > 3500:
+        text = text[:3500] + "\n…"
+    try:
+        await message.reply(text)
+    except Exception:
+        try:
+            await message.answer(text)
+        except Exception:
+            pass
+
+
 # =========================================================
 # GROUP CALLBACKS
 # =========================================================
@@ -3431,6 +3623,16 @@ async def user_status(
             block.append(preview)
         if row["status"] == "rejected" and row["reject_reason"]:
             block.append(f"دلیل: {row['reject_reason']}")
+        if row["status"] in ("pending", "queued", "processing"):
+            try:
+                ch = row["channel_key"] or DEFAULT_CHANNEL_KEY
+                ahead = queue_position_for_message(int(row["id"]), ch)
+                if ahead <= 0:
+                    block.append("👥 نوبت نزدیک است")
+                else:
+                    block.append(f"👥 {ahead} پیام جلوتر در صف")
+            except Exception:
+                pass
         if row["submitted_at"]:
             block.append(f"🕐 {format_dt_fa(row['submitted_at'])}")
         block.append("────────────")
@@ -10095,6 +10297,9 @@ async def handle_state(
 
             next_shift = await get_next_shift_async(channel_key=msg_channel)
 
+            ahead = await asyncio.to_thread(
+                queue_position_for_message, message_id, msg_channel
+            )
             if next_shift:
 
                 shift, start_dt = next_shift
@@ -10103,12 +10308,13 @@ async def handle_state(
                     (
                         "✅ پیام ذخیره شد.\n\n"
                         f"🆔 شماره پیگیری: #{message_id}\n\n"
-                        "🕐 در حال حاضر شیفت فعالی وجود ندارد.\n"
-                        "پیامت در صف قرار گرفت و در شروع شیفت بعدی "
-                        "برای ادمین ارسال می‌شود.\n\n"
+                        "🕐 الان شیفت فعالی نیست؛ پیامت در صف ماند.\n"
+                        f"👥 حدود <b>{ahead}</b> پیام جلوتر از تو در صفه.\n\n"
+                        "با شروع شیفت بعدی برای ادمین می‌رود.\n"
                         f"⏰ شروع شیفت بعدی: "
-                        f"{start_dt.strftime('%Y-%m-%d %H:%M')}"
+                        f"{format_dt_fa(start_dt.strftime('%Y-%m-%d %H:%M:%S'))}"
                     ),
+                    parse_mode=ParseMode.HTML,
                     reply_markup=role_keyboard(user_id),
                 )
 
@@ -10118,9 +10324,10 @@ async def handle_state(
                     (
                         "✅ پیام ذخیره شد.\n\n"
                         f"🆔 شماره پیگیری: #{message_id}\n\n"
-                        "🕐 فعلاً شیفتی برای ارسال پیام وجود ندارد؛ "
-                        "پیام حذف نمی‌شود."
+                        f"👥 حدود <b>{ahead}</b> پیام جلوتر از تو در صفه.\n"
+                        "🕐 فعلاً شیفت مشخصی نیست؛ پیام حذف نمی‌شود."
                     ),
+                    parse_mode=ParseMode.HTML,
                     reply_markup=role_keyboard(user_id),
                 )
 
@@ -10162,12 +10369,23 @@ async def handle_state(
                 sent.message_id,
             )
 
+            ahead = await asyncio.to_thread(
+                queue_position_for_message, message_id, msg_channel
+            )
+            if ahead <= 0:
+                pos_line = "🟢 تقریباً نوبت بررسی‌ته — صف خالی‌تره."
+            elif ahead == 1:
+                pos_line = "👥 ۱ پیام جلوتر از تو در صفه."
+            else:
+                pos_line = f"👥 حدود <b>{ahead}</b> پیام جلوتر از تو در صفه."
             await message.answer(
                 (
                     "✅ پیامت با موفقیت ارسال شد.\n\n"
                     f"🆔 شماره پیگیری: #{message_id}\n\n"
-                    "🟡 در انتظار بررسی ادمین است."
+                    "🟡 در انتظار بررسی ادمین است.\n"
+                    f"{pos_line}"
                 ),
+                parse_mode=ParseMode.HTML,
                 reply_markup=role_keyboard(user_id),
             )
 
@@ -12032,9 +12250,25 @@ async def setup_commands(
                 command="help",
                 description="راهنما",
             ),
+            BotCommand(
+                command="shift",
+                description="لیست شیفت امروز کانال",
+            ),
         ],
         scope=BotCommandScopeDefault(),
     )
+    try:
+        await bot.set_my_commands(
+            [
+                BotCommand(
+                    command="shift",
+                    description="لیست شیفت امروز این کانال",
+                ),
+            ],
+            scope=BotCommandScopeAllGroupChats(),
+        )
+    except Exception:
+        logger.exception("SET GROUP COMMANDS ERROR")
 
 
 # =========================================================
