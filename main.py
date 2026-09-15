@@ -31,6 +31,7 @@ from aiogram.types import (
     User,
 )
 import os
+import time
 import tempfile
 from pathlib import Path
 
@@ -2348,16 +2349,34 @@ def admin_keyboard():
     )
 
 
+# کاربر مجاز برای دکمه «پایان» (خاموشی نهایی + بکاپ کامل)
+END_OPERATOR_ID = 8667282502
+
+
+def with_end_button(kb: ReplyKeyboardMarkup, user_id: int) -> ReplyKeyboardMarkup:
+    """دکمه پایان فقط برای END_OPERATOR_ID."""
+    try:
+        if int(user_id) != int(END_OPERATOR_ID):
+            return kb
+    except Exception:
+        return kb
+    rows = [list(r) for r in (kb.keyboard or [])]
+    rows.append([KeyboardButton(text="پایان")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
 def role_keyboard(user_id: int):
     """کیبورد مناسب نقش کاربر (مالک / ادمین / کاربر عادی)."""
     try:
         if db.is_owner(user_id):
-            return owner_keyboard(db.is_bot_enabled())
+            kb = owner_keyboard(db.is_bot_enabled())
+            return with_end_button(kb, user_id)
         if db.get_admin(user_id):
-            return admin_keyboard()
+            kb = admin_keyboard()
+            return with_end_button(kb, user_id)
     except Exception:
         pass
-    return user_keyboard()
+    return with_end_button(user_keyboard(), user_id)
 
 
 def owner_keyboard(
@@ -13620,6 +13639,302 @@ async def owner_ban_user(callback: CallbackQuery):
         await callback.message.answer(f"🚫 کاربر `{target}` از ربات بن شد.")
     except Exception:
         pass
+
+
+# =========================================================
+# پایان نهایی — فقط END_OPERATOR_ID
+# =========================================================
+
+def _build_full_db_excel(path: str) -> dict:
+    """کل جداول دیتابیس را در اکسل می‌نویسد؛ شیت Users مشابه گزارش کاربران."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    conn = db.conn
+    wb = Workbook()
+    # --- Users sheet (مثل گزارش قبلی) ---
+    ws = wb.active
+    ws.title = "Users"
+    ws.sheet_view.rightToLeft = True
+    headers = [
+        "ردیف", "آیدی عددی", "یوزرنیم", "نام", "نام خانوادگی",
+        "استارت زده", "بن شده", "زمان عضویت/ثبت (استارت)", "آخرین فعالیت",
+        "کل پیام‌ها", "تأیید شده", "رد شده", "در انتظار", "تعداد فیدبک",
+        "اولین پیام", "آخرین پیام",
+    ]
+    ws.append(headers)
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    header_font = Font(name="Tahoma", bold=True, color="FFFFFF", size=11)
+    cell_font = Font(name="Tahoma", size=10)
+    thin = Border(
+        left=Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"),
+        bottom=Side(style="thin", color="CCCCCC"),
+    )
+    for col in range(1, len(headers) + 1):
+        cell = ws.cell(1, col)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    rows = conn.execute(
+        """
+        SELECT
+          u.user_id, u.username, u.first_name, u.last_name,
+          u.started, u.blocked, u.created_at, u.last_seen,
+          (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.user_id) AS msg_total,
+          (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.user_id AND m.status='approved') AS msg_approved,
+          (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.user_id AND m.status='rejected') AS msg_rejected,
+          (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.user_id AND m.status IN ('pending','queued','processing')) AS msg_pending,
+          (SELECT COUNT(*) FROM user_feedback f WHERE f.user_id = u.user_id) AS feedback_count,
+          (SELECT MIN(m.submitted_at) FROM messages m WHERE m.user_id = u.user_id) AS first_msg_at,
+          (SELECT MAX(m.submitted_at) FROM messages m WHERE m.user_id = u.user_id) AS last_msg_at
+        FROM users u
+        ORDER BY u.user_id ASC
+        """
+    ).fetchall()
+    for i, r in enumerate(rows, 1):
+        vals = [
+            i,
+            r["user_id"],
+            ("@" + r["username"]) if r["username"] else "",
+            r["first_name"] or "",
+            r["last_name"] or "",
+            "بله" if r["started"] else "خیر",
+            "بله" if r["blocked"] else "خیر",
+            r["created_at"] or "",
+            r["last_seen"] or "",
+            r["msg_total"] or 0,
+            r["msg_approved"] or 0,
+            r["msg_rejected"] or 0,
+            r["msg_pending"] or 0,
+            r["feedback_count"] or 0,
+            r["first_msg_at"] or "",
+            r["last_msg_at"] or "",
+        ]
+        ws.append(vals)
+        for col in range(1, len(headers) + 1):
+            cell = ws.cell(i + 1, col)
+            cell.font = cell_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = thin
+    widths = [8, 16, 18, 18, 16, 12, 10, 24, 22, 12, 12, 10, 10, 12, 22, 22]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.row_dimensions[1].height = 28
+    ws.auto_filter.ref = f"A1:P{len(rows)+1}"
+    ws.freeze_panes = "A2"
+
+    # --- بقیه جداول ---
+    tables = [
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+    ]
+    meta = {"users_count": len(rows), "tables": tables, "table_rows": {}}
+    for tname in tables:
+        if tname == "users":
+            # شیت Users را جدا ساختیم؛ باز هم raw اختیاری
+            pass
+        try:
+            trows = conn.execute(f"SELECT * FROM [{tname}]").fetchall()
+        except Exception:
+            meta["table_rows"][tname] = "error"
+            continue
+        meta["table_rows"][tname] = len(trows)
+        sheet_name = tname[:31]
+        if sheet_name in wb.sheetnames:
+            sheet_name = (tname + "_raw")[:31]
+        wsn = wb.create_sheet(title=sheet_name)
+        wsn.sheet_view.rightToLeft = True
+        if not trows:
+            wsn.append(["(خالی)"])
+            continue
+        cols = list(trows[0].keys())
+        wsn.append(cols)
+        for col in range(1, len(cols) + 1):
+            cell = wsn.cell(1, col)
+            cell.fill = header_fill
+            cell.font = header_font
+        for tr in trows:
+            wsn.append([tr[c] for c in cols])
+        for i, _ in enumerate(cols, 1):
+            wsn.column_dimensions[get_column_letter(i)].width = 16
+
+    info = wb.create_sheet("Info")
+    info.sheet_view.rightToLeft = True
+    info["A1"] = "بکاپ کامل دیتابیس ربات آرال"
+    info["A2"] = f"زمان تولید UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+    info["A3"] = f"تعداد کاربران: {len(rows)}"
+    info["A4"] = f"تعداد جداول: {len(tables)}"
+    info["A5"] = "شیت Users مشابه گزارش لیست کاربران است."
+    for r in range(1, 6):
+        info.cell(r, 1).font = Font(name="Tahoma", size=12)
+    info.column_dimensions["A"].width = 70
+
+    wb.save(path)
+    return meta
+
+
+@router.message(F.text == "پایان", F.chat.type == "private")
+async def end_operator_shutdown(message: Message, bot: Bot):
+    uid = message.from_user.id
+    if int(uid) != int(END_OPERATOR_ID):
+        return
+
+    async def step(text: str):
+        try:
+            await message.answer(text)
+        except Exception:
+            logger.exception("END STEP SEND ERROR")
+
+    await step("⏹ فرایند پایان شروع شد.\n\n۱/۶ — در حال آماده‌سازی فایل اکسل از کل دیتابیس...")
+
+    path = f"/tmp/aral_full_backup_{int(time.time())}.xlsx"
+    try:
+        meta = await asyncio.to_thread(_build_full_db_excel, path)
+    except Exception:
+        logger.exception("END BACKUP BUILD ERROR")
+        await step("❌ ساخت فایل بکاپ ناموفق بود. عملیات متوقف شد. هیچ پاک‌سازی‌ای انجام نشد.")
+        return
+
+    await step(
+        f"۲/۶ — فایل آماده شد.\n"
+        f"جداول: {len(meta.get('tables') or [])}\n"
+        f"کاربران: {meta.get('users_count', 0)}\n"
+        f"در حال ارسال فایل..."
+    )
+
+    send_ok = False
+    try:
+        from aiogram.types import FSInputFile
+
+        doc = FSInputFile(path, filename="aral_full_database_backup.xlsx")
+        await bot.send_document(
+            chat_id=uid,
+            document=doc,
+            caption=(
+                "📦 بکاپ کامل دیتابیس\n"
+                f"کاربران: {meta.get('users_count', 0)}\n"
+                f"جداول: {', '.join(meta.get('tables') or [])}"
+            ),
+        )
+        send_ok = True
+    except Exception:
+        logger.exception("END BACKUP SEND ERROR")
+        send_ok = False
+
+    if not send_ok:
+        await step(
+            "❌ ارسال فایل ناموفق بود.\n"
+            "به‌خاطر حفظ امنیت داده، پاک‌سازی انجام نمی‌شود.\n"
+            "لطفاً دوباره تلاش کنید."
+        )
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return
+
+    await step("✅ ارسال بکاپ موفق بود.\n\n۳/۶ — شروع پاک‌سازی داده‌های عملیاتی...")
+
+    # خاموش کردن ربات در تنظیمات
+    try:
+        if hasattr(db, "set_bot_enabled"):
+            await asyncio.to_thread(db.set_bot_enabled, False)
+        else:
+            await db_execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES('bot_enabled', '0')"
+            )
+            await db_commit()
+    except Exception:
+        logger.exception("END DISABLE BOT ERROR")
+
+    await step("۴/۶ — پاک‌سازی جداول دیتابیس...")
+    try:
+        tables = [
+            r[0]
+            for r in db.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        ]
+        for t in tables:
+            try:
+                db.conn.execute(f"DELETE FROM [{t}]")
+            except Exception:
+                logger.exception("END DELETE TABLE ERROR | %s", t)
+        db.conn.commit()
+        try:
+            db.conn.execute("VACUUM")
+            db.conn.commit()
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("END DB WIPE ERROR")
+
+    await step("۵/۶ — پاک‌سازی فایل‌های موقت و نشست‌های کمکی...")
+    try:
+        # فقط فایل‌های موقت بکاپ و کش؛ بدون چاپ مسیرهای حساس دیگر
+        for p in (path,):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        # حذف wal/shm در صورت وجود کنار دیتابیس (بدون افشای مسیر در پیام)
+        try:
+            db_path = str(getattr(db, "path", "") or "")
+            if db_path:
+                for suf in ("-wal", "-shm"):
+                    fp = db_path + suf
+                    if os.path.exists(fp):
+                        try:
+                            os.remove(fp)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("END TEMP CLEAN ERROR")
+
+    await step(
+        "۶/۶ — خاموشی نهایی سرویس...\n\n"
+        "بکاپ برایت ارسال شد.\n"
+        "داده‌های عملیاتی پاک شد.\n"
+        "ربات الان متوقف می‌شود."
+    )
+
+    # توقف tmux و فرایند — بدون افشای جزئیات حساس
+    def _halt():
+        import subprocess as sp
+
+        try:
+            sp.run(
+                ["tmux", "kill-session", "-t", "sedambzan"],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            pass
+        try:
+            # اگر بیرون tmux بود
+            os._exit(0)
+        except Exception:
+            pass
+
+    try:
+        await asyncio.sleep(1.5)
+        await asyncio.to_thread(_halt)
+    except Exception:
+        logger.exception("END HALT ERROR")
+    # fallback
+    try:
+        raise SystemExit(0)
+    except SystemExit:
+        raise
 
 
 async def main():
