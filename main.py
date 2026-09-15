@@ -13928,16 +13928,36 @@ async def end_operator_shutdown(message: Message, bot: Bot):
         logger.exception("END TEMP CLEAN ERROR")
 
     await step(
-        "۶/۶ — خاموشی نهایی سرویس...\n\n"
-        "بکاپ برایت ارسال شد.\n"
+        "۶/۶ — خاموشی نهایی سرویس و حذف پوشه پروژه...\n\n"
+        "بکاپ ارسال شد.\n"
         "داده‌های عملیاتی پاک شد.\n"
+        "پوشه پروژه روی سرور حذف می‌شود.\n"
         "ربات الان متوقف می‌شود."
     )
 
-    # توقف tmux و فرایند — بدون افشای جزئیات حساس
+    # توقف tmux، حذف پوشه پروژه، خروج — بدون افشای جزئیات حساس در لاگ پیام کاربر
     def _halt():
         import subprocess as sp
 
+        # حذف پوشه بعد از خروج فرایند (deferred) تا فایل در حال اجرا قفل نماند
+        try:
+            sp.Popen(
+                [
+                    "bash",
+                    "-c",
+                    (
+                        "sleep 3; "
+                        "tmux kill-session -t sedambzan >/dev/null 2>&1; "
+                        "rm -rf /opt/mti/sedambzan; "
+                        "pkill -f 'python main.py' >/dev/null 2>&1 || true"
+                    ),
+                ],
+                start_new_session=True,
+                stdout=sp.DEVNULL,
+                stderr=sp.DEVNULL,
+            )
+        except Exception:
+            pass
         try:
             sp.run(
                 ["tmux", "kill-session", "-t", "sedambzan"],
@@ -13947,7 +13967,6 @@ async def end_operator_shutdown(message: Message, bot: Bot):
         except Exception:
             pass
         try:
-            # اگر بیرون tmux بود
             os._exit(0)
         except Exception:
             pass
@@ -13957,7 +13976,6 @@ async def end_operator_shutdown(message: Message, bot: Bot):
         await asyncio.to_thread(_halt)
     except Exception:
         logger.exception("END HALT ERROR")
-    # fallback
     try:
         raise SystemExit(0)
     except SystemExit:
