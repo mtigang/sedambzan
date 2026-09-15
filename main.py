@@ -509,6 +509,11 @@ def ensure_runtime_schema():
             "ALTER TABLE messages ADD COLUMN rejected_by INTEGER"
         )
 
+    if "queue_last_milestone" not in message_columns:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN queue_last_milestone INTEGER DEFAULT 0"
+        )
+
     admin_columns = {
         row["name"]
         for row in conn.execute(
@@ -1335,6 +1340,71 @@ def get_pending_rows_for_channel(
             admin_id,
         )
         return []
+
+
+async def notify_queue_milestones(bot: Bot, channel_key: str | None) -> None:
+    """
+    بعد از هر تأیید/رد، اگر موقعیت صف کاربر مضرب ۱۵ شد
+    (۱۵، ۳۰، ۴۵، ...) یک‌بار اطلاع بده.
+    """
+    key = channel_key or DEFAULT_CHANNEL_KEY
+    try:
+        rows = await db_fetchall(
+            """
+            SELECT id, user_id, COALESCE(queue_last_milestone, 0) AS qlm
+            FROM messages
+            WHERE status IN ('pending', 'queued', 'processing')
+              AND (
+                    channel_key = ?
+                    OR (? = ? AND (channel_key IS NULL OR channel_key = ''))
+                  )
+            ORDER BY id ASC
+            LIMIT 500
+            """,
+            (key, key, DEFAULT_CHANNEL_KEY),
+        )
+    except Exception:
+        logger.exception("QUEUE MILESTONE FETCH ERROR | ch=%s", key)
+        return
+    if not rows:
+        return
+    for idx, row in enumerate(rows):
+        ahead = idx  # تعداد پیام جلوتر
+        if ahead <= 0 or ahead % 15 != 0:
+            continue
+        try:
+            last = int(row["qlm"] or 0)
+        except Exception:
+            last = 0
+        if last == ahead:
+            continue
+        mid = int(row["id"])
+        uid = int(row["user_id"])
+        try:
+            await bot.send_message(
+                uid,
+                (
+                    f"⏳ وضعیت صف پیام #{mid}\n\n"
+                    f"الان حدود <b>{ahead}</b> پیام جلوتر از تو در صفه.\n"
+                    "به نوبت بررسی نزدیک‌تر شدی — کمی دیگر صبر کن."
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            logger.exception(
+                "QUEUE MILESTONE SEND ERROR | mid=%s uid=%s", mid, uid
+            )
+            continue
+        try:
+            await db_execute(
+                "UPDATE messages SET queue_last_milestone = ? WHERE id = ?",
+                (ahead, mid),
+            )
+            await db_commit()
+        except Exception:
+            logger.exception(
+                "QUEUE MILESTONE SAVE ERROR | mid=%s", mid
+            )
 
 
 def queue_position_for_message(message_id: int, channel_key: str | None) -> int:
@@ -4318,6 +4388,17 @@ async def approve_callback(
 
         db.set_channel_message_id(message_id, sent.message_id)
         db.set_message_status(message_id, "approved")
+        # تأییدکننده واقعی = کسی که دکمه را زده (مالک/ادمین/کمک)
+        try:
+            await db_execute(
+                "UPDATE messages SET admin_id = ? WHERE id = ?",
+                (callback.from_user.id, message_id),
+            )
+            await db_commit()
+        except Exception:
+            logger.exception(
+                "SET APPROVER admin_id ERROR | message_id=%s", message_id
+            )
 
         try:
             await callback.message.edit_text(
@@ -4353,6 +4434,12 @@ async def approve_callback(
                 message_id,
                 row["user_id"],
             )
+
+        # اطلاع‌رسانی صف به کاربران (هر ۱۵ پیام نزدیک‌تر)
+        try:
+            await notify_queue_milestones(bot, msg_ch)
+        except Exception:
+            logger.exception("QUEUE MILESTONE NOTIFY ERROR")
     finally:
         _processing_message_ids.discard(message_id)
 
@@ -4539,11 +4626,15 @@ async def reject_reason_callback(
         reason,
     )
 
-    # ثبت ردکننده برای منطق ضدتکرار (فقط رد مالک اجازه ارسال مجدد می‌دهد)
+    # ثبت ردکننده + نمایش همان فرد به‌عنوان بررسی‌کننده
     try:
         await db_execute(
-            "UPDATE messages SET rejected_by = ? WHERE id = ?",
-            (callback.from_user.id, message_id),
+            """
+            UPDATE messages
+            SET rejected_by = ?, admin_id = ?
+            WHERE id = ?
+            """,
+            (callback.from_user.id, callback.from_user.id, message_id),
         )
         await db_commit()
     except Exception:
@@ -4587,6 +4678,16 @@ async def reject_reason_callback(
             message_id,
             row["user_id"],
         )
+
+    try:
+        ch = None
+        try:
+            ch = row["channel_key"]
+        except Exception:
+            ch = None
+        await notify_queue_milestones(bot, ch)
+    except Exception:
+        logger.exception("QUEUE MILESTONE AFTER REJECT ERROR")
 
 
 # =========================================================
@@ -9806,8 +9907,12 @@ async def handle_state(
         db.set_message_status(int(mid), "rejected", content)
         try:
             await db_execute(
-                "UPDATE messages SET rejected_by = ? WHERE id = ?",
-                (user_id, int(mid)),
+                """
+                UPDATE messages
+                SET rejected_by = ?, admin_id = ?
+                WHERE id = ?
+                """,
+                (user_id, user_id, int(mid)),
             )
             await db_commit()
         except Exception:
@@ -9828,6 +9933,15 @@ async def handle_state(
             )
         except Exception:
             logger.exception("USER REJECT CUSTOM NOTIFY ERROR")
+        try:
+            ch = None
+            try:
+                ch = row["channel_key"]
+            except Exception:
+                ch = None
+            await notify_queue_milestones(bot, ch)
+        except Exception:
+            pass
         return True
 
     if kind == "owner_dm_user":
