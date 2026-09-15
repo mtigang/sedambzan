@@ -2147,18 +2147,7 @@ def validate_submission(
             "مثال: صدام بزن سلام به همگی ."
         )
 
-    if not is_fully_bold(text, entities):
-        errors.append(
-            "کل پیام باید Bold باشد.\n"
-            "در تلگرام کل متن را انتخاب کن و Bold بزن.\n"
-            "مثال: کل جمله از «صدام بزن» تا آخر باید پررنگ باشد."
-        )
-
-    if not text.endswith(" ."):
-        errors.append(
-            "پیام باید با فاصله و نقطه تمام شود: « .»\n"
-            "مثال درست در پایان پیام:  ."
-        )
+    # بولد و نقطه: ارور نمی‌دهیم — بعداً با auto_fix اصلاح می‌شوند
 
     if contains_link(text, entities):
         errors.append(
@@ -2181,6 +2170,32 @@ def validate_submission(
         )
 
     return True, None
+
+
+def auto_fix_text_and_entities(text: str, entities) -> tuple[str, list]:
+    """
+    فقط دو اصلاح خودکار:
+    ۱) اگر نقطه پایان استاندارد نداشت → « .» اضافه می‌شود
+    ۲) اگر کامل Bold نبود → کل متن Bold می‌شود
+    """
+    text = text or ""
+    ents = list(entities or [])
+
+    if not text.endswith(" ."):
+        t = text.rstrip("\n\r\t ")
+        while t and t[-1] in ".\u06d4\u3002\uff0e":
+            t = t[:-1].rstrip(" ")
+        text = t + " ."
+
+    if not is_fully_bold(text, ents):
+        ents = [
+            MessageEntity(
+                type="bold",
+                offset=0,
+                length=utf16_length(text),
+            )
+        ]
+    return text, ents
 
 
 # =========================================================
@@ -2231,44 +2246,31 @@ def admin_keyboard():
         keyboard=[
             [
                 KeyboardButton(
-                    text="📝 ارسال پیام به صورت کاربر عادی"
-                ),
-            ],
-            [
-                KeyboardButton(
                     text="📥 پیام‌های در انتظار"
                 ),
                 KeyboardButton(
-                    text="📋 داشبورد شیفت"
+                    text="⏰ شیفت"
                 ),
             ],
             [
-                KeyboardButton(
-                    text="⏰ شیفت من"
-                ),
-                KeyboardButton(
-                    text="🟢 انتخاب شیفت"
-                ),
-            ],
-            [
-                KeyboardButton(
-                    text="🔄 درخواست تغییر شیفت"
-                ),
                 KeyboardButton(
                     text="🆘 درخواست کمک"
                 ),
-            ],
-            [
                 KeyboardButton(
                     text="📊 عملکرد من"
                 ),
+            ],
+            [
                 KeyboardButton(
                     text="🔔 اعلان‌ها"
+                ),
+                KeyboardButton(
+                    text="❓ راهنما"
                 ),
             ],
             [
                 KeyboardButton(
-                    text="❓ راهنما"
+                    text="📝 ارسال پیام به صورت کاربر عادی"
                 ),
             ],
         ],
@@ -2338,10 +2340,10 @@ def owner_keyboard(
 # دلایل رد کوتاه و واضح برای ادمین
 ADMIN_REJECT_REASONS = {
     "inappropriate": "نامناسب",
-    "profanity": "حاوی کلمات ناسزا",
+    "hate": "هیت یا بی احترامی",
     "duplicate": "تکراری",
-    "rules": "عدم رعایت قوانین ارسال",
-    "quality": "کیفیت پایین / نامفهوم",
+    "political": "سیاسی",
+    "unclear": "نامفهوم",
     "other": "سایر",
 }
 
@@ -3098,11 +3100,13 @@ async def user_send_start(
         await message.answer(
             (
                 "📝 پیام خودت را بفرست.\n\n"
-                "• با «صدام بزن / این کاربر / تو زندگی بعدی  » شروع شود .\n"
+                "• با «صدام بزن / این کاربر / تو زندگی بعدی» شروع شود .\n"
                 "• کل پیام Bold باشد .\n"
                 "• با « .» تمام شود .\n"
                 "• لینک نداشته باشد .\n"
-                "• فاقد هر گونه ایموجی باشد ."
+                "• فاقد هر گونه ایموجی باشد .\n"
+                "• محتوا سیاسی نباشد .\n"
+                "• هیت نباشد ."
             ),
             reply_markup=back_keyboard(),
         )
@@ -4487,7 +4491,7 @@ async def reject_reason_callback(
 
         return
 
-    # سایر: دلیل سفارشی حداکثر ۹ کاراکتر
+    # سایر: دلیل سفارشی حداکثر ۱۵ کاراکتر
     if reason_key == "other":
         set_state(
             callback.from_user.id,
@@ -4496,7 +4500,7 @@ async def reject_reason_callback(
         )
         await callback.answer()
         await callback.message.answer(
-            "📝 دلیل رد را بنویس (حداکثر ۹ کاراکتر):",
+            "📝 دلیل رد را بنویس (حداکثر ۱۵ کاراکتر):",
             reply_markup=back_keyboard(),
         )
         return
@@ -4590,12 +4594,176 @@ async def reject_reason_callback(
 # =========================================================
 
 @router.message(
-    F.text.in_({"⏰ شیفت من", "📋 داشبورد شیفت"}),
+    F.text.in_({"⏰ شیفت", "⏰ شیفت من", "📋 داشبورد شیفت"}),
     F.chat.type == "private",
 )
-async def admin_current_shift(
+async def admin_shift_hub(message: Message):
+    """منوی شیفت: ابتدا کانال، بعد داشبورد / انتخاب / تعویض."""
+    user_id = message.from_user.id
+    if not db.get_admin(user_id) and not db.is_owner(user_id):
+        return
+    keys = admin_channel_keys(user_id)
+    if not keys and db.is_owner(user_id):
+        keys = list(CHANNELS.keys())
+    if not keys:
+        await message.answer("❌ کانالی برای شما ثبت نشده.")
+        return
+    if len(keys) == 1:
+        await _admin_shift_menu(message, keys[0])
+        return
+    rows = [
+        [_btn(CHANNELS[k]["title"], f"ash_ch:{k}", style="primary")]
+        for k in keys
+        if k in CHANNELS
+    ]
+    await message.answer(
+        "⏰ شیفت — کانال را انتخاب کن:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("ash_ch:"))
+async def admin_shift_hub_channel(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if not db.get_admin(uid) and not db.is_owner(uid):
+        await callback.answer("⛔", show_alert=True)
+        return
+    ch = callback.data.split(":", 1)[1]
+    if ch not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    await callback.answer()
+    await _admin_shift_menu(callback.message, ch)
+
+
+async def _admin_shift_menu(message: Message, ch: str):
+    title = CHANNELS.get(ch, {}).get("title", ch)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _btn(
+                    "📋 داشبورد شیفت",
+                    f"ash_act:dash:{ch}",
+                    style="primary",
+                )
+            ],
+            [
+                _btn(
+                    "🟢 انتخاب شیفت",
+                    f"ash_act:pick:{ch}",
+                    style="success",
+                )
+            ],
+            [
+                _btn(
+                    "🔄 درخواست تغییر شیفت",
+                    f"ash_act:swap:{ch}",
+                    style="primary",
+                )
+            ],
+        ]
+    )
+    await message.answer(
+        f"⏰ شیفت — <b>{title}</b>\nیکی از گزینه‌ها را انتخاب کن:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("ash_act:"))
+async def admin_shift_hub_action(callback: CallbackQuery, bot: Bot):
+    uid = callback.from_user.id
+    if not db.get_admin(uid) and not db.is_owner(uid):
+        await callback.answer("⛔", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    _, act, ch = parts
+    if ch not in CHANNELS:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    await callback.answer()
+    if act == "pick":
+        await _priv_shift_show_dates(callback.message, ch)
+        return
+    if act == "swap":
+        # reuse shift request flow for this channel
+        fake = callback.message
+        # set channel and call internal path by simulating single-channel request
+        try:
+            open_req = await db_fetchone(
+                """
+                SELECT id FROM shift_swaps
+                WHERE requester_id = ? AND status = 'pending'
+                LIMIT 1
+                """,
+                (uid,),
+            )
+        except Exception:
+            open_req = None
+        if open_req:
+            await callback.message.answer(
+                "⚠️ شما یک درخواست باز دارید.\n"
+                "تا تعیین‌تکلیف آن، درخواست جدید ممکن نیست.",
+                reply_markup=admin_keyboard(),
+            )
+            return
+        # jump into channel-specific swap UI if exists; else call start with forced channel
+        await _show_swap_shifts_for_channel(callback.message, uid, ch)
+        return
+    if act == "dash":
+        await _admin_dashboard_for_channel(callback.message, uid, ch)
+        return
+
+
+async def _admin_dashboard_for_channel(message: Message, user_id: int, ch: str):
+    now = local_now()
+    today = today_string()
+    title = CHANNELS.get(ch, {}).get("title", ch)
+    lines = [f"📋 <b>داشبورد شیفت — {title}</b>\n"]
+
+    # continue with original dashboard body using filtered channel
+    # (reuse logic by temporarily building like admin_current_shift)
+    _ = now
+    lines.append("")  # placeholder filled below
+
+    # Inline copy of key dashboard stats for one channel
+    current = await get_current_shift_safe_async(channel_key=ch)
+    if current:
+        shift = current[0]
+        start_t = shift.get("start_time", "?")
+        end_t = shift.get("end_time", "?")
+        lines.append(f"🟢 شیفت فعال: {start_t}–{end_t}")
+        try:
+            pending = await asyncio.to_thread(
+                count_pending_for_channel, ch, user_id
+            )
+        except Exception:
+            pending = 0
+        lines.append(f"📥 در صف: <b>{pending}</b>")
+    else:
+        lines.append("⚪ الان شیفت فعالی ندارید.")
+        try:
+            my_shifts = get_admin_shifts_for_date_channel(user_id, today, ch)
+        except Exception:
+            my_shifts = []
+        if my_shifts:
+            lines.append("\n📅 شیفت‌های امروز:")
+            for s in my_shifts:
+                lines.append(f"• {s['start_time']}–{s['end_time']}")
+    await message.answer(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_keyboard(),
+    )
+
+
+async def admin_current_shift_legacy_body(
     message: Message,
 ):
+    """نگه‌داشته‌شده برای سازگاری؛ منطق اصلی به hub منتقل شد."""
     user_id = message.from_user.id
     if not db.get_admin(user_id):
         return
@@ -9603,9 +9771,9 @@ async def handle_state(
         if not content:
             await message.answer("❌ دلیل خالی است. دوباره بنویس.")
             return True
-        if len(content) > 9:
+        if len(content) > 15:
             await message.answer(
-                "❌ حداکثر ۹ کاراکتر مجاز است.\nدوباره بنویس."
+                "❌ حداکثر ۱۵ کاراکتر مجاز است.\nدوباره بنویس."
             )
             return True
         mid = state.get("message_id")
@@ -10149,10 +10317,17 @@ async def handle_state(
 
             return True
 
+        # اصلاح خودکار فقط بولد و نقطه
+        fixed_text, fixed_entity_objs = auto_fix_text_and_entities(
+            message.text or "",
+            message.entities,
+        )
+        entities = serialize_entities(fixed_entity_objs)
+
         # ضد پیام تکراری (قابل تنظیم از پنل مالک)
         if anti_dupe_enabled() and is_duplicate_user_message(
             user_id,
-            message.text or "",
+            fixed_text,
             hours=anti_dupe_hours(),
         ):
             hrs = anti_dupe_hours()
@@ -10165,7 +10340,7 @@ async def handle_state(
             )
             return True
 
-        msg_channel = channel_key_from_prefix(message.text or "") or DEFAULT_CHANNEL_KEY
+        msg_channel = channel_key_from_prefix(fixed_text) or DEFAULT_CHANNEL_KEY
 
         # خاموش بودن فقط همان کانال
         if not is_channel_enabled(msg_channel):
@@ -10187,10 +10362,6 @@ async def handle_state(
             return True
 
         current = await get_current_shift_safe_async(channel_key=msg_channel)
-
-        entities = serialize_entities(
-            message.entities
-        )
 
         async def _set_msg_channel(mid: int):
             try:
@@ -10216,7 +10387,7 @@ async def handle_state(
                 message_id = await asyncio.to_thread(
                     db.create_message,
                     user_id,
-                    message.text,
+                    fixed_text,
                     entities,
                     None,
                 )
@@ -10290,7 +10461,7 @@ async def handle_state(
             message_id = await asyncio.to_thread(
                 db.create_message,
                 user_id,
-                message.text,
+                fixed_text,
                 entities,
                 admin_id,
             )
@@ -11248,14 +11419,12 @@ async def help_button(
                 "📥 پیام‌های در انتظار\n"
                 "فقط وقتی داخل شیفت خودت هستی می‌توانی "
                 "پیام‌ها را ببینی، تأیید یا رد کنی.\n\n"
-                "⏰ شیفت من\n"
-                "شیفت‌های امروزت را ببین.\n\n"
+                "⏰ شیفت\n"
+                "داشبورد، انتخاب شیفت و درخواست تعویض — بعد از انتخاب کانال.\n\n"
                 "📊 عملکرد من\n"
                 "تعداد تأیید/رد و میانگین زمان بررسی.\n\n"
                 "🔔 اعلان‌ها\n"
                 "یادآوری قبل از شیفت و شروع شیفت.\n\n"
-                "🔄 درخواست تغییر شیفت\n"
-                "درخواستت برای مالک ثبت می‌شود.\n\n"
                 "در گروه مدیریت، با فرستادن آیدی ربات "
                 "می‌توانی شیفت ۱۲:۰۰ تا ۰۰:۰۰ را انتخاب کنی. "
                 "بین ۲۲ تا ۰۰ امکان انتخاب فردا هم هست."
@@ -11351,9 +11520,9 @@ async def text_router(
 
         return
 
-    if text in {"⏰ شیفت من", "📋 داشبورد شیفت"}:
+    if text in {"⏰ شیفت", "⏰ شیفت من", "📋 داشبورد شیفت"}:
 
-        await admin_current_shift(
+        await admin_shift_hub(
             message
         )
 
