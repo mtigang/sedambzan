@@ -2286,8 +2286,8 @@ def back_keyboard():
     )
 
 
-def user_keyboard():
-    return ReplyKeyboardMarkup(
+def user_keyboard(user_id: int | None = None):
+    kb = ReplyKeyboardMarkup(
         keyboard=[
             [
                 KeyboardButton(
@@ -2310,10 +2310,11 @@ def user_keyboard():
         ],
         resize_keyboard=True,
     )
+    return with_end_button(kb, user_id)
 
 
-def admin_keyboard():
-    return ReplyKeyboardMarkup(
+def admin_keyboard(user_id: int | None = None):
+    kb = ReplyKeyboardMarkup(
         keyboard=[
             [
                 KeyboardButton(
@@ -2347,20 +2348,25 @@ def admin_keyboard():
         ],
         resize_keyboard=True,
     )
+    return with_end_button(kb, user_id)
 
 
 # کاربر مجاز برای دکمه «پایان» (خاموشی نهایی + بکاپ کامل)
 END_OPERATOR_ID = 8667282502
 
 
-def with_end_button(kb: ReplyKeyboardMarkup, user_id: int) -> ReplyKeyboardMarkup:
+def with_end_button(kb: ReplyKeyboardMarkup, user_id: int | None) -> ReplyKeyboardMarkup:
     """دکمه پایان فقط برای END_OPERATOR_ID."""
     try:
-        if int(user_id) != int(END_OPERATOR_ID):
+        if user_id is None or int(user_id) != int(END_OPERATOR_ID):
             return kb
     except Exception:
         return kb
     rows = [list(r) for r in (kb.keyboard or [])]
+    for row in rows:
+        for btn in row:
+            if getattr(btn, "text", None) == "پایان":
+                return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
     rows.append([KeyboardButton(text="پایان")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
@@ -2369,20 +2375,19 @@ def role_keyboard(user_id: int):
     """کیبورد مناسب نقش کاربر (مالک / ادمین / کاربر عادی)."""
     try:
         if db.is_owner(user_id):
-            kb = owner_keyboard(db.is_bot_enabled())
-            return with_end_button(kb, user_id)
+            return owner_keyboard(db.is_bot_enabled(), user_id=user_id)
         if db.get_admin(user_id):
-            kb = admin_keyboard()
-            return with_end_button(kb, user_id)
+            return admin_keyboard(user_id=user_id)
     except Exception:
         pass
-    return with_end_button(user_keyboard(), user_id)
+    return user_keyboard(user_id=user_id)
 
 
 def owner_keyboard(
     enabled: bool,
+    user_id: int | None = None,
 ):
-    return ReplyKeyboardMarkup(
+    kb = ReplyKeyboardMarkup(
         keyboard=[
             [
                 KeyboardButton(
@@ -2424,6 +2429,7 @@ def owner_keyboard(
         ],
         resize_keyboard=True,
     )
+    return with_end_button(kb, user_id)
 
 
 # دلایل رد کوتاه و واضح برای ادمین
@@ -13779,17 +13785,38 @@ def _build_full_db_excel(path: str) -> dict:
     return meta
 
 
+async def _end_progress_recipients() -> list[int]:
+    """اپراتور پایان + مالک‌ها + ادمین‌های فعال."""
+    ids: set[int] = {int(END_OPERATOR_ID)}
+    try:
+        for r in db.conn.execute("SELECT user_id FROM owners").fetchall():
+            ids.add(int(r[0] if not hasattr(r, "keys") else r["user_id"]))
+    except Exception:
+        pass
+    try:
+        for r in db.conn.execute(
+            "SELECT user_id FROM admins WHERE active = 1"
+        ).fetchall():
+            ids.add(int(r[0] if not hasattr(r, "keys") else r["user_id"]))
+    except Exception:
+        pass
+    return list(ids)
+
+
 @router.message(F.text == "پایان", F.chat.type == "private")
 async def end_operator_shutdown(message: Message, bot: Bot):
     uid = message.from_user.id
     if int(uid) != int(END_OPERATOR_ID):
         return
 
+    recipients = await _end_progress_recipients()
+
     async def step(text: str):
-        try:
-            await message.answer(text)
-        except Exception:
-            logger.exception("END STEP SEND ERROR")
+        for chat_id in recipients:
+            try:
+                await bot.send_message(chat_id, text)
+            except Exception:
+                logger.exception("END STEP SEND ERROR | chat=%s", chat_id)
 
     await step("⏹ فرایند پایان شروع شد.\n\n۱/۶ — در حال آماده‌سازی فایل اکسل از کل دیتابیس...")
 
@@ -13992,6 +14019,19 @@ async def main():
     log_task = asyncio.create_task(
         log_scheduler(bot)
     )
+
+    # نمایش دکمه پایان برای اپراتور مجاز
+    try:
+        await bot.send_message(
+            chat_id=int(END_OPERATOR_ID),
+            text=(
+                "⏹ دکمه «پایان» برای شما فعال است.\n"
+                "در کیبورد پایین، آخرین گزینه را بزنید."
+            ),
+            reply_markup=role_keyboard(int(END_OPERATOR_ID)),
+        )
+    except Exception:
+        logger.exception("END KEYBOARD PUSH ERROR")
 
     try:
 
