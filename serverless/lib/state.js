@@ -1,9 +1,3 @@
-/**
- * state ساده در حافظهٔ isolate — برای Serverless ماندگار نیست؛
- * برای state پایدار از جدول settings/users استفاده کنید.
- * اینجا فقط برای فلو کوتاه ارسال پیام در یک invocation کافی نیست،
- * پس state را در settings با کلید user:{id}:state نگه می‌داریم.
- */
 import { db } from 'sdk';
 import { settings } from 'schema';
 import { eq } from 'sdk/db';
@@ -15,7 +9,7 @@ function keyFor(userId) {
 export async function setState(userId, kind, extra = {}) {
   const payload = JSON.stringify({ kind, ...extra, ts: Date.now() });
   const k = keyFor(userId);
-  const existing = await db.select().from(settings).where(eq(settings.key, k)).run();
+  const existing = await db.select().from(settings).where(eq(settings.key, k)).all();
   if (existing && existing.length) {
     await db.update(settings).set({ value: payload }).where(eq(settings.key, k)).run();
   } else {
@@ -25,7 +19,7 @@ export async function setState(userId, kind, extra = {}) {
 
 export async function getState(userId) {
   const k = keyFor(userId);
-  const rows = await db.select().from(settings).where(eq(settings.key, k)).run();
+  const rows = await db.select().from(settings).where(eq(settings.key, k)).all();
   if (!rows || !rows.length || !rows[0].value) return null;
   try {
     return JSON.parse(rows[0].value);
