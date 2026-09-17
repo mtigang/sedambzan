@@ -14,7 +14,7 @@ export async function upsertUser(from) {
     .select()
     .from(users)
     .where(eq(users.userId, from.id))
-    .run();
+    .all();
   if (existing && existing.length) {
     await db
       .update(users)
@@ -49,7 +49,7 @@ export async function getUserRole(userId) {
     .select()
     .from(users)
     .where(eq(users.userId, userId))
-    .run();
+    .all();
   if (rows && rows[0] && rows[0].role === 'admin') return 'admin';
   return 'user';
 }
