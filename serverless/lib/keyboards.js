@@ -15,7 +15,6 @@ export function adminKeyboard() {
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '⏰ شیفت من' }],
       [{ text: '📊 عملکرد من' }],
-      [{ text: '📝 ارسال پیام به صورت کاربر عادی' }],
     ],
     resize_keyboard: true,
   };
@@ -109,12 +108,13 @@ export function reviewInline(id) {
 }
 
 export function rejectReasonsInline(id) {
-  const reasons = ['نامناسب', 'هیت یا بی‌احترامی', 'تکراری', 'سیاسی', 'نامفهوم'];
+  const reasons = ['نامناسب', 'هیت یا بی احترامی', 'تکراری', 'سیاسی', 'نامفهوم'];
   return {
     inline_keyboard: [
       ...reasons.map((r) => [
         { text: r, callback_data: 'reject:' + id + ':' + r, style: 'danger' },
       ]),
+      [{ text: 'سایر (تایپ دلیل)', callback_data: 'reject_other:' + id, style: 'primary' }],
       [{ text: 'انصراف', callback_data: 'reject_cancel:' + id, style: 'primary' }],
     ],
   };
@@ -200,4 +200,15 @@ export function adminListInline(admins, channelKey) {
     },
   ]);
   return { inline_keyboard: rows };
+}
+
+
+export function announceTargetInline() {
+  return {
+    inline_keyboard: [
+      [{ text: '👮 فقط ادمین‌ها', callback_data: 'ann_target:admins', style: 'primary' }],
+      [{ text: '👥 همه کاربران', callback_data: 'ann_target:all', style: 'success' }],
+      [{ text: 'لغو', callback_data: 'ann_cancel', style: 'danger' }],
+    ],
+  };
 }
