@@ -1,6 +1,6 @@
 import { api, db } from 'sdk';
 import { eq, and } from 'sdk/db';
-import { messages, feedback, shifts, settings } from 'schema';
+import { messages, feedback, shifts, settings, users, channelAdmins } from 'schema';
 import {
   isOwner,
   removeChannelAdmin,
@@ -13,6 +13,8 @@ import {
   settingGet,
   settingSet,
   activeShiftAdmins,
+  deliverPendingForAdmin,
+  addChannelAdmin,
 } from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange } from 'lib/time';
@@ -203,7 +205,22 @@ if (data.startsWith('approve:')) {
       return;
     }
 
-    if (data.startsWith('reject:')) {
+    
+    if (data.startsWith('reject_other:')) {
+      if (!(await assertCanReview())) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط در شیفت', show_alert: true });
+        return;
+      }
+      const id = Number(data.split(':')[1]);
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await setState(userId, 'reject_custom', { msgId: id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'دلیل رد را بنویسید (حداکثر ۲۲ کاراکتر):',
+      });
+      return;
+    }
+if (data.startsWith('reject:')) {
       if (!(await assertCanReview())) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
@@ -461,7 +478,81 @@ if (data.startsWith('approve:')) {
       return;
     }
 
-    if (data.startsWith('shift_pick:')) {
+    
+    if (data === 'ann_cancel') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
+      await clearState(userId);
+      return;
+    }
+
+    if (data.startsWith('ann_target:')) {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      const target = data.split(':')[1];
+      const st = await getState(userId);
+      const annText = st && st.annText;
+      await clearState(userId);
+      if (!annText) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'متن پیدا نشد. دوباره 📣 اطلاعیه را بزنید.',
+        });
+        return;
+      }
+      let ids = [];
+      if (target === 'admins') {
+        const ads = (await db.select().from(channelAdmins).all()) || [];
+        ids = [...new Set(ads.map((a) => a.userId || a.user_id).filter(Boolean))];
+      } else {
+        const all = (await db.select().from(users).all()) || [];
+        ids = all.map((u) => u.userId || u.user_id).filter(Boolean);
+      }
+      ids = ids.filter((id) => id && id !== userId);
+      const total = ids.length;
+      let ok = 0;
+      let fail = 0;
+      const progress = await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '📣 در حال ارسال... 0/' + total,
+      });
+      const bar = (done, tot) => {
+        const n = tot ? Math.floor((done / tot) * 10) : 0;
+        return '█'.repeat(n) + '░'.repeat(10 - n);
+      };
+      for (let i = 0; i < ids.length; i++) {
+        try {
+          await api.sendMessage({ chat_id: ids[i], text: annText });
+          ok++;
+        } catch (_) {
+          fail++;
+        }
+        if (i % 25 === 0 || i === ids.length - 1) {
+          try {
+            await api.editMessageText({
+              chat_id: cq.message.chat.id,
+              message_id: progress.message_id,
+              text:
+                '📣 ارسال\n' +
+                bar(i + 1, total) +
+                ' ' +
+                (i + 1) +
+                '/' +
+                total +
+                '\n✅ ' +
+                ok +
+                ' ❌ ' +
+                fail,
+            });
+          } catch (_) {}
+        }
+      }
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '✅ اطلاعیه تمام شد.\nموفق: ' + ok + ' / ناموفق: ' + fail + ' از ' + total,
+      });
+      return;
+    }
+
+if (data.startsWith('shift_pick:')) {
       const parts = data.split(':');
       const channelKey = parts[1];
       const startHm = parts[2];
@@ -524,7 +615,23 @@ if (data.startsWith('approve:')) {
         .run();
 
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت شد' });
-      await refreshAllShiftBoards(channelKey, date);
+      try {
+        await refreshAllShiftBoards(channelKey, date);
+      } catch (e) {
+        console.error('refresh boards', e);
+      }
+      // اگر الان داخل شیفت است، صف را تحویل بده
+      try {
+        const n = await deliverPendingForAdmin(userId);
+        if (n > 0) {
+          await api.sendMessage({
+            chat_id: userId,
+            text: '📥 ' + n + ' پیام صف برای شیفت فعلی ارسال شد.',
+          });
+        }
+      } catch (e) {
+        console.error('deliver after pick', e);
+      }
       await api.sendMessage({
         chat_id: userId,
         text:
@@ -534,7 +641,7 @@ if (data.startsWith('approve:')) {
           startHm +
           '–' +
           endHm +
-          ' ثبت شد.',
+          ' ثبت شد.\nوقتی ساعت شروع برسد پیام‌های صف خودکار می‌آید.',
       });
       return;
     }
