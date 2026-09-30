@@ -57,7 +57,21 @@ function hasEmoji(text) {
   return false;
 }
 
+/** بدنه پیام بعد از پیشوند تا قبل از نقطه پایانی — برای تشخیص تکراری */
+export function normalizeBody(text) {
+  let t = String(text || '').trim();
+  for (const { prefix } of CHANNEL_PREFIXES) {
+    if (t.startsWith(prefix)) {
+      t = t.slice(prefix.length);
+      break;
+    }
+  }
+  t = t.replace(/\s*\.\s*$/, '').replace(/\s+/g, ' ').trim();
+  return t;
+}
+
 export function detectChannel(text) {
+
   const t = (text || '').trim();
   for (const { key, prefix } of CHANNEL_PREFIXES) {
     if (t.startsWith(prefix)) return { key, prefix };
