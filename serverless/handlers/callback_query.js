@@ -7,6 +7,7 @@ import {
   listAdminsByChannel,
   syncAdminsFromGroup,
   postToChannel,
+  toBoldHtml,
   displayName,
   getUser,
   settingGet,
@@ -124,7 +125,7 @@ export default async function (cq) {
       try {
         const conf = DEFAULT_CHANNELS[row.channelKey];
         if (conf?.chatId) {
-          const sent = await api.sendMessage({ chat_id: conf.chatId, text: row.content });
+          const sent = await api.sendMessage({ chat_id: conf.chatId, text: toBoldHtml(row.content), parse_mode: 'HTML' });
           const mid = sent && sent.message_id;
           link = channelMessageLink(conf.chatId, mid);
         }
