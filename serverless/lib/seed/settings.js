@@ -1,1 +1,1 @@
-export default [{"key": "bot_enabled", "value": "1"}];
+export const data = [{"key": "bot_enabled", "value": "1"}];
