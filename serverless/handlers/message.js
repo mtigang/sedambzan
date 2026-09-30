@@ -31,14 +31,6 @@ import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin } from 'lib/time';
 import { resolveUserId } from 'lib/resolve';
 import {
-  USER_CHUNKS,
-  MESSAGE_CHUNKS,
-  importUsersChunk,
-  importMessagesChunk,
-  importFeedbackAll,
-  importSettingsAll,
-} from 'lib/import_backup';
-import {
   ensureChannelsSeeded,
   getChannels,
   getChannel,
@@ -970,54 +962,11 @@ export default async function (message) {
 
 
     if (owner && text === '📦 بازیابی بکاپ') {
-      try {
-        await api.sendMessage({
-          chat_id: chatId,
-          text:
-            '📦 شروع بازیابی بکاپ (بدون ادمین‌ها)\\n' +
-            'کاربران: ' + USER_CHUNKS + ' بخش\\n' +
-            'پیام‌ها: ' + MESSAGE_CHUNKS + ' بخش\\n' +
-            'لطفاً صبر کنید...',
-        });
-        let uOk = 0, uSkip = 0;
-        for (let i = 0; i < USER_CHUNKS; i++) {
-          const r = await importUsersChunk(i);
-          uOk += r.ok;
-          uSkip += r.skip;
-          await api.sendMessage({
-            chat_id: chatId,
-            text: '👤 کاربران بخش ' + (i + 1) + '/' + USER_CHUNKS + ' — جدید: ' + r.ok + ' ردشد: ' + r.skip,
-          });
-        }
-        let mOk = 0;
-        for (let i = 0; i < MESSAGE_CHUNKS; i++) {
-          const r = await importMessagesChunk(i);
-          mOk += r.ok;
-          await api.sendMessage({
-            chat_id: chatId,
-            text: '📨 پیام‌ها بخش ' + (i + 1) + '/' + MESSAGE_CHUNKS + ' — ' + r.ok,
-          });
-        }
-        const fb = await importFeedbackAll();
-        const st = await importSettingsAll();
-        await api.sendMessage({
-          chat_id: chatId,
-          text:
-            '✅ بازیابی تمام شد\\n' +
-            'کاربران جدید: ' + uOk + ' (ردشد تکراری: ' + uSkip + ')\\n' +
-            'پیام‌ها: ' + mOk + '\\n' +
-            'فیدبک: ' + fb.ok + '\\n' +
-            'تنظیمات: ' + st.ok,
-          reply_markup: settingsKeyboard(await isBotOn()),
-        });
-      } catch (e) {
-        console.error('import backup', e);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'خطا در بازیابی: ' + (e && e.message ? e.message : String(e)),
-          reply_markup: settingsKeyboard(await isBotOn()),
-        });
-      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '📦 بازیابی از داخل ربات خاموش شد.\nروی سرور این دستور را بزن:\nnpx tgcloud run handlers/seed_import',
+        reply_markup: settingsKeyboard(await isBotOn()),
+      });
       return;
     }
 
