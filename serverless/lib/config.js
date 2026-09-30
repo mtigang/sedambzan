@@ -1,12 +1,26 @@
 export const OWNER_IDS = [6666610646, 8302194171, 8434360251];
 
-/** کانال‌های پیش‌فرض (اگر جدول channels خالی باشد seed می‌شود) */
+/** آیدی عددی کانال‌ها — ثابت تا آخر */
+export const CHANNEL_IDS = {
+  sadambazan: -1003877061735,
+  inkarbar: -1003764383335,
+  zendegi: -1004371148799,
+};
+
+/** گروه ادمین‌های هر کانال — اعضا = ادمین همان کانال در ربات */
+export const ADMIN_GROUP_IDS = {
+  sadambazan: -1004444089094,
+  inkarbar: -1004335935102,
+  zendegi: -1003812392984,
+};
+
 export const DEFAULT_CHANNELS = {
   sadambazan: {
     key: 'sadambazan',
     title: 'صدام بزن',
     prefixes: ['صدام بزن'],
-    link: '',
+    chatId: CHANNEL_IDS.sadambazan,
+    adminGroupId: ADMIN_GROUP_IDS.sadambazan,
     workStart: '00:00',
     workEnd: '23:59',
   },
@@ -14,7 +28,8 @@ export const DEFAULT_CHANNELS = {
     key: 'inkarbar',
     title: 'این کاربر',
     prefixes: ['این کاربر'],
-    link: '',
+    chatId: CHANNEL_IDS.inkarbar,
+    adminGroupId: ADMIN_GROUP_IDS.inkarbar,
     workStart: '00:00',
     workEnd: '23:59',
   },
@@ -22,7 +37,8 @@ export const DEFAULT_CHANNELS = {
     key: 'zendegi',
     title: 'تو زندگی بعدی',
     prefixes: ['تو زندگی بعدی'],
-    link: '',
+    chatId: CHANNEL_IDS.zendegi,
+    adminGroupId: ADMIN_GROUP_IDS.zendegi,
     workStart: '11:00',
     workEnd: '00:00',
   },
@@ -33,6 +49,21 @@ export const CHANNEL_PREFIXES = [
   { key: 'inkarbar', prefix: 'این کاربر' },
   { key: 'zendegi', prefix: 'تو زندگی بعدی' },
 ];
+
+/** شیفت‌ها: ۱۰ صبح تا ۲ بامداد، یک‌ساعته */
+export function buildShiftSlots() {
+  const slots = [];
+  // 10:00 .. 23:00
+  for (let h = 10; h <= 23; h++) {
+    const start = String(h).padStart(2, '0') + ':00';
+    const end = h === 23 ? '00:00' : String(h + 1).padStart(2, '0') + ':00';
+    slots.push({ start, end, label: start + '–' + end });
+  }
+  // 00:00-01:00, 01:00-02:00
+  slots.push({ start: '00:00', end: '01:00', label: '00:00–01:00' });
+  slots.push({ start: '01:00', end: '02:00', label: '01:00–02:00' });
+  return slots;
+}
 
 export const WELCOME_TEXT =
   'به ربات هوشمند آرال خوش آمدید.\n\nاز منوی زیر یک گزینه را انتخاب کنید.';
