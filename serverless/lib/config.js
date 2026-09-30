@@ -1,6 +1,12 @@
 export const OWNER_IDS = [6666610646, 8302194171, 8434360251];
 
 /** آیدی عددی کانال‌ها — ثابت تا آخر */
+export const CHANNEL_USERNAMES = {
+  sadambazan: 'callMeAraIl',
+  inkarbar: null,
+  zendegi: null,
+};
+
 export const CHANNEL_IDS = {
   sadambazan: -1003877061735,
   inkarbar: -1003764383335,
