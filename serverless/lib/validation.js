@@ -2,14 +2,16 @@ import { CHANNEL_PREFIXES } from 'lib/config';
 
 function utf16Len(str) {
   let n = 0;
-  for (const ch of str) {
-    n += ch.codePointAt(0) > 0xffff ? 2 : 1;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    n += c >= 0xd800 && c <= 0xdbff ? 2 : 1;
+    if (c >= 0xd800 && c <= 0xdbff) i++;
   }
   return n;
 }
 
 function isFullyBold(text, entities) {
-  if (!text || !entities?.length) return false;
+  if (!text || !entities || !entities.length) return false;
   const total = utf16Len(text);
   const bold = entities
     .filter((e) => e.type === 'bold')
@@ -25,13 +27,34 @@ function isFullyBold(text, entities) {
 }
 
 function hasLink(entities, text) {
-  if (entities?.some((e) => e.type === 'url' || e.type === 'text_link')) return true;
+  if (entities && entities.some((e) => e.type === 'url' || e.type === 'text_link')) return true;
   return /https?:\/\//i.test(text || '');
 }
 
 function hasEmoji(text) {
-  // ساده — بلاک‌های رایج ایموجی
-  return /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(text || '');
+  if (!text) return false;
+  // بدون flag u برای سازگاری بیشتر — بازه‌های surrogate
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const c2 = text.charCodeAt(i + 1);
+      if (c2 >= 0xdc00 && c2 <= 0xdfff) {
+        const cp = ((c - 0xd800) << 10) + (c2 - 0xdc00) + 0x10000;
+        // emoji ranges rough
+        if (
+          (cp >= 0x1f300 && cp <= 0x1faff) ||
+          (cp >= 0x1f600 && cp <= 0x1f64f) ||
+          (cp >= 0x1f900 && cp <= 0x1f9ff)
+        ) {
+          return true;
+        }
+        i++;
+      }
+    }
+  }
+  // misc symbols
+  if (/[\u2600-\u27BF]/.test(text)) return true;
+  return false;
 }
 
 export function detectChannel(text) {
@@ -42,12 +65,6 @@ export function detectChannel(text) {
   return null;
 }
 
-/**
- * اعتبارسنجی + اصلاح خودکار:
- * - اگر بولد نبود → قبول (نسخه اصلاح‌شده برای ادمین)
- * - اگر نقطه آخر نداشت → « .» اضافه می‌شود
- * - فقط پیشوند کانال اجباری سخت است + لینک/ایموجی
- */
 export function validateAndFix(message) {
   let text = (message.text || '').trim();
   const entities = message.entities || [];
@@ -66,21 +83,18 @@ export function validateAndFix(message) {
     return { ok: false, error: '🚫 ایموجی در پیام مجاز نیست.' };
   }
 
-  // نقطه آخر — فارسی یا انگلیسی، با یا بدون فاصله
-  if (!/[.．。]\s*$/.test(text) && !/\s+\.\s*$/.test(text)) {
-    if (!text.endsWith('.')) text = text.replace(/\s*$/, '') + ' .';
-    else text = text.replace(/\.\s*$/, ' .');
-  } else if (text.endsWith('.') && !text.endsWith(' .')) {
+  // نقطه آخر
+  if (!/\s+\.\s*$/.test(text) && !/\.\s*$/.test(text)) {
+    text = text.replace(/\s*$/, '') + ' .';
+  } else if (text.endsWith('.') && !/\s\.\s*$/.test(text)) {
     text = text.replace(/\.\s*$/, ' .');
   }
 
   const wasBold = isFullyBold(message.text || '', entities);
-  // بولد نبود → گیر نمی‌دهیم؛ فقط علامت می‌زنیم
   return {
     ok: true,
     channelKey: ch.key,
     content: text,
     autoFixed: !wasBold || text !== (message.text || '').trim(),
-    fixedBold: !wasBold,
   };
 }
