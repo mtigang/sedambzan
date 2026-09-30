@@ -44,6 +44,7 @@ export function settingsKeyboard(botOn) {
       [{ text: '📣 ارسال به کانال' }, { text: '📣 اطلاعیه' }],
       [{ text: '🧪 تست کانال‌ها' }, { text: '🔄 همگام‌سازی ادمین‌ها' }],
       [{ text: '🧹 پاک‌سازی صف' }],
+      [{ text: '📦 بازیابی بکاپ' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
