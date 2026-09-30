@@ -272,27 +272,66 @@ export async function listAdminsByChannel(channelKey) {
 export async function syncAdminsFromGroup(channelKey) {
   const groupId = ADMIN_GROUP_IDS[channelKey];
   if (!groupId) return { ok: false, error: 'no group', added: 0 };
-  let admins = [];
+
+  let added = 0;
+  let scanned = 0;
+  const errors = [];
+
+  // 1) ادمین‌های گروه
   try {
-    admins = await api.getChatAdministrators({ chat_id: groupId });
+    const admins = await api.getChatAdministrators({ chat_id: groupId });
+    scanned += (admins || []).length;
+    for (const a of admins || []) {
+      const uid = a.user?.id;
+      if (!uid || a.user?.is_bot) continue;
+      if (isOwner(uid)) continue;
+      try {
+        await upsertUser(a.user);
+        await addChannelAdmin(uid, channelKey);
+        added++;
+      } catch (e) {
+        errors.push(String(e?.description || e));
+      }
+    }
   } catch (e) {
     console.error('getChatAdministrators', channelKey, e);
-    return { ok: false, error: String(e?.description || e), added: 0 };
+    return {
+      ok: false,
+      error: e?.description || String(e),
+      added: 0,
+    };
   }
-  let added = 0;
-  for (const a of admins || []) {
-    const uid = a.user?.id;
-    if (!uid || a.user?.is_bot) continue;
-    if (isOwner(uid)) continue;
-    try {
-      await upsertUser(a.user);
-      await addChannelAdmin(uid, channelKey);
-      added++;
-    } catch (e) {
-      console.error('sync member', uid, e);
+
+  // 2) کاربران استارت‌کرده ربات — عضویت در گروه را چک کن
+  try {
+    const allUsers = (await db.select().from(users).all()) || [];
+    for (const u of allUsers) {
+      const uid = u.userId ?? u.user_id;
+      if (!uid || isOwner(uid)) continue;
+      if (u.role === 'owner') continue;
+      try {
+        const member = await api.getChatMember({ chat_id: groupId, user_id: uid });
+        const st = member?.status;
+        if (st && st !== 'left' && st !== 'kicked') {
+          await addChannelAdmin(uid, channelKey);
+          added++;
+          scanned++;
+        }
+      } catch (_) {
+        // عضو نیست یا privacy
+      }
     }
+  } catch (e) {
+    console.error('scan users membership', e);
+    errors.push('scan:' + (e?.message || e));
   }
-  return { ok: true, added, total: (admins || []).length };
+
+  return {
+    ok: true,
+    added,
+    scanned,
+    error: errors.length ? errors.slice(0, 3).join('; ') : undefined,
+  };
 }
 
 export async function syncAllAdminGroups(force = false) {
