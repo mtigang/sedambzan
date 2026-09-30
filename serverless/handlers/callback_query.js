@@ -87,7 +87,30 @@ export default async function (cq) {
       return mySh.some((s) => inRange(hm, s.startHm, s.endHm));
     }
 
-    if (data.startsWith('approve:')) {
+    
+    if (data.startsWith('uv:')) {
+      const uid = Number(data.slice(3));
+      let u = null;
+      try { u = await getUser(uid); } catch (_) {}
+      const name = u
+        ? [u.firstName, u.lastName].filter(Boolean).join(' ') || u.username || String(uid)
+        : String(uid);
+      const un = u?.username ? '@' + u.username : '—';
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '👤 کاربر\n' +
+          'نام: ' + name + '\n' +
+          'یوزرنیم: ' + un + '\n' +
+          'آیدی: `' + uid + '`\n' +
+          '(به‌خاطر حریم خصوصی تلگرام لینک مستقیم پیوی ممکن نیست)',
+        parse_mode: 'Markdown',
+      });
+      return;
+    }
+
+if (data.startsWith('approve:')) {
       if (!(await assertCanReview())) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
