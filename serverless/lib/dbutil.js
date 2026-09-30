@@ -199,23 +199,35 @@ export async function adminChannels(userId) {
 export async function addChannelAdmin(userId, channelKey) {
   if (isOwner(userId)) return;
   try {
-    const exist = await db
-      .select()
-      .from(channelAdmins)
-      .where(and(eq(channelAdmins.userId, userId), eq(channelAdmins.channelKey, channelKey)))
-      .all();
-    if (exist?.length) return;
-    await db.insert(channelAdmins).values({ userId, channelKey }).run();
+    const all = (await db.select().from(channelAdmins).all()) || [];
+    const exists = all.some(
+      (r) =>
+        Number(r.userId ?? r.user_id) === Number(userId) &&
+        (r.channelKey === channelKey || r.channel_key === channelKey)
+    );
+    if (exists) return;
+    await db.insert(channelAdmins).values({ userId: Number(userId), channelKey }).run();
+  } catch (e) {
+    console.error('addChannelAdmin insert', e);
+    // retry once
+    try {
+      await db.insert(channelAdmins).values({ userId: Number(userId), channelKey }).run();
+    } catch (e2) {
+      console.error('addChannelAdmin retry', e2);
+      return;
+    }
+  }
+  try {
     const u = await getUser(userId);
     if (u) {
-      if (u.role !== 'owner') {
+      if (u.role !== 'owner' && u.role !== 'admin') {
         await db.update(users).set({ role: 'admin' }).where(eq(users.userId, userId)).run();
       }
     } else {
-      await db.insert(users).values({ userId, role: 'admin', started: 0 }).run();
+      await db.insert(users).values({ userId: Number(userId), role: 'admin', started: 0 }).run();
     }
   } catch (e) {
-    console.error('addChannelAdmin', e);
+    console.error('addChannelAdmin role', e);
   }
 }
 
@@ -239,23 +251,19 @@ export async function removeChannelAdmin(userId, channelKey) {
 
 export async function listAdminsByChannel(channelKey) {
   try {
-    const rows =
-      (await db
-        .select()
-        .from(channelAdmins)
-        .where(eq(channelAdmins.channelKey, channelKey))
-        .all()) || [];
+    const all = (await db.select().from(channelAdmins).all()) || [];
+    const rows = all.filter((r) => r.channelKey === channelKey || r.channel_key === channelKey);
     const out = [];
     for (const r of rows) {
-      const u = await getUser(r.userId);
-      out.push({
-        userId: r.userId,
-        display: displayName(u, r.userId),
-        user: u,
-      });
+      const uid = r.userId ?? r.user_id;
+      if (!uid) continue;
+      let u = null;
+      try { u = await getUser(uid); } catch (_) {}
+      out.push({ userId: uid, display: displayName(u, uid), user: u });
     }
     return out;
-  } catch (_) {
+  } catch (e) {
+    console.error('listAdminsByChannel', channelKey, e);
     return [];
   }
 }
