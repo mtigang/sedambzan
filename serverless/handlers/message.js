@@ -92,10 +92,7 @@ export default async function (message) {
       console.error('upsert', e);
     }
 
-    // همگام‌سازی سبک هر تعامل (حداکثر هر ۳۰ دقیقه)
-    try {
-      await syncAllAdminGroups(false);
-    } catch (_) {}
+    // همگام‌سازی خودکار حذف شد — فقط از دکمه مالک (برای جلوگیری از تایم‌اوت)
 
     const u = await getUser(userId);
     if (u?.blocked && !isOwner(userId)) {
