@@ -476,34 +476,34 @@ export default async function (message) {
           .from(shifts)
           .where(eq(shifts.channelKey, entry.key))
           .all()) || [];
-      const today = dayShifts.filter((s) => s.shiftDate === date && s.status === 'active');
+      const today = dayShifts.filter(
+        (s) => s.shiftDate === date && s.status === 'active'
+      );
       const takenMap = {};
       const myStarts = new Set();
       for (const s of today) {
         takenMap[s.startHm] = s.adminId;
         if (s.adminId === userId) myStarts.add(s.startHm);
       }
-            await clearState(userId);
+      await clearState(userId);
       let head =
         '⏰ شیفت‌های «' +
         entry.title +
-        '»
-📅 ' +
+        '»\n📅 ' +
         date +
-        '
-۱۰ صبح تا ۲ بامداد · حداکثر ۲ شیفت
-🟢 خالی · 🔴 پر
-
-';
-      const activeLines = today.map((s) => {
-        const who = s.adminId === userId ? 'شما' : String(s.adminId);
-        return '• ' + s.startHm + '–' + s.endHm + ' ← ' + who;
-      });
-      head += activeLines.length
-        ? 'شیفت‌های ثبت‌شده امروز:
-' + activeLines.join('
-')
-        : 'هنوز شیفتی ثبت نشده.';
+        '\n۱۰ صبح تا ۲ بامداد · حداکثر ۲ شیفت\n🟢 خالی · 🔴 پر\n\n';
+      if (today.length) {
+        head +=
+          'شیفت‌های ثبت‌شده امروز:\n' +
+          today
+            .map((s) => {
+              const who = s.adminId === userId ? 'شما' : String(s.adminId);
+              return '• ' + s.startHm + '–' + s.endHm + ' ← ' + who;
+            })
+            .join('\n');
+      } else {
+        head += 'هنوز شیفتی ثبت نشده.';
+      }
       const board = await api.sendMessage({
         chat_id: chatId,
         text: head,
