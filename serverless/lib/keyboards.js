@@ -5,7 +5,6 @@ export function userKeyboard() {
     keyboard: [
       [{ text: '📝 ارسال پیام' }, { text: '📊 وضعیت پیام من' }],
       [{ text: '💬 انتقادات، پیشنهادات، گزارش مشکل' }],
-      [{ text: '📖 راهنما' }],
     ],
     resize_keyboard: true,
   };
@@ -17,7 +16,6 @@ export function adminKeyboard() {
       [{ text: '📥 پیام‌های در انتظار' }, { text: '⏰ شیفت من' }],
       [{ text: '📊 عملکرد من' }],
       [{ text: '📝 ارسال پیام به صورت کاربر عادی' }],
-      [{ text: '📖 راهنما' }],
     ],
     resize_keyboard: true,
   };
@@ -27,10 +25,9 @@ export function ownerKeyboard() {
   return {
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌ها' }],
-      [{ text: '⏰ شیفت‌ها' }, { text: '📣 ارسال به کانال' }],
-      [{ text: '📊 آمار' }, { text: '📬 پیام کاربران' }],
-      [{ text: '🔍 جستجو' }, { text: '📣 اطلاعیه' }],
-      [{ text: '⚙️ تنظیمات' }, { text: '📖 راهنما' }],
+      [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
+      [{ text: '📬 پیام کاربران' }, { text: '🔍 جستجو' }],
+      [{ text: '⚙️ تنظیمات' }],
     ],
     resize_keyboard: true,
   };
@@ -44,8 +41,8 @@ export function settingsKeyboard(botOn) {
   return {
     keyboard: [
       [{ text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
-      [{ text: '🧪 تست کانال‌ها' }],
-      [{ text: '🔄 همگام‌سازی ادمین‌ها' }],
+      [{ text: '📣 ارسال به کانال' }, { text: '📣 اطلاعیه' }],
+      [{ text: '🧪 تست کانال‌ها' }, { text: '🔄 همگام‌سازی ادمین‌ها' }],
       [{ text: '🧹 پاک‌سازی صف' }],
       [{ text: '◀️ بازگشت' }],
     ],
@@ -80,10 +77,10 @@ export function shiftChannelPickKeyboard(channelList) {
 export function postChannelInline() {
   return {
     inline_keyboard: [
-      [{ text: '🟢 صدام بزن', callback_data: 'postch:sadambazan' }],
-      [{ text: '🔵 این کاربر', callback_data: 'postch:inkarbar' }],
-      [{ text: '🟣 تو زندگی بعدی', callback_data: 'postch:zendegi' }],
-      [{ text: 'لغو', callback_data: 'postch_cancel' }],
+      [{ text: 'صدام بزن', callback_data: 'postch:sadambazan', style: 'success' }],
+      [{ text: 'این کاربر', callback_data: 'postch:inkarbar', style: 'primary' }],
+      [{ text: 'تو زندگی بعدی', callback_data: 'postch:zendegi', style: 'primary' }],
+      [{ text: 'لغو', callback_data: 'postch_cancel', style: 'danger' }],
     ],
   };
 }
@@ -92,8 +89,8 @@ export function confirmPostInline() {
   return {
     inline_keyboard: [
       [
-        { text: '✅ تأیید ارسال', callback_data: 'post_yes' },
-        { text: '❌ انصراف', callback_data: 'post_no' },
+        { text: 'تأیید ارسال', callback_data: 'post_yes', style: 'success' },
+        { text: 'انصراف', callback_data: 'post_no', style: 'danger' },
       ],
     ],
   };
@@ -103,8 +100,8 @@ export function reviewInline(id) {
   return {
     inline_keyboard: [
       [
-        { text: '🟢 تأیید', callback_data: 'approve:' + id },
-        { text: '🔴 رد', callback_data: 'reject_menu:' + id },
+        { text: 'تأیید', callback_data: 'approve:' + id, style: 'success' },
+        { text: 'رد', callback_data: 'reject_menu:' + id, style: 'danger' },
       ],
     ],
   };
@@ -114,8 +111,10 @@ export function rejectReasonsInline(id) {
   const reasons = ['نامناسب', 'هیت یا بی‌احترامی', 'تکراری', 'سیاسی', 'نامفهوم'];
   return {
     inline_keyboard: [
-      ...reasons.map((r) => [{ text: r, callback_data: 'reject:' + id + ':' + r }]),
-      [{ text: '◀️ انصراف', callback_data: 'reject_cancel:' + id }],
+      ...reasons.map((r) => [
+        { text: r, callback_data: 'reject:' + id + ':' + r, style: 'danger' },
+      ]),
+      [{ text: 'انصراف', callback_data: 'reject_cancel:' + id, style: 'primary' }],
     ],
   };
 }
@@ -124,24 +123,23 @@ export function feedbackInline(id, userId) {
   return {
     inline_keyboard: [
       [
-        { text: '💬 پاسخ', callback_data: 'fb_reply:' + id },
-        { text: '✅ بستن', callback_data: 'fb_close:' + id },
+        { text: 'پاسخ', callback_data: 'fb_reply:' + id, style: 'primary' },
+        { text: 'بستن', callback_data: 'fb_close:' + id, style: 'success' },
       ],
-      [{ text: '👤 مشاهده کاربر', callback_data: 'fb_user:' + userId }],
+      [{ text: 'مشاهده کاربر', callback_data: 'fb_user:' + userId, style: 'primary' }],
     ],
   };
 }
 
 export function userOpenInline(userId) {
   return {
-    inline_keyboard: [[{ text: '✉️ باز کردن پیوی', url: 'tg://user?id=' + userId }]],
+    inline_keyboard: [
+      [{ text: 'باز کردن پیوی', url: 'tg://user?id=' + userId, style: 'primary' }],
+    ],
   };
 }
 
-/**
- * takenMap: { '10:00': adminId }
- * myStarts: Set of start times already selected by this admin
- */
+/** takenMap: startHm -> adminId ; myStarts: Set */
 export function shiftSlotsInline(channelKey, takenMap, myStarts) {
   const slots = buildShiftSlots();
   const rows = [];
@@ -150,27 +148,30 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts) {
     if (takenBy && !(myStarts && myStarts.has(s.start))) {
       rows.push([
         {
-          text: '🔴 ' + s.label + ' (پر)',
+          text: s.label + ' (پر)',
           callback_data: 'shift_full:' + channelKey + ':' + s.start,
+          style: 'danger',
         },
       ]);
     } else if (myStarts && myStarts.has(s.start)) {
       rows.push([
         {
-          text: '🟢 ' + s.label + ' (شما)',
+          text: s.label + ' (شما)',
           callback_data: 'shift_mine:' + channelKey + ':' + s.start,
+          style: 'primary',
         },
       ]);
     } else {
       rows.push([
         {
-          text: '▫️ ' + s.label,
+          text: s.label,
           callback_data: 'shift_pick:' + channelKey + ':' + s.start + ':' + s.end,
+          style: 'success',
         },
       ]);
     }
   }
-  rows.push([{ text: '◀️ بستن', callback_data: 'shift_close' }]);
+  rows.push([{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }]);
   return { inline_keyboard: rows };
 }
 
@@ -179,11 +180,23 @@ export function adminListInline(admins, channelKey) {
   for (const a of admins) {
     const name = a.display || String(a.userId);
     rows.push([
-      { text: '👤 ' + name, url: 'tg://user?id=' + a.userId },
-      { text: '➖ حذف', callback_data: 'adel:' + channelKey + ':' + a.userId },
+      { text: name, url: 'tg://user?id=' + a.userId, style: 'primary' },
+      {
+        text: 'حذف',
+        callback_data: 'adel:' + channelKey + ':' + a.userId,
+        style: 'danger',
+      },
     ]);
   }
-  rows.push([{ text: '➕ افزودن ادمین', callback_data: 'aadd:' + channelKey }]);
-  rows.push([{ text: '🔄 بروزرسانی از گروه', callback_data: 'async:' + channelKey }]);
+  rows.push([
+    { text: 'افزودن ادمین', callback_data: 'aadd:' + channelKey, style: 'success' },
+  ]);
+  rows.push([
+    {
+      text: 'بروزرسانی از گروه',
+      callback_data: 'async:' + channelKey,
+      style: 'primary',
+    },
+  ]);
   return { inline_keyboard: rows };
 }
