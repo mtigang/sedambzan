@@ -20,7 +20,7 @@ import {
 } from 'lib/keyboards';
 import { validateAndFix } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow } from 'lib/time';
+import { tehranNow, inRange, hmToMin } from 'lib/time';
 import {
   ensureChannelsSeeded,
   getChannels,
@@ -172,66 +172,117 @@ export default async function (message) {
 
     // state: user_send
     if (state?.kind === 'user_send' && text) {
-      if (!(await isBotOn())) {
-        await clearState(userId);
-        await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
-        return;
-      }
-      const v = validateAndFix(message);
-      if (!v.ok) {
-        await api.sendMessage({ chat_id: chatId, text: v.error, reply_markup: backKeyboard() });
-        return;
-      }
-      const ch = await getChannel(v.channelKey);
-      if (!ch || !ch.enabled) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: `🔴 کانال «${ch?.title || v.channelKey}» فعلاً غیرفعال است.`,
-          reply_markup: backKeyboard(),
-        });
-        return;
-      }
-      // ساعت کاری
-      const now = tehranNow();
-      const { inRange } = await import('lib/time');
-      if (ch.workStart && ch.workEnd && !inRange(now.hm, ch.workStart, ch.workEnd)) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: `⏰ ساعت کاری «${ch.title}» از ${ch.workStart} تا ${ch.workEnd} است.\nلطفاً در همین بازه پیام بفرستید.`,
-          reply_markup: backKeyboard(),
-        });
-        return;
-      }
-
-      let row;
       try {
-        const ins = await db
-          .insert(messages)
-          .values({
-            userId,
-            content: v.content,
-            channelKey: v.channelKey,
-            status: 'pending',
-          })
-          .returning()
-          .run();
-        row = ins?.[0] || ins?.rows?.[0];
+        if (!(await isBotOn())) {
+          await clearState(userId);
+          await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
+          return;
+        }
+
+        let v;
+        try {
+          v = validateAndFix(message);
+        } catch (e) {
+          console.error('validateAndFix', e);
+          await api.sendMessage({ chat_id: chatId, text: 'خطا در بررسی متن. دوباره بفرستید.', reply_markup: backKeyboard() });
+          return;
+        }
+        if (!v.ok) {
+          await api.sendMessage({ chat_id: chatId, text: v.error, reply_markup: backKeyboard() });
+          return;
+        }
+
+        let ch;
+        try {
+          ch = await getChannel(v.channelKey);
+        } catch (e) {
+          console.error('getChannel', e);
+          ch = null;
+        }
+        if (!ch) {
+          await api.sendMessage({ chat_id: chatId, text: 'کانال یافت نشد.', reply_markup: backKeyboard() });
+          return;
+        }
+        if (Number(ch.enabled) === 0) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '🔴 کانال «' + (ch.title || v.channelKey) + '» فعلاً غیرفعال است.',
+            reply_markup: backKeyboard(),
+          });
+          return;
+        }
+
+        try {
+          const now = tehranNow();
+          if (ch.workStart && ch.workEnd && !inRange(now.hm, ch.workStart, ch.workEnd)) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '⏰ ساعت کاری «' + ch.title + '» از ' + ch.workStart + ' تا ' + ch.workEnd + ' است.\nلطفاً در همین بازه پیام بفرستید.',
+              reply_markup: backKeyboard(),
+            });
+            return;
+          }
+        } catch (e) {
+          console.error('work hours check', e);
+        }
+
+        let msgId = null;
+        try {
+          await db
+            .insert(messages)
+            .values({
+              userId: userId,
+              content: v.content,
+              channelKey: v.channelKey,
+              status: 'pending',
+            })
+            .run();
+          const recent = await db
+            .select()
+            .from(messages)
+            .where(eq(messages.userId, userId))
+            .orderBy(desc(messages.id))
+            .all();
+          if (recent && recent[0]) msgId = recent[0].id;
+        } catch (e) {
+          console.error('insert message', e);
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'خطا در ثبت پیام در دیتابیس. اگر تازه migrate کردید صبر کنید یا به مالک بگویید.',
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+
+        try { await clearState(userId); } catch (_) {}
+
+        let note = '✅ ثبت شد.\n🆔 #' + (msgId != null ? msgId : '?') + '\n🟡 در انتظار بررسی ادمین';
+        if (v.autoFixed) {
+          note += '\n\nℹ️ متن کمی اصلاح شد (بولد/نقطه) و برای بررسی ارسال گردید.';
+        }
+        await api.sendMessage({ chat_id: chatId, text: note, reply_markup: await roleKb(userId) });
+
+        if (msgId != null) {
+          try {
+            await notifyReviewers(
+              v.channelKey,
+              '📨 #' + msgId + ' | ' + (ch.title || v.channelKey) + '\nاز: ' + userId + '\n\n' + v.content,
+              reviewInline(msgId)
+            );
+          } catch (e) {
+            console.error('notifyReviewers', e);
+          }
+        }
+        return;
       } catch (e) {
-        console.error(e);
-        await api.sendMessage({ chat_id: chatId, text: 'خطا در ثبت. دوباره تلاش کنید.', reply_markup: await roleKb(userId) });
+        console.error('user_send block', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '⚠️ خطا در ارسال پیام. دوباره /start و ارسال پیام را بزنید.',
+          reply_markup: await roleKb(userId),
+        });
         return;
       }
-      await clearState(userId);
-      let note = `✅ ثبت شد.\n🆔 #${row?.id}\n🟡 در انتظار بررسی ادمین`;
-      if (v.autoFixed) note += '\n\nℹ️ متن کمی اصلاح شد (بولد/نقطه) و برای بررسی ارسال گردید.';
-      await api.sendMessage({ chat_id: chatId, text: note, reply_markup: await roleKb(userId) });
-
-      await notifyReviewers(
-        v.channelKey,
-        `📨 #${row.id} | ${ch.title}\nاز: ${userId}\n\n${v.content}`,
-        reviewInline(row.id)
-      );
-      return;
     }
 
     // ===================== ADMIN: shifts =====================
@@ -298,7 +349,6 @@ export default async function (message) {
         (s) => s.shiftDate === date && s.status === 'active' && s.channelKey === state.channelKey
       );
       // چک ساده هم‌پوشانی
-      const { hmToMin } = await import('lib/time');
       const ns = hmToMin(m[1]);
       const ne = hmToMin(m[2]) || 24 * 60;
       for (const s of sameDay) {
