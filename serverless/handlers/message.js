@@ -524,29 +524,30 @@ export default async function (message) {
     }
 
     if (owner && text === '⏰ شیفت‌ها') {
-      const { date } = tehranNow();
-      const all = (await db.select().from(shifts).all()) || [];
-      const today = all.filter((s) => s.shiftDate === date && s.status === 'active');
-      let t = '⏰ شیفت‌های امروز (' + date + ')\n\n';
-      if (!today.length) t += 'خالی';
-      for (const s of today) {
-        const name = displayName(await getUser(s.adminId), s.adminId);
-        t +=
-          '• ' +
-          (DEFAULT_CHANNELS[s.channelKey]?.title || s.channelKey) +
-          ' | ' +
-          s.startHm +
-          '–' +
-          s.endHm +
-          ' | ' +
-          name +
-          '\n';
+      try {
+        const { date } = tehranNow();
+        let all = [];
+        try { all = (await db.select().from(shifts).all()) || []; } catch (e) { console.error('shifts all', e); }
+        const today = all.filter((s) => s.shiftDate === date && s.status === 'active');
+        let t = '⏰ شیفت‌های امروز (' + date + ')\n\n';
+        if (!today.length) t += 'خالی';
+        for (const s of today) {
+          let name = String(s.adminId);
+          try { name = displayName(await getUser(s.adminId), s.adminId); } catch (_) {}
+          t += '• ' + (DEFAULT_CHANNELS[s.channelKey]?.title || s.channelKey) + ' | ' + s.startHm + '–' + s.endHm + ' | ' + name + '\n';
+        }
+        await api.sendMessage({ chat_id: chatId, text: t, reply_markup: ownerKeyboard() });
+      } catch (e) {
+        console.error('owner shifts', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در شیفت‌ها: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: ownerKeyboard(),
+        });
       }
-      await api.sendMessage({ chat_id: chatId, text: t, reply_markup: ownerKeyboard() });
       return;
     }
 
-    // ========== OWNER: admins ==========
     if (owner && text === '👥 ادمین‌ها') {
       await api.sendMessage({
         chat_id: chatId,
@@ -557,30 +558,41 @@ export default async function (message) {
     }
 
     if (owner && text.startsWith('ادمین‌های ')) {
-      const title = text.replace('ادمین‌های ', '');
-      const entry = Object.values(DEFAULT_CHANNELS).find((c) => c.title === title);
-      if (!entry) {
+      try {
+        const title = text.replace('ادمین‌های ', '').trim();
+        const entry = Object.values(DEFAULT_CHANNELS).find((c) => c.title === title);
+        if (!entry) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'کانال پیدا نشد: ' + title,
+            reply_markup: ownerKeyboard(),
+          });
+          return;
+        }
+        try {
+          await syncAdminsFromGroup(entry.key);
+        } catch (e) {
+          console.error('sync before list', e);
+        }
+        const ads = await listAdminsByChannel(entry.key);
         await api.sendMessage({
           chat_id: chatId,
-          text: 'کانال پیدا نشد',
+          text:
+            '👮 ادمین‌های «' +
+            entry.title +
+            '»\nتعداد: ' +
+            ads.length +
+            (ads.length ? '\nروی اسم بزنید تا پیوی باز شود.' : '\n(خالی — همگام‌سازی یا افزودن دستی)'),
+          reply_markup: adminListInline(ads, entry.key),
+        });
+      } catch (e) {
+        console.error('admin list', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در لیست ادمین: ' + (e && e.message ? e.message : String(e)),
           reply_markup: ownerKeyboard(),
         });
-        return;
       }
-      try {
-        await syncAdminsFromGroup(entry.key);
-      } catch (_) {}
-      const ads = await listAdminsByChannel(entry.key);
-      await api.sendMessage({
-        chat_id: chatId,
-        text:
-          '👮 ادمین‌های «' +
-          entry.title +
-          '»\nتعداد: ' +
-          ads.length +
-          '\nروی اسم بزنید تا پیوی باز شود.',
-        reply_markup: adminListInline(ads, entry.key),
-      });
       return;
     }
 
@@ -650,56 +662,76 @@ export default async function (message) {
 
     // ========== OWNER: stats / feedback / search / announce / settings ==========
     if (owner && text === '📊 آمار') {
-      const all = (await db.select().from(messages).all()) || [];
-      const pe = all.filter((m) => m.status === 'pending').length;
-      const ap = all.filter((m) => m.status === 'approved').length;
-      const rj = all.filter((m) => m.status === 'rejected').length;
-      const us = (await db.select().from(users).all()) || [];
-      let by = '';
-      for (const c of Object.values(DEFAULT_CHANNELS)) {
-        by += '• ' + c.title + ': ' + all.filter((m) => m.channelKey === c.key).length + '\n';
+      try {
+        let all = [];
+        try { all = (await db.select().from(messages).all()) || []; } catch (e) { console.error('stats messages', e); }
+        const pe = all.filter((x) => x.status === 'pending').length;
+        const ap = all.filter((x) => x.status === 'approved').length;
+        const rj = all.filter((x) => x.status === 'rejected').length;
+        let us = [];
+        try { us = (await db.select().from(users).all()) || []; } catch (e) { console.error('stats users', e); }
+        let by = '';
+        for (const c of Object.values(DEFAULT_CHANNELS)) {
+          by += '• ' + c.title + ': ' + all.filter((x) => x.channelKey === c.key).length + '\n';
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '📊 آمار\n\nکل: ' +
+            all.length +
+            '\n🟡' +
+            pe +
+            ' 🟢' +
+            ap +
+            ' 🔴' +
+            rj +
+            '\n👥 ' +
+            us.length +
+            '\n\n' +
+            by,
+          reply_markup: ownerKeyboard(),
+        });
+      } catch (e) {
+        console.error('stats', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در آمار: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: ownerKeyboard(),
+        });
       }
-      await api.sendMessage({
-        chat_id: chatId,
-        text:
-          '📊 آمار\n\nکل: ' +
-          all.length +
-          '\n🟡' +
-          pe +
-          ' 🟢' +
-          ap +
-          ' 🔴' +
-          rj +
-          '\n👥 ' +
-          us.length +
-          '\n\n' +
-          by,
-        reply_markup: ownerKeyboard(),
-      });
       return;
     }
 
     if (owner && text === '📬 پیام کاربران') {
-      const list =
-        (await db
-          .select()
-          .from(feedback)
-          .where(eq(feedback.status, 'open'))
-          .orderBy(desc(feedback.id))
-          .all()) || [];
-      if (!list.length) {
+      try {
+        let list = [];
+        try {
+          const all = (await db.select().from(feedback).all()) || [];
+          list = all.filter((f) => f.status === 'open').sort((a, b) => (b.id || 0) - (a.id || 0));
+        } catch (e) {
+          console.error('feedback select', e);
+        }
+        if (!list.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'فیدبک بازی نیست.',
+            reply_markup: ownerKeyboard(),
+          });
+          return;
+        }
+        for (const row of list.slice(0, 20)) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'فیدبک #' + row.id + '\nاز: ' + row.userId + '\n\n' + row.content,
+            reply_markup: feedbackInline(row.id, row.userId),
+          });
+        }
+      } catch (e) {
+        console.error('feedback panel', e);
         await api.sendMessage({
           chat_id: chatId,
-          text: 'فیدبک بازی نیست.',
+          text: 'خطا در فیدبک: ' + (e && e.message ? e.message : String(e)),
           reply_markup: ownerKeyboard(),
-        });
-        return;
-      }
-      for (const row of list.slice(0, 20)) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'فیدبک #' + row.id + '\nاز: ' + row.userId + '\n\n' + row.content,
-          reply_markup: feedbackInline(row.id, row.userId),
         });
       }
       return;
@@ -715,22 +747,40 @@ export default async function (message) {
     }
 
     if (owner && text === '🔎 جستجوی پیام') {
-      await setState(userId, 'search_msg');
-      await api.sendMessage({
-        chat_id: chatId,
-        text: 'عدد آیدی پیام را بفرستید:',
-        reply_markup: backKeyboard(),
-      });
+      try {
+        await setState(userId, 'search_msg');
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'عدد آیدی پیام را بفرستید:',
+          reply_markup: backKeyboard(),
+        });
+      } catch (e) {
+        console.error('search_msg', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: ownerKeyboard(),
+        });
+      }
       return;
     }
 
     if (owner && text === '🔎 جستجوی کاربر') {
-      await setState(userId, 'search_user');
-      await api.sendMessage({
-        chat_id: chatId,
-        text: 'آیدی عددی کاربر را بفرستید:',
-        reply_markup: backKeyboard(),
-      });
+      try {
+        await setState(userId, 'search_user');
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'آیدی عددی یا @username کاربر را بفرستید:',
+          reply_markup: backKeyboard(),
+        });
+      } catch (e) {
+        console.error('search_user', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: ownerKeyboard(),
+        });
+      }
       return;
     }
 
@@ -818,12 +868,21 @@ export default async function (message) {
     }
 
     if (owner && text === '📣 اطلاعیه') {
-      await setState(userId, 'announce');
-      await api.sendMessage({
-        chat_id: chatId,
-        text: 'متن اطلاعیه را بفرستید (برای همه کاربران):',
-        reply_markup: backKeyboard(),
-      });
+      try {
+        await setState(userId, 'announce');
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'متن اطلاعیه را بفرستید (برای همه کاربران):',
+          reply_markup: backKeyboard(),
+        });
+      } catch (e) {
+        console.error('announce', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: ownerKeyboard(),
+        });
+      }
       return;
     }
 
@@ -982,7 +1041,7 @@ export default async function (message) {
       if (message?.chat?.id) {
         await api.sendMessage({
           chat_id: message.chat.id,
-          text: '⚠️ خطا. /start',
+          text: '⚠️ خطا: ' + (e && e.message ? e.message : 'unknown') + '\n/start',
         });
       }
     } catch (_) {}
