@@ -1,46 +1,35 @@
 import { api, db } from 'sdk';
 import { eq } from 'sdk/db';
 import { messages, feedback } from 'schema';
-import { isOwner, setBlocked } from 'lib/users';
+import { isOwner } from 'lib/dbutil';
 import { setState } from 'lib/state';
 import { rejectReasonsInline, reviewInline } from 'lib/keyboards';
 
-export default async function (callbackQuery) {
+export default async function (cq) {
   try {
-    const data = callbackQuery.data || '';
-    const userId = callbackQuery.from?.id;
+    const data = cq.data || '';
+    const userId = cq.from?.id;
     if (!userId) return;
 
-    const owner = isOwner(userId);
-
-    // --- approve ---
     if (data.startsWith('approve:')) {
-      if (!owner) {
-        // admins can also approve
-        // allow any - simplified: only owner for now was restriction; expand to all who got the message
-      }
       const id = Number(data.split(':')[1]);
       const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
       const row = rows?.[0];
       if (!row || row.status !== 'pending') {
-        await api.answerCallbackQuery({
-          callback_query_id: callbackQuery.id,
-          text: 'قبلاً بررسی شده',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'قبلاً بررسی شده', show_alert: true });
         return;
       }
       await db
         .update(messages)
-        .set({ status: 'approved', reviewedAt: new Date() })
+        .set({ status: 'approved', reviewedBy: userId, reviewedAt: new Date() })
         .where(eq(messages.id, id))
         .run();
-      await api.answerCallbackQuery({ callback_query_id: callbackQuery.id, text: 'تأیید شد' });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'تأیید شد' });
       try {
         await api.editMessageText({
-          chat_id: callbackQuery.message.chat.id,
-          message_id: callbackQuery.message.message_id,
-          text: `🟢 تأیید شد — #${id}`,
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: `🟢 تأیید #${id} توسط ${userId}`,
         });
       } catch (_) {}
       try {
@@ -49,33 +38,26 @@ export default async function (callbackQuery) {
       return;
     }
 
-    // reject menu
     if (data.startsWith('reject_menu:')) {
       const id = Number(data.split(':')[1]);
-      await api.answerCallbackQuery({ callback_query_id: callbackQuery.id });
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
       try {
         await api.editMessageReplyMarkup({
-          chat_id: callbackQuery.message.chat.id,
-          message_id: callbackQuery.message.message_id,
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
           reply_markup: rejectReasonsInline(id),
         });
-      } catch (_) {
-        await api.sendMessage({
-          chat_id: callbackQuery.message.chat.id,
-          text: `دلیل رد #${id}:`,
-          reply_markup: rejectReasonsInline(id),
-        });
-      }
+      } catch (_) {}
       return;
     }
 
     if (data.startsWith('reject_cancel:')) {
       const id = Number(data.split(':')[1]);
-      await api.answerCallbackQuery({ callback_query_id: callbackQuery.id, text: 'لغو شد' });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
       try {
         await api.editMessageReplyMarkup({
-          chat_id: callbackQuery.message.chat.id,
-          message_id: callbackQuery.message.message_id,
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
           reply_markup: reviewInline(id),
         });
       } catch (_) {}
@@ -89,112 +71,61 @@ export default async function (callbackQuery) {
       const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
       const row = rows?.[0];
       if (!row || row.status !== 'pending') {
-        await api.answerCallbackQuery({
-          callback_query_id: callbackQuery.id,
-          text: 'قبلاً بررسی شده',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'قبلاً بررسی شده', show_alert: true });
         return;
       }
       await db
         .update(messages)
-        .set({ status: 'rejected', rejectReason: reason, reviewedAt: new Date() })
+        .set({ status: 'rejected', rejectReason: reason, reviewedBy: userId, reviewedAt: new Date() })
         .where(eq(messages.id, id))
         .run();
-      await api.answerCallbackQuery({ callback_query_id: callbackQuery.id, text: 'رد شد' });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'رد شد' });
       try {
         await api.editMessageText({
-          chat_id: callbackQuery.message.chat.id,
-          message_id: callbackQuery.message.message_id,
-          text: `🔴 رد شد — #${id}\nدلیل: ${reason}`,
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: `🔴 رد #${id}\nدلیل: ${reason}`,
         });
       } catch (_) {}
       try {
-        await api.sendMessage({
-          chat_id: row.userId,
-          text: `🔴 پیام #${id} رد شد.\nدلیل: ${reason}`,
-        });
+        await api.sendMessage({ chat_id: row.userId, text: `🔴 پیام #${id} رد شد.\nدلیل: ${reason}` });
       } catch (_) {}
       return;
     }
 
-    // feedback
     if (data.startsWith('fb_reply:')) {
-      if (!owner) {
-        await api.answerCallbackQuery({
-          callback_query_id: callbackQuery.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const fid = Number(data.split(':')[1]);
       await setState(userId, 'fb_reply', { feedbackId: fid });
-      await api.answerCallbackQuery({ callback_query_id: callbackQuery.id });
-      await api.sendMessage({
-        chat_id: callbackQuery.message.chat.id,
-        text: `پاسخ فیدبک #${fid} را بنویسید:`,
-      });
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({ chat_id: cq.message.chat.id, text: `پاسخ #${fid}:` });
       return;
     }
 
     if (data.startsWith('fb_close:')) {
-      if (!owner) {
-        await api.answerCallbackQuery({
-          callback_query_id: callbackQuery.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const fid = Number(data.split(':')[1]);
       await db.update(feedback).set({ status: 'closed' }).where(eq(feedback.id, fid)).run();
-      await api.answerCallbackQuery({ callback_query_id: callbackQuery.id, text: 'بسته شد' });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'بسته شد' });
       try {
         await api.editMessageText({
-          chat_id: callbackQuery.message.chat.id,
-          message_id: callbackQuery.message.message_id,
-          text: `✅ فیدبک #${fid} بسته شد.`,
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: `✅ فیدبک #${fid} بسته شد`,
         });
       } catch (_) {}
       return;
     }
-
-    // ban / unban
-    if (data.startsWith('ban:') || data.startsWith('unban:')) {
-      if (!owner) {
-        await api.answerCallbackQuery({
-          callback_query_id: callbackQuery.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
-        return;
-      }
-      const ban = data.startsWith('ban:');
-      const tid = Number(data.split(':')[1]);
-      if (isOwner(tid)) {
-        await api.answerCallbackQuery({
-          callback_query_id: callbackQuery.id,
-          text: 'مالک قابل بن نیست',
-          show_alert: true,
-        });
-        return;
-      }
-      await setBlocked(tid, ban);
-      await api.answerCallbackQuery({
-        callback_query_id: callbackQuery.id,
-        text: ban ? 'بن شد' : 'آنبن شد',
-      });
-      return;
-    }
   } catch (e) {
-    console.error('callback fatal', e);
+    console.error('cb', e);
     try {
-      await api.answerCallbackQuery({
-        callback_query_id: callbackQuery.id,
-        text: 'خطا',
-        show_alert: true,
-      });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'خطا', show_alert: true });
     } catch (_) {}
   }
 }
