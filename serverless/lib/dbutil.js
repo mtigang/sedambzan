@@ -274,13 +274,8 @@ export async function syncAdminsFromGroup(channelKey) {
   if (!groupId) return { ok: false, error: 'no group', added: 0 };
 
   let added = 0;
-  let scanned = 0;
-  const errors = [];
-
-  // 1) ادمین‌های گروه
   try {
     const admins = await api.getChatAdministrators({ chat_id: groupId });
-    scanned += (admins || []).length;
     for (const a of admins || []) {
       const uid = a.user?.id;
       if (!uid || a.user?.is_bot) continue;
@@ -290,9 +285,10 @@ export async function syncAdminsFromGroup(channelKey) {
         await addChannelAdmin(uid, channelKey);
         added++;
       } catch (e) {
-        errors.push(String(e?.description || e));
+        console.error('sync admin one', uid, e);
       }
     }
+    return { ok: true, added, total: (admins || []).length };
   } catch (e) {
     console.error('getChatAdministrators', channelKey, e);
     return {
@@ -301,51 +297,19 @@ export async function syncAdminsFromGroup(channelKey) {
       added: 0,
     };
   }
-
-  // 2) کاربران استارت‌کرده ربات — عضویت در گروه را چک کن
-  try {
-    const allUsers = (await db.select().from(users).all()) || [];
-    for (const u of allUsers) {
-      const uid = u.userId ?? u.user_id;
-      if (!uid || isOwner(uid)) continue;
-      if (u.role === 'owner') continue;
-      try {
-        const member = await api.getChatMember({ chat_id: groupId, user_id: uid });
-        const st = member?.status;
-        if (st && st !== 'left' && st !== 'kicked') {
-          await addChannelAdmin(uid, channelKey);
-          added++;
-          scanned++;
-        }
-      } catch (_) {
-        // عضو نیست یا privacy
-      }
-    }
-  } catch (e) {
-    console.error('scan users membership', e);
-    errors.push('scan:' + (e?.message || e));
-  }
-
-  return {
-    ok: true,
-    added,
-    scanned,
-    error: errors.length ? errors.slice(0, 3).join('; ') : undefined,
-  };
 }
 
 export async function syncAllAdminGroups(force = false) {
-  const last = Number(await settingGet('last_admin_sync', '0')) || 0;
-  const now = Date.now();
-  if (!force && now - last < 30 * 60 * 1000) {
-    return { skipped: true };
+  if (!force) {
+    const last = Number(await settingGet('last_admin_sync', '0')) || 0;
+    if (Date.now() - last < 30 * 60 * 1000) return null;
   }
   const results = {};
   for (const key of Object.keys(ADMIN_GROUP_IDS)) {
     results[key] = await syncAdminsFromGroup(key);
   }
-  await settingSet('last_admin_sync', String(now));
-  return { skipped: false, results };
+  await settingSet('last_admin_sync', String(Date.now()));
+  return results;
 }
 
 export async function activeShiftAdmins(channelKey) {
@@ -487,8 +451,20 @@ export async function testChannels() {
   return results;
 }
 
+export function toBoldHtml(text) {
+  const s = String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return '<b>' + s + '</b>';
+}
+
 export async function postToChannel(channelKey, text) {
   const conf = DEFAULT_CHANNELS[channelKey];
-  if (!conf) throw new Error('channel not found');
-  return await api.sendMessage({ chat_id: conf.chatId, text });
+  if (!conf) throw new Error('channel');
+  return await api.sendMessage({
+    chat_id: conf.chatId,
+    text: toBoldHtml(text),
+    parse_mode: 'HTML',
+  });
 }
