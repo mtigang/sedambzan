@@ -25,8 +25,9 @@ import {
   userOpenInline,
   shiftSlotsInline,
   adminListInline,
+  announceTargetInline,
 } from 'lib/keyboards';
-import { validateAndFix } from 'lib/validation';
+import { validateAndFix, normalizeBody } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin } from 'lib/time';
 import { resolveUserId } from 'lib/resolve';
@@ -52,6 +53,19 @@ import {
   displayName,
   settingGet,
 } from 'lib/dbutil';
+
+async function checkRateLimit(uid) {
+  const key = 'rate:' + uid;
+  const raw = await settingGet(key, '[]');
+  let arr = [];
+  try { arr = JSON.parse(raw) || []; } catch { arr = []; }
+  const now = Date.now();
+  arr = arr.filter((t) => now - t < 10 * 60 * 1000);
+  if (arr.length >= 6) return { ok: false, left: arr.length };
+  arr.push(now);
+  await settingSet(key, JSON.stringify(arr));
+  return { ok: true, left: arr.length };
+}
 
 async function roleKb(uid) {
   const r = await getRole(uid);
@@ -155,17 +169,17 @@ export default async function (message) {
     }
 
     // ========== USER ==========
-    if (text === '📝 ارسال پیام' || text === '📝 ارسال پیام به صورت کاربر عادی') {
-      if (!(await isBotOn())) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: BOT_DISABLED_TEXT,
-          reply_markup: await roleKb(userId),
-        });
+    if (text === '📝 ارسال پیام') {
+      if (!(await isBotOn()) && !owner) {
+        await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
         return;
       }
       await setState(userId, 'user_send');
-      await api.sendMessage({ chat_id: chatId, text: RULES_TEXT, reply_markup: backKeyboard() });
+      await api.sendMessage({
+        chat_id: chatId,
+        text: RULES_TEXT + '\n\nمی‌توانید چند پیام پشت‌سرهم بفرستید.\nحداکثر ۶ پیام در ۱۰ دقیقه.',
+        reply_markup: backKeyboard(),
+      });
       return;
     }
 
@@ -314,14 +328,15 @@ export default async function (message) {
           .all();
         if (recent?.[0]) msgId = recent[0].id;
 
-        await clearState(userId);
+        // keep user_send state for continuous
         let note =
           '✅ ثبت شد.\n🆔 #' + (msgId != null ? msgId : '?') + '\n🟡 در انتظار بررسی ادمین';
+        note += '\n\nپیام بعدی را بفرستید یا ◀️ بازگشت';
         if (v.autoFixed) note += '\n\nℹ️ متن کمی اصلاح شد و ارسال گردید.';
         await api.sendMessage({
           chat_id: chatId,
           text: note,
-          reply_markup: await roleKb(userId),
+          reply_markup: backKeyboard(),
         });
 
         // فقط ادمین‌های شیفت فعال — نه مالک مستقیم
@@ -353,6 +368,40 @@ export default async function (message) {
     }
 
     // ========== PENDING ==========
+
+    if ((role === 'admin' || owner) && state?.kind === 'reject_custom' && text) {
+      const reason = String(text).trim().slice(0, 22);
+      const msgId = state.msgId;
+      await clearState(userId);
+      if (!msgId) {
+        await api.sendMessage({ chat_id: chatId, text: 'خطا', reply_markup: await roleKb(userId) });
+        return;
+      }
+      const rows = await db.select().from(messages).where(eq(messages.id, msgId)).all();
+      const row = rows && rows[0];
+      if (!row || row.status !== 'pending') {
+        await api.sendMessage({ chat_id: chatId, text: 'قبلاً بررسی شده', reply_markup: await roleKb(userId) });
+        return;
+      }
+      await db
+        .update(messages)
+        .set({ status: 'rejected', rejectReason: reason, reviewedBy: userId, reviewedAt: new Date() })
+        .where(eq(messages.id, msgId))
+        .run();
+      try {
+        await api.sendMessage({
+          chat_id: row.userId,
+          text: '❌ پیام #' + msgId + ' رد شد.\nدلیل: ' + reason,
+        });
+      } catch (_) {}
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'رد شد #' + msgId + ' — ' + reason,
+        reply_markup: await roleKb(userId),
+      });
+      return;
+    }
+
     if ((role === 'admin' || owner) && text === '📥 پیام‌های در انتظار') {
       if (role === 'admin' && !owner) {
         const { date, hm } = tehranNow();
@@ -366,9 +415,16 @@ export default async function (message) {
           (s) => s.shiftDate === date && s.status === 'active' && inRange(hm, s.startHm, s.endHm)
         );
         if (!activeNow.length) {
+          const upcoming = mySh
+            .filter((s) => s.shiftDate === date && s.status === 'active')
+            .map((s) => (DEFAULT_CHANNELS[s.channelKey]?.title || s.channelKey) + ' ' + s.startHm + '–' + s.endHm)
+            .join('\n');
           await api.sendMessage({
             chat_id: chatId,
-            text: '⏰ فقط در زمان شیفت خودتان می‌توانید صف را ببینید و پیام‌ها را بررسی کنید.',
+            text:
+              '⏰ الان داخل بازه شیفت فعال نیستید.\n' +
+              (upcoming ? ('شیفت‌های امروز شما:\n' + upcoming) : 'شیفتی برای امروز ثبت نشده.') +
+              '\n\nوقتی ساعت شیفت برسد، پیام‌های صف خودکار می‌آید.',
             reply_markup: await roleKb(userId),
           });
           return;
@@ -594,35 +650,29 @@ export default async function (message) {
     }
 
     if (owner && state?.kind === 'add_admin_id' && text) {
-      const id = await resolveUserId(text);
-      if (!id) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'کاربر پیدا نشد. آیدی عددی یا @username بفرستید.',
-          reply_markup: backKeyboard(),
-        });
-        return;
-      }
-      await addChannelAdmin(id, state.channelKey);
+      const chKey = state.channelKey;
       await clearState(userId);
-      try {
-        await api.sendMessage({
-          chat_id: id,
-          text:
-            '✅ ادمین کانال «' +
-            (DEFAULT_CHANNELS[state.channelKey]?.title || '') +
-            '» شدید. /start',
-        });
-      } catch (_) {}
+      const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      let ok = 0, fail = 0;
+      for (const line of lines) {
+        let id = null;
+        try { id = await resolveUserId(line); } catch (_) {}
+        if (!id && /^\d+$/.test(line.replace(/\s/g,''))) id = Number(line.replace(/\D/g,''));
+        if (!id) { fail++; continue; }
+        try {
+          await addChannelAdmin(id, chKey);
+          ok++;
+        } catch (_) { fail++; }
+      }
       await api.sendMessage({
         chat_id: chatId,
-        text: 'اضافه شد: ' + id,
+        text: 'نتیجه افزودن ادمین\n✅ ' + ok + ' | ❌ ' + fail,
         reply_markup: ownerKeyboard(),
       });
       return;
     }
 
-    // ========== OWNER: post to channel ==========
+    
     if (owner && text === '📣 ارسال به کانال') {
       await api.sendMessage({
         chat_id: chatId,
@@ -661,40 +711,50 @@ export default async function (message) {
     if (owner && text === '📊 آمار') {
       try {
         let all = [];
-        try { all = (await db.select().from(messages).all()) || []; } catch (e) { console.error('stats messages', e); }
+        try { all = (await db.select().from(messages).all()) || []; } catch (e) { console.error(e); }
         const pe = all.filter((x) => x.status === 'pending').length;
         const ap = all.filter((x) => x.status === 'approved').length;
         const rj = all.filter((x) => x.status === 'rejected').length;
         let us = [];
-        try { us = (await db.select().from(users).all()) || []; } catch (e) { console.error('stats users', e); }
+        try { us = (await db.select().from(users).all()) || []; } catch (e) {}
+        let ads = [];
+        try {
+          const { channelAdmins } = await import('schema');
+          ads = (await db.select().from(channelAdmins).all()) || [];
+        } catch (_) {}
+        const adminIds = new Set(ads.map((a) => a.userId || a.user_id));
+        let shToday = 0;
+        try {
+          const { date } = tehranNow();
+          const sh = (await db.select().from(shifts).all()) || [];
+          shToday = sh.filter((s) => s.shiftDate === date && s.status === 'active').length;
+        } catch (_) {}
         let by = '';
         for (const c of Object.values(DEFAULT_CHANNELS)) {
-          by += '• ' + c.title + ': ' + all.filter((x) => x.channelKey === c.key).length + '\n';
+          const cm = all.filter((x) => x.channelKey === c.key);
+          by +=
+            '• ' + c.title + ': ' + cm.length +
+            ' (🟡' + cm.filter((x) => x.status === 'pending').length +
+            ' 🟢' + cm.filter((x) => x.status === 'approved').length +
+            ' 🔴' + cm.filter((x) => x.status === 'rejected').length + ')\n';
         }
         await api.sendMessage({
           chat_id: chatId,
           text:
-            '📊 آمار\n\nکل: ' +
-            all.length +
-            '\n🟡' +
-            pe +
-            ' 🟢' +
-            ap +
-            ' 🔴' +
-            rj +
-            '\n👥 ' +
-            us.length +
-            '\n\n' +
-            by,
+            '📊 داشبورد آماری\n\n' +
+            '📨 کل پیام‌ها: ' + all.length + '\n' +
+            '🟡 در انتظار: ' + pe + '\n' +
+            '🟢 تأیید شده: ' + ap + '\n' +
+            '🔴 رد شده: ' + rj + '\n\n' +
+            '👥 کاربران: ' + us.length + '\n' +
+            '👮 ادمین‌ها (یکتا): ' + adminIds.size + '\n' +
+            '⏰ شیفت فعال امروز: ' + shToday + '\n\n' +
+            '📺 تفکیک کانال:\n' + by,
           reply_markup: ownerKeyboard(),
         });
       } catch (e) {
         console.error('stats', e);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'خطا در آمار: ' + (e && e.message ? e.message : String(e)),
-          reply_markup: ownerKeyboard(),
-        });
+        await api.sendMessage({ chat_id: chatId, text: 'خطا در آمار: ' + (e.message || e), reply_markup: ownerKeyboard() });
       }
       return;
     }
@@ -786,117 +846,162 @@ export default async function (message) {
       await clearState(userId);
       const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
       if (!rows?.length) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'پیدا نشد',
-          reply_markup: ownerKeyboard(),
-        });
+        await api.sendMessage({ chat_id: chatId, text: 'پیدا نشد', reply_markup: ownerKeyboard() });
         return;
       }
       const row = rows[0];
+      const uu = await getUser(row.userId);
+      let photoMsg = null;
+      try {
+        const photos = await api.getUserProfilePhotos({ user_id: row.userId, limit: 1 });
+        const fileId = photos?.photos?.[0]?.[0]?.file_id;
+        if (fileId) {
+          photoMsg = await api.sendPhoto({
+            chat_id: chatId,
+            photo: fileId,
+            caption: 'فرستنده: ' + displayName(uu, row.userId) + ' | ' + row.userId,
+          });
+        }
+      } catch (_) {}
+      const map = { pending: '🟡', approved: '🟢', rejected: '🔴' };
       await api.sendMessage({
         chat_id: chatId,
         text:
-          '#' +
-          row.id +
-          ' | ' +
-          row.status +
-          ' | ' +
-          row.channelKey +
-          '\nuser: ' +
-          row.userId +
-          '\n\n' +
-          row.content,
-        reply_markup:
-          row.status === 'pending' ? reviewInline(row.id) : ownerKeyboard(),
+          (map[row.status] || '') + ' #' + row.id + ' | ' + row.status + ' | ' + row.channelKey +
+          '\nuser: ' + row.userId + (uu ? ' (' + displayName(uu, row.userId) + ')' : '') +
+          (row.reviewedBy ? '\nبررسی‌کننده: ' + row.reviewedBy : '') +
+          (row.rejectReason ? '\nدلیل رد: ' + row.rejectReason : '') +
+          '\n\n' + row.content,
+        reply_markup: row.status === 'pending' ? reviewInline(row.id) : ownerKeyboard(),
       });
+      if (photoMsg?.message_id) {
+        try { await api.deleteMessage({ chat_id: chatId, message_id: photoMsg.message_id }); } catch (_) {}
+      }
       return;
     }
 
+    
     if (owner && state?.kind === 'search_user' && text) {
       const id = await resolveUserId(text);
       await clearState(userId);
       if (!id) {
         await api.sendMessage({
           chat_id: chatId,
-          text: 'کاربر پیدا نشد. آیدی یا @username بفرستید.',
+          text: 'کاربر پیدا نشد.',
           reply_markup: ownerKeyboard(),
         });
         return;
       }
       const uu = await getUser(id);
-      const ms =
-        (await db.select().from(messages).where(eq(messages.userId, id)).all()) || [];
-      const pending = ms.filter((m) => m.status === 'pending');
-      let body =
-        '👤 ' +
-        displayName(uu, id) +
-        '\nآیدی: `' +
-        id +
-        '`\nنقش: ' +
-        (uu?.role || '?') +
-        '\nپیام‌ها: ' +
-        ms.length +
-        '\n\n';
-      body += '— همه پیام‌ها —\n';
-      for (const m of ms.slice(0, 20)) {
-        body +=
-          '#' +
-          m.id +
-          ' | ' +
-          m.status +
-          '\n' +
-          (m.content || '').slice(0, 100) +
-          '\n\n';
-      }
-      if (pending.length) {
-        body += '— در انتظار —\n';
-        for (const m of pending) {
-          body += '#' + m.id + '\n' + m.content + '\n\n';
+      const ms = (await db.select().from(messages).where(eq(messages.userId, id)).all()) || [];
+      const pe = ms.filter((x) => x.status === 'pending').length;
+      const ap = ms.filter((x) => x.status === 'approved').length;
+      const rj = ms.filter((x) => x.status === 'rejected').length;
+      const map = { pending: '🟡', approved: '🟢', rejected: '🔴' };
+      let photoMsg = null;
+      try {
+        const photos = await api.getUserProfilePhotos({ user_id: id, limit: 1 });
+        const fileId = photos?.photos?.[0]?.[0]?.file_id;
+        if (fileId) {
+          photoMsg = await api.sendPhoto({
+            chat_id: chatId,
+            photo: fileId,
+            caption:
+              '👤 ' + displayName(uu, id) +
+              '\n🆔 ' + id +
+              (uu?.username ? '\n@' + uu.username : '') +
+              '\nنقش: ' + (uu?.role || 'user') +
+              '\n📨 ' + ms.length + ' | 🟡' + pe + ' 🟢' + ap + ' 🔴' + rj,
+          });
         }
+      } catch (e) {
+        console.error('photo', e);
       }
-      await api.sendMessage({
-        chat_id: chatId,
-        text: body.slice(0, 3500),
-        reply_markup: userOpenInline(id),
-        parse_mode: 'Markdown',
-      });
+      if (!photoMsg) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '👤 ' + displayName(uu, id) +
+            '\n🆔 `' + id + '`' +
+            (uu?.username ? '\n@' + uu.username : '') +
+            '\nنقش: ' + (uu?.role || 'user') +
+            '\n📨 ' + ms.length + ' | 🟡' + pe + ' 🟢' + ap + ' 🔴' + rj,
+          parse_mode: 'Markdown',
+        });
+      }
+      if (ms.length) {
+        const last = ms.sort((a, b) => b.id - a.id).slice(0, 12);
+        let body = 'آخرین پیام‌ها:\n';
+        for (const row of last) {
+          const short = (row.content || '').replace(/\n/g, ' ').slice(0, 60);
+          body += map[row.status] || '•';
+          body += ' #' + row.id + ' ' + short + (short.length >= 60 ? '…' : '') + '\n';
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text: body,
+          reply_markup: ownerKeyboard(),
+        });
+      } else {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'پیامی ثبت نشده.',
+          reply_markup: ownerKeyboard(),
+        });
+      }
+      if (photoMsg?.message_id) {
+        try {
+          await api.deleteMessage({ chat_id: chatId, message_id: photoMsg.message_id });
+        } catch (_) {}
+      }
       return;
     }
 
+    
     if (owner && text === '📣 اطلاعیه') {
       try {
-        await setState(userId, 'announce');
+        await setState(userId, 'announce_wait_text');
         await api.sendMessage({
           chat_id: chatId,
-          text: 'متن اطلاعیه را بفرستید (برای همه کاربران):',
+          text: 'متن اطلاعیه را بفرستید:',
           reply_markup: backKeyboard(),
         });
       } catch (e) {
         console.error('announce', e);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'خطا: ' + (e && e.message ? e.message : String(e)),
-          reply_markup: ownerKeyboard(),
-        });
+        await api.sendMessage({ chat_id: chatId, text: 'خطا: ' + (e.message || e), reply_markup: await roleKb(userId) });
       }
       return;
     }
 
-    if (owner && state?.kind === 'announce' && text) {
+    if (owner && state?.kind === 'announce_wait_text' && text) {
+      await setState(userId, 'announce_pick_target', { annText: text });
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'ارسال به چه کسانی؟',
+        reply_markup: announceTargetInline(),
+      });
+      return;
+    }
+
+
+    if (owner && state?.kind === 'add_admin_id' && text) {
+      const chKey = state.channelKey;
       await clearState(userId);
-      const us = (await db.select().from(users).all()) || [];
-      let ok = 0;
-      for (const x of us) {
-        if (x.blocked) continue;
+      const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      let ok = 0, fail = 0;
+      for (const line of lines) {
+        let id = null;
+        if (/^\d+$/.test(line.replace(/\s/g, ''))) id = Number(line.replace(/\D/g, ''));
+        else id = await resolveUserId(line);
+        if (!id) { fail++; continue; }
         try {
-          await api.sendMessage({ chat_id: x.userId, text });
+          await addChannelAdmin(id, chKey);
           ok++;
-        } catch (_) {}
+        } catch (_) { fail++; }
       }
       await api.sendMessage({
         chat_id: chatId,
-        text: 'ارسال شد: ' + ok,
+        text: 'نتیجه افزودن ادمین\n✅ ' + ok + ' | ❌ ' + fail,
         reply_markup: ownerKeyboard(),
       });
       return;
