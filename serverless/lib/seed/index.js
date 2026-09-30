@@ -1,41 +1,58 @@
-/** seed data — بدون ادمین‌ها */
+/** seed — static imports only */
+import users_0 from 'lib/seed/users_0.js';
+import users_1 from 'lib/seed/users_1.js';
+import users_2 from 'lib/seed/users_2.js';
+import users_3 from 'lib/seed/users_3.js';
+import users_4 from 'lib/seed/users_4.js';
+import users_5 from 'lib/seed/users_5.js';
+import users_6 from 'lib/seed/users_6.js';
+import users_7 from 'lib/seed/users_7.js';
+import users_8 from 'lib/seed/users_8.js';
+import users_9 from 'lib/seed/users_9.js';
+import users_10 from 'lib/seed/users_10.js';
+import users_11 from 'lib/seed/users_11.js';
+import users_12 from 'lib/seed/users_12.js';
+import messages_0 from 'lib/seed/messages_0.js';
+import messages_1 from 'lib/seed/messages_1.js';
+import messages_2 from 'lib/seed/messages_2.js';
+import messages_3 from 'lib/seed/messages_3.js';
+import messages_4 from 'lib/seed/messages_4.js';
+import messages_5 from 'lib/seed/messages_5.js';
+import feedback from 'lib/seed/feedback.js';
+import settings from 'lib/seed/settings.js';
+
 export const USER_CHUNKS = 13;
 export const MESSAGE_CHUNKS = 6;
 
-export async function loadUserChunk(i) {
-  switch (i) {
-    case 0: return (await import('lib/seed/users_0.js')).default;
-    case 1: return (await import('lib/seed/users_1.js')).default;
-    case 2: return (await import('lib/seed/users_2.js')).default;
-    case 3: return (await import('lib/seed/users_3.js')).default;
-    case 4: return (await import('lib/seed/users_4.js')).default;
-    case 5: return (await import('lib/seed/users_5.js')).default;
-    case 6: return (await import('lib/seed/users_6.js')).default;
-    case 7: return (await import('lib/seed/users_7.js')).default;
-    case 8: return (await import('lib/seed/users_8.js')).default;
-    case 9: return (await import('lib/seed/users_9.js')).default;
-    case 10: return (await import('lib/seed/users_10.js')).default;
-    case 11: return (await import('lib/seed/users_11.js')).default;
-    case 12: return (await import('lib/seed/users_12.js')).default;
-    default: return [];
-  }
-}
+const USER_DATA = [
+  users_0,
+  users_1,
+  users_2,
+  users_3,
+  users_4,
+  users_5,
+  users_6,
+  users_7,
+  users_8,
+  users_9,
+  users_10,
+  users_11,
+  users_12,
+];
+const MSG_DATA = [
+  messages_0,
+  messages_1,
+  messages_2,
+  messages_3,
+  messages_4,
+  messages_5,
+];
 
-export async function loadMessageChunk(i) {
-  switch (i) {
-    case 0: return (await import('lib/seed/messages_0.js')).default;
-    case 1: return (await import('lib/seed/messages_1.js')).default;
-    case 2: return (await import('lib/seed/messages_2.js')).default;
-    case 3: return (await import('lib/seed/messages_3.js')).default;
-    case 4: return (await import('lib/seed/messages_4.js')).default;
-    case 5: return (await import('lib/seed/messages_5.js')).default;
-    default: return [];
-  }
+export function loadUserChunk(i) {
+  return USER_DATA[i] || [];
 }
-
-export async function loadFeedback() {
-  return (await import('lib/seed/feedback.js')).default;
+export function loadMessageChunk(i) {
+  return MSG_DATA[i] || [];
 }
-export async function loadSettings() {
-  return (await import('lib/seed/settings.js')).default;
-}
+export function loadFeedback() { return feedback || []; }
+export function loadSettings() { return settings || []; }
