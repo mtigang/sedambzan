@@ -961,7 +961,7 @@ export default async function (message) {
     if (owner && text === '📦 بازیابی بکاپ') {
       await api.sendMessage({
         chat_id: chatId,
-        text: '📦 بازیابی از داخل ربات خاموش شد.\nروی سرور این دستور را بزن:\nnpx tgcloud run handlers/seed_import',
+        text: '📦 بازیابی از داخل ربات خاموش شد.\nروی سرور این دستور را بزن:\nnpx tgcloud run lib/run_seed_import',
         reply_markup: settingsKeyboard(await isBotOn()),
       });
       return;
