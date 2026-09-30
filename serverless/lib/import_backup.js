@@ -11,7 +11,7 @@ import {
 } from 'lib/seed/index';
 
 export async function importUsersChunk(i) {
-  const rows = await loadUserChunk(i);
+  const rows = loadUserChunk(i);
   let ok = 0, skip = 0, fail = 0;
   for (const r of rows) {
     try {
@@ -42,7 +42,7 @@ export async function importUsersChunk(i) {
 }
 
 export async function importMessagesChunk(i) {
-  const rows = await loadMessageChunk(i);
+  const rows = loadMessageChunk(i);
   let ok = 0, fail = 0;
   for (const r of rows) {
     try {
@@ -67,7 +67,7 @@ export async function importMessagesChunk(i) {
 }
 
 export async function importFeedbackAll() {
-  const rows = await loadFeedback();
+  const rows = loadFeedback();
   let ok = 0, fail = 0;
   for (const r of rows) {
     try {
@@ -89,7 +89,7 @@ export async function importFeedbackAll() {
 }
 
 export async function importSettingsAll() {
-  const rows = await loadSettings();
+  const rows = loadSettings();
   let ok = 0;
   for (const r of rows) {
     try {
