@@ -135,7 +135,7 @@ export function feedbackInline(id, userId) {
 export function userOpenInline(userId) {
   return {
     inline_keyboard: [
-      [{ text: 'باز کردن پیوی', url: 'tg://user?id=' + userId, style: 'primary' }],
+      [{ text: 'مشاهده کاربر', callback_data: 'uv:' + userId, style: 'primary' }],
     ],
   };
 }
@@ -179,9 +179,9 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts) {
 export function adminListInline(admins, channelKey) {
   const rows = [];
   for (const a of admins) {
-    const name = a.display || String(a.userId);
+    const name = (a.display || String(a.userId)).slice(0, 40);
     rows.push([
-      { text: name, url: 'tg://user?id=' + a.userId, style: 'primary' },
+      { text: name, callback_data: 'uv:' + a.userId, style: 'primary' },
       {
         text: 'حذف',
         callback_data: 'adel:' + channelKey + ':' + a.userId,
