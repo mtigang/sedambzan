@@ -31,6 +31,14 @@ import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin } from 'lib/time';
 import { resolveUserId } from 'lib/resolve';
 import {
+  USER_CHUNKS,
+  MESSAGE_CHUNKS,
+  importUsersChunk,
+  importMessagesChunk,
+  importFeedbackAll,
+  importSettingsAll,
+} from 'lib/import_backup';
+import {
   ensureChannelsSeeded,
   getChannels,
   getChannel,
@@ -963,7 +971,6 @@ export default async function (message) {
 
     if (owner && text === '📦 بازیابی بکاپ') {
       try {
-        const { USER_CHUNKS, MESSAGE_CHUNKS, importUsersChunk, importMessagesChunk, importFeedbackAll, importSettingsAll } = await import('lib/import_backup');
         await api.sendMessage({
           chat_id: chatId,
           text:
