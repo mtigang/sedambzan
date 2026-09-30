@@ -1,10 +1,22 @@
 import { api, db } from 'sdk';
 import { eq, and } from 'sdk/db';
-import { messages, feedback, shifts } from 'schema';
-import { isOwner, addChannelAdmin, removeChannelAdmin, listAdminsByChannel, syncAdminsFromGroup, postToChannel, displayName, getUser } from 'lib/dbutil';
+import { messages, feedback, shifts, settings } from 'schema';
+import {
+  isOwner,
+  removeChannelAdmin,
+  listAdminsByChannel,
+  syncAdminsFromGroup,
+  postToChannel,
+  displayName,
+  getUser,
+  settingGet,
+  settingSet,
+  activeShiftAdmins,
+} from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow } from 'lib/time';
+import { tehranNow, inRange } from 'lib/time';
 import { DEFAULT_CHANNELS } from 'lib/config';
+import { channelMessageLink } from 'lib/resolve';
 import {
   rejectReasonsInline,
   reviewInline,
@@ -13,14 +25,76 @@ import {
   shiftSlotsInline,
 } from 'lib/keyboards';
 
+async function refreshAllShiftBoards(channelKey, date) {
+  const dayShifts =
+    (await db
+      .select()
+      .from(shifts)
+      .where(
+        and(
+          eq(shifts.channelKey, channelKey),
+          eq(shifts.shiftDate, date),
+          eq(shifts.status, 'active')
+        )
+      )
+      .all()) || [];
+  const takenMap = {};
+  for (const s of dayShifts) takenMap[s.startHm] = s.adminId;
+
+  // همه boardهای ذخیره‌شده برای این کانال/روز
+  try {
+    const allSettings = await db.select().from(settings).all();
+    const prefix = 'shift_board:' + channelKey + ':' + date + ':';
+    for (const row of allSettings || []) {
+      if (!row.key || !row.key.startsWith(prefix) || !row.value) continue;
+      try {
+        const info = JSON.parse(row.value);
+        const adminId = Number(row.key.slice(prefix.length));
+        const myStarts = new Set(
+          dayShifts.filter((s) => s.adminId === adminId).map((s) => s.startHm)
+        );
+        await api.editMessageReplyMarkup({
+          chat_id: info.chatId,
+          message_id: info.messageId,
+          reply_markup: shiftSlotsInline(channelKey, takenMap, myStarts),
+        });
+      } catch (e) {
+        console.error('refresh board', e);
+      }
+    }
+  } catch (e) {
+    console.error('refreshAllShiftBoards', e);
+  }
+}
+
 export default async function (cq) {
   try {
     const data = cq.data || '';
     const userId = cq.from?.id;
     if (!userId) return;
 
-    // —— approve / reject ——
+    // ادمین فقط در شیفت بتواند تأیید/رد کند (مالک همیشه)
+    async function assertCanReview() {
+      if (isOwner(userId)) return true;
+      const { date, hm } = tehranNow();
+      const mySh =
+        (await db
+          .select()
+          .from(shifts)
+          .where(and(eq(shifts.adminId, userId), eq(shifts.shiftDate, date), eq(shifts.status, 'active')))
+          .all()) || [];
+      return mySh.some((s) => inRange(hm, s.startHm, s.endHm));
+    }
+
     if (data.startsWith('approve:')) {
+      if (!(await assertCanReview())) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'فقط در زمان شیفت خودتان',
+          show_alert: true,
+        });
+        return;
+      }
       const id = Number(data.split(':')[1]);
       const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
       const row = rows?.[0];
@@ -45,28 +119,41 @@ export default async function (cq) {
           text: '🟢 تأیید #' + id + ' توسط ' + userId,
         });
       } catch (_) {}
-      // انتشار در کانال
+
+      let link = null;
       try {
         const conf = DEFAULT_CHANNELS[row.channelKey];
         if (conf?.chatId) {
-          await api.sendMessage({ chat_id: conf.chatId, text: row.content });
+          const sent = await api.sendMessage({ chat_id: conf.chatId, text: row.content });
+          const mid = sent && sent.message_id;
+          link = channelMessageLink(conf.chatId, mid);
         }
       } catch (e) {
-        console.error('publish channel', e);
+        console.error('publish', e);
         try {
           await api.sendMessage({
             chat_id: userId,
-            text: '⚠️ تأیید شد ولی ارسال به کانال ناموفق: ' + (e?.description || e),
+            text: '⚠️ تأیید شد ولی ارسال کانال ناموفق: ' + (e?.description || e),
           });
         } catch (_) {}
       }
       try {
-        await api.sendMessage({ chat_id: row.userId, text: '✅ پیام #' + id + ' تأیید و منتشر شد.' });
+        let txt = '✅ پیام #' + id + ' تأیید و منتشر شد.';
+        if (link) txt += '\n' + link;
+        await api.sendMessage({ chat_id: row.userId, text: txt });
       } catch (_) {}
       return;
     }
 
     if (data.startsWith('reject_menu:')) {
+      if (!(await assertCanReview())) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'فقط در زمان شیفت خودتان',
+          show_alert: true,
+        });
+        return;
+      }
       const id = Number(data.split(':')[1]);
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       try {
@@ -93,6 +180,14 @@ export default async function (cq) {
     }
 
     if (data.startsWith('reject:')) {
+      if (!(await assertCanReview())) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'فقط در زمان شیفت خودتان',
+          show_alert: true,
+        });
+        return;
+      }
       const parts = data.split(':');
       const id = Number(parts[1]);
       const reason = parts.slice(2).join(':') || 'نامناسب';
@@ -133,30 +228,21 @@ export default async function (cq) {
       return;
     }
 
-    // —— feedback ——
     if (data.startsWith('fb_reply:')) {
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const fid = Number(data.split(':')[1]);
       await setState(userId, 'fb_reply', { feedbackId: fid });
       await api.answerCallbackQuery({ callback_query_id: cq.id });
-      await api.sendMessage({ chat_id: cq.message.chat.id, text: 'پاسخ #' + fid + ' را بنویسید:' });
+      await api.sendMessage({ chat_id: cq.message.chat.id, text: 'پاسخ #' + fid + ':' });
       return;
     }
 
     if (data.startsWith('fb_close:')) {
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const fid = Number(data.split(':')[1]);
@@ -174,46 +260,22 @@ export default async function (cq) {
 
     if (data.startsWith('fb_user:')) {
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const uid = Number(data.split(':')[1]);
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       const uu = await getUser(uid);
-      const ms =
-        (await db.select().from(messages).where(eq(messages.userId, uid)).all()) || [];
+      const ms = (await db.select().from(messages).where(eq(messages.userId, uid)).all()) || [];
       const pending = ms.filter((m) => m.status === 'pending');
       let body =
-        '👤 ' +
-        displayName(uu, uid) +
-        '\nآیدی: ' +
-        uid +
-        '\nنقش: ' +
-        (uu?.role || '?') +
-        '\n\n— پیام‌ها (' +
-        ms.length +
-        ') —\n';
+        '👤 ' + displayName(uu, uid) + '\nآیدی: ' + uid + '\n\n— پیام‌ها —\n';
       for (const m of ms.slice(0, 25)) {
-        body +=
-          '#' +
-          m.id +
-          ' | ' +
-          m.status +
-          ' | ' +
-          m.channelKey +
-          '\n' +
-          (m.content || '') +
-          '\n\n';
+        body += '#' + m.id + ' | ' + m.status + '\n' + (m.content || '') + '\n\n';
       }
       if (pending.length) {
-        body += '— هنوز به ادمین نرسیده / در صف —\n';
-        for (const m of pending) {
-          body += '#' + m.id + '\n' + m.content + '\n\n';
-        }
+        body += '— در صف —\n';
+        for (const m of pending) body += '#' + m.id + '\n' + m.content + '\n\n';
       }
       await api.sendMessage({
         chat_id: cq.message.chat.id,
@@ -223,14 +285,9 @@ export default async function (cq) {
       return;
     }
 
-    // —— admin list ——
     if (data.startsWith('adel:')) {
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const [, channelKey, tid] = data.split(':');
@@ -254,11 +311,7 @@ export default async function (cq) {
 
     if (data.startsWith('aadd:')) {
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const channelKey = data.split(':')[1];
@@ -266,18 +319,17 @@ export default async function (cq) {
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: 'آیدی عددی کاربر برای افزودن به «' + (DEFAULT_CHANNELS[channelKey]?.title || '') + '»:',
+        text:
+          'آیدی عددی یا @username برای افزودن به «' +
+          (DEFAULT_CHANNELS[channelKey]?.title || '') +
+          '»:',
       });
       return;
     }
 
     if (data.startsWith('async:')) {
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const channelKey = data.split(':')[1];
@@ -296,22 +348,16 @@ export default async function (cq) {
             '👮 ادمین‌های «' +
             (DEFAULT_CHANNELS[channelKey]?.title || channelKey) +
             '»\nتعداد: ' +
-            ads.length +
-            (res.ok ? '' : '\n⚠️ ' + res.error),
+            ads.length,
           reply_markup: adminListInline(ads, channelKey),
         });
       } catch (_) {}
       return;
     }
 
-    // —— post to channel ——
     if (data.startsWith('postch:')) {
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const channelKey = data.split(':')[1];
@@ -319,7 +365,7 @@ export default async function (cq) {
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: 'متن پیام برای «' + (DEFAULT_CHANNELS[channelKey]?.title || channelKey) + '» را بفرستید:',
+        text: 'متن برای «' + (DEFAULT_CHANNELS[channelKey]?.title || channelKey) + '»:',
       });
       return;
     }
@@ -332,31 +378,29 @@ export default async function (cq) {
 
     if (data === 'post_yes') {
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط مالک',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const st = await getState(userId);
       if (!st || st.kind !== 'post_confirm' || !st.postText) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'منقضی شده',
-          show_alert: true,
-        });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'منقضی', show_alert: true });
         return;
       }
       try {
-        await postToChannel(st.channelKey, st.postText);
+        const sent = await postToChannel(st.channelKey, st.postText);
         await clearState(userId);
+        const conf = DEFAULT_CHANNELS[st.channelKey];
+        const link = channelMessageLink(conf?.chatId, sent?.message_id);
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ارسال شد' });
         try {
           await api.editMessageText({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
-            text: '✅ در کانال «' + (DEFAULT_CHANNELS[st.channelKey]?.title || '') + '» ارسال شد.',
+            text:
+              '✅ ارسال شد به «' +
+              (conf?.title || '') +
+              '»' +
+              (link ? '\n' + link : ''),
           });
         } catch (_) {}
       } catch (e) {
@@ -369,7 +413,6 @@ export default async function (cq) {
       return;
     }
 
-    // —— shifts ——
     if (data.startsWith('shift_full:')) {
       await api.answerCallbackQuery({
         callback_query_id: cq.id,
@@ -378,15 +421,10 @@ export default async function (cq) {
       });
       return;
     }
-
     if (data.startsWith('shift_mine:')) {
-      await api.answerCallbackQuery({
-        callback_query_id: cq.id,
-        text: 'این شیفت مال شماست',
-      });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'شیفت شماست' });
       return;
     }
-
     if (data === 'shift_close') {
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       try {
@@ -406,7 +444,6 @@ export default async function (cq) {
       const endHm = parts[3];
       const { date } = tehranNow();
 
-      // حداکثر ۲ شیفت
       const mine =
         (await db
           .select()
@@ -422,13 +459,11 @@ export default async function (cq) {
       if (mine.length >= 2) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: 'حداکثر ۲ شیفت در روز',
+          text: 'حداکثر ۲ شیفت',
           show_alert: true,
         });
         return;
       }
-
-      // تکراری / پر
       const taken =
         (await db
           .select()
@@ -448,6 +483,7 @@ export default async function (cq) {
           text: 'پر شده',
           show_alert: true,
         });
+        await refreshAllShiftBoards(channelKey, date);
         return;
       }
 
@@ -463,29 +499,8 @@ export default async function (cq) {
         })
         .run();
 
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت شد ✅' });
-
-      // رفرش کیبورد
-      const dayShifts =
-        (await db
-          .select()
-          .from(shifts)
-          .where(and(eq(shifts.channelKey, channelKey), eq(shifts.shiftDate, date), eq(shifts.status, 'active')))
-          .all()) || [];
-      const takenMap = {};
-      const myStarts = new Set();
-      for (const s of dayShifts) {
-        takenMap[s.startHm] = s.adminId;
-        if (s.adminId === userId) myStarts.add(s.startHm);
-      }
-      try {
-        await api.editMessageReplyMarkup({
-          chat_id: cq.message.chat.id,
-          message_id: cq.message.message_id,
-          reply_markup: shiftSlotsInline(channelKey, takenMap, myStarts),
-        });
-      } catch (_) {}
-
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت شد' });
+      await refreshAllShiftBoards(channelKey, date);
       await api.sendMessage({
         chat_id: userId,
         text:
