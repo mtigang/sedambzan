@@ -1,28 +1,48 @@
 import { api, db } from 'sdk';
 import { channels, channelAdmins, shifts, settings, users, messages } from 'schema';
 import { eq, and } from 'sdk/db';
-import { DEFAULT_CHANNELS, OWNER_IDS } from 'lib/config';
+import {
+  DEFAULT_CHANNELS,
+  OWNER_IDS,
+  CHANNEL_IDS,
+  ADMIN_GROUP_IDS,
+} from 'lib/config';
 import { tehranNow, inRange } from 'lib/time';
 
 export async function ensureChannelsSeeded() {
   try {
     const rows = await db.select().from(channels).all();
-    if (rows && rows.length) return rows;
+    if (rows && rows.length >= 3) return rows;
     for (const c of Object.values(DEFAULT_CHANNELS)) {
       try {
-        await db
-          .insert(channels)
-          .values({
-            key: c.key,
-            title: c.title,
-            link: c.link || '',
-            enabled: 1,
-            workStart: c.workStart || '00:00',
-            workEnd: c.workEnd || '23:59',
-          })
-          .run();
+        const exist = await db.select().from(channels).where(eq(channels.key, c.key)).all();
+        if (exist?.length) {
+          await db
+            .update(channels)
+            .set({
+              title: c.title,
+              link: String(c.chatId),
+              enabled: 1,
+              workStart: c.workStart,
+              workEnd: c.workEnd,
+            })
+            .where(eq(channels.key, c.key))
+            .run();
+        } else {
+          await db
+            .insert(channels)
+            .values({
+              key: c.key,
+              title: c.title,
+              link: String(c.chatId),
+              enabled: 1,
+              workStart: c.workStart,
+              workEnd: c.workEnd,
+            })
+            .run();
+        }
       } catch (e) {
-        console.error('seed channel', c.key, e);
+        console.error('seed', c.key, e);
       }
     }
     return (await db.select().from(channels).all()) || [];
@@ -31,7 +51,7 @@ export async function ensureChannelsSeeded() {
     return Object.values(DEFAULT_CHANNELS).map((c) => ({
       key: c.key,
       title: c.title,
-      link: '',
+      link: String(c.chatId),
       enabled: 1,
       workStart: c.workStart,
       workEnd: c.workEnd,
@@ -46,22 +66,29 @@ export async function getChannels() {
 export async function getChannel(key) {
   try {
     const rows = await db.select().from(channels).where(eq(channels.key, key)).all();
-    if (rows && rows[0]) return rows[0];
+    if (rows?.[0]) {
+      const r = rows[0];
+      return {
+        ...r,
+        chatId: CHANNEL_IDS[key] || Number(r.link) || null,
+        adminGroupId: ADMIN_GROUP_IDS[key] || null,
+      };
+    }
   } catch (e) {
     console.error('getChannel', e);
   }
   const d = DEFAULT_CHANNELS[key];
-  if (d) {
-    return {
-      key: d.key,
-      title: d.title,
-      link: d.link || '',
-      enabled: 1,
-      workStart: d.workStart,
-      workEnd: d.workEnd,
-    };
-  }
-  return null;
+  if (!d) return null;
+  return {
+    key: d.key,
+    title: d.title,
+    link: String(d.chatId),
+    enabled: 1,
+    workStart: d.workStart,
+    workEnd: d.workEnd,
+    chatId: d.chatId,
+    adminGroupId: d.adminGroupId,
+  };
 }
 
 export async function settingGet(key, def = null) {
@@ -137,6 +164,14 @@ export async function getUser(id) {
   }
 }
 
+export function displayName(u, id) {
+  if (!u) return String(id);
+  const n = [u.firstName, u.lastName].filter(Boolean).join(' ');
+  if (n) return n;
+  if (u.username) return '@' + u.username;
+  return String(u.userId || id);
+}
+
 export async function getRole(id) {
   if (isOwner(id)) return 'owner';
   try {
@@ -162,49 +197,108 @@ export async function adminChannels(userId) {
 }
 
 export async function addChannelAdmin(userId, channelKey) {
-  const exist = await db
-    .select()
-    .from(channelAdmins)
-    .where(and(eq(channelAdmins.userId, userId), eq(channelAdmins.channelKey, channelKey)))
-    .all();
-  if (exist?.length) return;
-  await db.insert(channelAdmins).values({ userId, channelKey }).run();
-  const u = await getUser(userId);
-  if (u) {
-    if (u.role !== 'owner') {
-      await db.update(users).set({ role: 'admin' }).where(eq(users.userId, userId)).run();
+  if (isOwner(userId)) return;
+  try {
+    const exist = await db
+      .select()
+      .from(channelAdmins)
+      .where(and(eq(channelAdmins.userId, userId), eq(channelAdmins.channelKey, channelKey)))
+      .all();
+    if (exist?.length) return;
+    await db.insert(channelAdmins).values({ userId, channelKey }).run();
+    const u = await getUser(userId);
+    if (u) {
+      if (u.role !== 'owner') {
+        await db.update(users).set({ role: 'admin' }).where(eq(users.userId, userId)).run();
+      }
+    } else {
+      await db.insert(users).values({ userId, role: 'admin', started: 0 }).run();
     }
-  } else {
-    await db.insert(users).values({ userId, role: 'admin', started: 0 }).run();
+  } catch (e) {
+    console.error('addChannelAdmin', e);
   }
 }
 
 export async function removeChannelAdmin(userId, channelKey) {
-  await db
-    .delete(channelAdmins)
-    .where(and(eq(channelAdmins.userId, userId), eq(channelAdmins.channelKey, channelKey)))
-    .run();
-  const left = await adminChannels(userId);
-  if (!left.length) {
-    const u = await getUser(userId);
-    if (u && u.role === 'admin') {
-      await db.update(users).set({ role: 'user' }).where(eq(users.userId, userId)).run();
+  try {
+    await db
+      .delete(channelAdmins)
+      .where(and(eq(channelAdmins.userId, userId), eq(channelAdmins.channelKey, channelKey)))
+      .run();
+    const left = await adminChannels(userId);
+    if (!left.length) {
+      const u = await getUser(userId);
+      if (u && u.role === 'admin') {
+        await db.update(users).set({ role: 'user' }).where(eq(users.userId, userId)).run();
+      }
     }
+  } catch (e) {
+    console.error('removeChannelAdmin', e);
   }
 }
 
 export async function listAdminsByChannel(channelKey) {
   try {
-    return (
+    const rows =
       (await db
         .select()
         .from(channelAdmins)
         .where(eq(channelAdmins.channelKey, channelKey))
-        .all()) || []
-    );
+        .all()) || [];
+    const out = [];
+    for (const r of rows) {
+      const u = await getUser(r.userId);
+      out.push({
+        userId: r.userId,
+        display: displayName(u, r.userId),
+        user: u,
+      });
+    }
+    return out;
   } catch (_) {
     return [];
   }
+}
+
+/** همگام‌سازی از گروه ادمین — getChatAdministrators + ثبت */
+export async function syncAdminsFromGroup(channelKey) {
+  const groupId = ADMIN_GROUP_IDS[channelKey];
+  if (!groupId) return { ok: false, error: 'no group', added: 0 };
+  let admins = [];
+  try {
+    admins = await api.getChatAdministrators({ chat_id: groupId });
+  } catch (e) {
+    console.error('getChatAdministrators', channelKey, e);
+    return { ok: false, error: String(e?.description || e), added: 0 };
+  }
+  let added = 0;
+  for (const a of admins || []) {
+    const uid = a.user?.id;
+    if (!uid || a.user?.is_bot) continue;
+    if (isOwner(uid)) continue;
+    try {
+      await upsertUser(a.user);
+      await addChannelAdmin(uid, channelKey);
+      added++;
+    } catch (e) {
+      console.error('sync member', uid, e);
+    }
+  }
+  return { ok: true, added, total: (admins || []).length };
+}
+
+export async function syncAllAdminGroups(force = false) {
+  const last = Number(await settingGet('last_admin_sync', '0')) || 0;
+  const now = Date.now();
+  if (!force && now - last < 30 * 60 * 1000) {
+    return { skipped: true };
+  }
+  const results = {};
+  for (const key of Object.keys(ADMIN_GROUP_IDS)) {
+    results[key] = await syncAdminsFromGroup(key);
+  }
+  await settingSet('last_admin_sync', String(now));
+  return { skipped: false, results };
 }
 
 export async function activeShiftAdmins(channelKey) {
@@ -229,46 +323,125 @@ export async function activeShiftAdmins(channelKey) {
   }
 }
 
-export async function notifyReviewers(channelKey, text, replyMarkup) {
-  const owners = OWNER_IDS;
-  let onShift = [];
-  try {
-    onShift = await activeShiftAdmins(channelKey);
-  } catch (_) {}
-  let channelAdms = [];
-  try {
-    channelAdms = (await listAdminsByChannel(channelKey)).map((a) => a.userId);
-  } catch (_) {}
-  const targets = onShift.length
-    ? [...new Set([...onShift, ...owners])]
-    : [...new Set([...channelAdms, ...owners])];
-  for (const id of targets) {
+/**
+ * اطلاع‌رسانی: فقط ادمین‌های شیفت فعال کانال.
+ * اگر شیفت نبود → فقط در صف می‌ماند (مالک مستقیم نمی‌گیرد مگر صف را باز کند).
+ * delivered flag در settings: delivered:{msgId}:{adminId}
+ */
+export async function notifyShiftAdmins(channelKey, text, replyMarkup, msgId) {
+  const onShift = await activeShiftAdmins(channelKey);
+  const sent = [];
+  for (const id of onShift) {
+    if (isOwner(id)) continue; // مالک فقط از صف
     try {
-      await api.sendMessage({
-        chat_id: id,
-        text,
-        reply_markup: replyMarkup,
-      });
+      const flag = 'delivered:' + msgId + ':' + id;
+      if ((await settingGet(flag, '')) === '1') continue;
+      await api.sendMessage({ chat_id: id, text, reply_markup: replyMarkup });
+      await settingSet(flag, '1');
+      sent.push(id);
     } catch (e) {
-      console.error('notify', id, e);
+      console.error('notifyShift', id, e);
     }
   }
-  return targets;
+  return sent;
 }
 
-export async function pendingForAdmin(userId) {
+/** وقتی شیفت ادمین شروع می‌شود / یا هر تعامل: صف کانال‌هایش را تحویل بده */
+export async function deliverPendingForAdmin(adminId) {
+  const keys = await adminChannels(adminId);
+  if (!keys.length) return 0;
+  const { date, hm } = tehranNow();
+  // آیا الان شیفت فعال دارد؟
+  const allShifts =
+    (await db
+      .select()
+      .from(shifts)
+      .where(and(eq(shifts.adminId, adminId), eq(shifts.shiftDate, date), eq(shifts.status, 'active')))
+      .all()) || [];
+  const activeKeys = allShifts
+    .filter((s) => inRange(hm, s.startHm, s.endHm))
+    .map((s) => s.channelKey);
+  if (!activeKeys.length) return 0;
+
+  const pending =
+    (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
+  let n = 0;
+  for (const row of pending) {
+    if (!activeKeys.includes(row.channelKey)) continue;
+    const flag = 'delivered:' + row.id + ':' + adminId;
+    if ((await settingGet(flag, '')) === '1') continue;
+    try {
+      const ch = await getChannel(row.channelKey);
+      await api.sendMessage({
+        chat_id: adminId,
+        text:
+          '📨 #' +
+          row.id +
+          ' | ' +
+          (ch?.title || row.channelKey) +
+          '\nاز: ' +
+          row.userId +
+          '\n\n' +
+          row.content,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '🟢 تأیید', callback_data: 'approve:' + row.id },
+              { text: '🔴 رد', callback_data: 'reject_menu:' + row.id },
+            ],
+          ],
+        },
+      });
+      await settingSet(flag, '1');
+      n++;
+    } catch (e) {
+      console.error('deliver', row.id, e);
+    }
+  }
+  return n;
+}
+
+export async function pendingForViewer(userId) {
   try {
     const role = await getRole(userId);
     let keys = [];
     if (role === 'owner') {
-      keys = (await getChannels()).map((c) => c.key);
+      keys = Object.keys(DEFAULT_CHANNELS);
     } else {
       keys = await adminChannels(userId);
     }
     const all = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
     return all.filter((m) => keys.includes(m.channelKey)).sort((a, b) => b.id - a.id);
   } catch (e) {
-    console.error('pendingForAdmin', e);
+    console.error('pendingForViewer', e);
     return [];
   }
+}
+
+export async function testChannels() {
+  const results = [];
+  for (const [key, conf] of Object.entries(DEFAULT_CHANNELS)) {
+    const chatId = conf.chatId;
+    try {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '🧪 تست ربات آرال — کانال «' + conf.title + '»\nاگر این پیام را می‌بینید، ربات در کانال دسترسی ارسال دارد.',
+      });
+      results.push({ key, title: conf.title, ok: true, detail: 'ارسال موفق' });
+    } catch (e) {
+      results.push({
+        key,
+        title: conf.title,
+        ok: false,
+        detail: e?.description || String(e),
+      });
+    }
+  }
+  return results;
+}
+
+export async function postToChannel(channelKey, text) {
+  const conf = DEFAULT_CHANNELS[channelKey];
+  if (!conf) throw new Error('channel not found');
+  return await api.sendMessage({ chat_id: conf.chatId, text });
 }
