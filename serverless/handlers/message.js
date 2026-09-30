@@ -29,6 +29,7 @@ import {
 import { validateAndFix } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin } from 'lib/time';
+import { resolveUserId } from 'lib/resolve';
 import {
   ensureChannelsSeeded,
   getChannels,
@@ -49,6 +50,7 @@ import {
   pendingForViewer,
   testChannels,
   displayName,
+  settingGet,
 } from 'lib/dbutil';
 
 async function roleKb(uid) {
@@ -128,6 +130,13 @@ export default async function (message) {
       try {
         await clearState(userId);
       } catch (_) {}
+      try {
+        await api.setMyCommands({
+          commands: [{ command: 'start', description: 'راه‌اندازی مجدد ربات' }],
+        });
+      } catch (e) {
+        console.error('setMyCommands', e);
+      }
       await api.sendMessage({
         chat_id: chatId,
         text: WELCOME_TEXT,
@@ -213,16 +222,6 @@ export default async function (message) {
       return;
     }
 
-    if (text === '📖 راهنما') {
-      const t =
-        role === 'owner'
-          ? '👑 راهنمای مالک\n\nصف · ادمین per کانال · شیفت · ارسال به کانال · آمار · فیدبک · جستجو · تنظیمات'
-          : role === 'admin'
-            ? '👮 راهنمای ادمین\n\nشیفت ساعتی انتخاب کنید · صف کانال‌تان · عملکرد'
-            : '📖\n\n' + RULES_TEXT;
-      await api.sendMessage({ chat_id: chatId, text: t, reply_markup: await roleKb(userId) });
-      return;
-    }
 
     if (state?.kind === 'feedback' && text) {
       if (/^(صدام بزن|این کاربر|تو زندگی بعدی)/.test(text)) {
@@ -358,6 +357,26 @@ export default async function (message) {
 
     // ========== PENDING ==========
     if ((role === 'admin' || owner) && text === '📥 پیام‌های در انتظار') {
+      if (role === 'admin' && !owner) {
+        const { date, hm } = tehranNow();
+        const mySh =
+          (await db
+            .select()
+            .from(shifts)
+            .where(eq(shifts.adminId, userId))
+            .all()) || [];
+        const activeNow = mySh.filter(
+          (s) => s.shiftDate === date && s.status === 'active' && inRange(hm, s.startHm, s.endHm)
+        );
+        if (!activeNow.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '⏰ فقط در زمان شیفت خودتان می‌توانید صف را ببینید و پیام‌ها را بررسی کنید.',
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+      }
       const list = (await pendingForViewer(userId)).slice(0, 40);
       if (!list.length) {
         await api.sendMessage({
@@ -464,17 +483,43 @@ export default async function (message) {
         takenMap[s.startHm] = s.adminId;
         if (s.adminId === userId) myStarts.add(s.startHm);
       }
-      await clearState(userId);
-      await api.sendMessage({
+            await clearState(userId);
+      let head =
+        '⏰ شیفت‌های «' +
+        entry.title +
+        '»
+📅 ' +
+        date +
+        '
+۱۰ صبح تا ۲ بامداد · حداکثر ۲ شیفت
+🟢 خالی · 🔴 پر
+
+';
+      const activeLines = today.map((s) => {
+        const who = s.adminId === userId ? 'شما' : String(s.adminId);
+        return '• ' + s.startHm + '–' + s.endHm + ' ← ' + who;
+      });
+      head += activeLines.length
+        ? 'شیفت‌های ثبت‌شده امروز:
+' + activeLines.join('
+')
+        : 'هنوز شیفتی ثبت نشده.';
+      const board = await api.sendMessage({
         chat_id: chatId,
-        text:
-          '⏰ شیفت‌های «' +
-          entry.title +
-          '»\n📅 ' +
-          date +
-          '\nاز ۱۰ صبح تا ۲ بامداد · حداکثر ۲ شیفت\n🔴 = پر',
+        text: head,
         reply_markup: shiftSlotsInline(entry.key, takenMap, myStarts),
       });
+      try {
+        const mid = board && board.message_id;
+        if (mid) {
+          await settingSet(
+            'shift_board:' + entry.key + ':' + date + ':' + userId,
+            JSON.stringify({ chatId: userId, messageId: mid })
+          );
+        }
+      } catch (e) {
+        console.error('save board', e);
+      }
       return;
     }
 
@@ -540,11 +585,11 @@ export default async function (message) {
     }
 
     if (owner && state?.kind === 'add_admin_id' && text) {
-      const id = Number(String(text).replace(/\D/g, ''));
+      const id = await resolveUserId(text);
       if (!id) {
         await api.sendMessage({
           chat_id: chatId,
-          text: 'آیدی نامعتبر',
+          text: 'کاربر پیدا نشد. آیدی عددی یا @username بفرستید.',
           reply_markup: backKeyboard(),
         });
         return;
@@ -722,8 +767,16 @@ export default async function (message) {
     }
 
     if (owner && state?.kind === 'search_user' && text) {
-      const id = Number(String(text).replace(/\D/g, ''));
+      const id = await resolveUserId(text);
       await clearState(userId);
+      if (!id) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'کاربر پیدا نشد. آیدی یا @username بفرستید.',
+          reply_markup: ownerKeyboard(),
+        });
+        return;
+      }
       const uu = await getUser(id);
       const ms =
         (await db.select().from(messages).where(eq(messages.userId, id)).all()) || [];
