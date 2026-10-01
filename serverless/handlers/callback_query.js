@@ -21,6 +21,7 @@ import {
   sendReviewBatch,
   finishReviewBatchIfComplete,
   getReviewBatch,
+  findAdminShiftConflict,
 } from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, periodDateStr, formatTsJalali } from 'lib/time';
@@ -903,6 +904,15 @@ if (data === 'ann_cancel') {
         const targetAdmin = stAssign.adminId;
         const mode = stAssign.mode;
         const shiftDate = mode === 'perm' ? 'perm' : pdate;
+        const targetConflict = await findAdminShiftConflict(targetAdmin, shiftDate, startHm, endHm);
+        if (targetConflict) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'این ادمین در این بازه شیفت دیگری دارد.',
+            show_alert: true,
+          });
+          return;
+        }
         await clearState(userId);
         await db
           .insert(shifts)
@@ -924,7 +934,7 @@ if (data === 'ann_cancel') {
             '–' +
             endHm +
             ' برای ادمین ' +
-            targetAdmin +
+            displayName(await getUser(targetAdmin), targetAdmin) +
             ' (' +
             (mode === 'perm' ? 'دائمی' : 'روزانه') +
             ') ثبت شد.',
@@ -957,18 +967,43 @@ if (data === 'ann_cancel') {
             )
           )
           .all()) || [];
-      const conflict = taken.filter(
-        (s) =>
-          s.startHm === startHm &&
-          (s.shiftDate === pdate || s.shiftDate === 'perm')
-      );
+      const conflict = taken.filter((s) => {
+        const sameDate =
+          s.shiftDate === pdate ||
+          s.shiftDate === 'perm' ||
+          s.shiftDate === 'permanent';
+        if (!sameDate) return false;
+        const toOrd = (hm) => {
+          const parts = String(hm || '0:0').split(':').map(Number);
+          let m = (parts[0] || 0) * 60 + (parts[1] || 0);
+          if (m < 12 * 60) m += 24 * 60;
+          return m;
+        };
+        const a = toOrd(startHm);
+        let b = toOrd(endHm);
+        const c = toOrd(s.startHm);
+        let d = toOrd(s.endHm);
+        if (b <= a) b += 24 * 60;
+        if (d <= c) d += 24 * 60;
+        return a < d && c < b;
+      });
       if (conflict.length) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: 'پر شده',
+          text: 'این بازه در این کانال پر است.',
           show_alert: true,
         });
         await refreshAllShiftBoards(channelKey, pdate);
+        return;
+      }
+
+      const ownConflict = await findAdminShiftConflict(userId, pdate, startHm, endHm);
+      if (ownConflict) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'این بازه با یکی از شیفت‌های خودتان تداخل دارد.',
+          show_alert: true,
+        });
         return;
       }
 
