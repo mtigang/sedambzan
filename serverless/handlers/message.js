@@ -30,7 +30,7 @@ import {
 } from 'lib/keyboards';
 import { validateAndFix, normalizeBody } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits } from 'lib/time';
+import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots } from 'lib/time';
 import { resolveUserId } from 'lib/resolve';
 import {
   ensureChannelsSeeded,
@@ -338,6 +338,7 @@ export default async function (message) {
             content: v.content,
             channelKey: v.channelKey,
             status: 'pending',
+            submittedAt: new Date(),
           })
           .run();
         const recent = await db
@@ -614,19 +615,7 @@ export default async function (message) {
     }
 
     
-    if (owner && text === '➕ اختصاص شیفت') {
-      await api.sendMessage({
-        chat_id: chatId,
-        text: 'نوع شیفت را انتخاب کنید:',
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '📅 شیفت روزانه (این دوره)', callback_data: 'own_shift:daily', style: 'primary' }],
-            [{ text: '♾️ شیفت دائمی', callback_data: 'own_shift:perm', style: 'success' }],
-          ],
-        },
-      });
-      return;
-    }
+    // دکمه اختصاص شیفت از پنل اصلی حذف شد — فقط داخل شیفت‌ها
 
     
     if (owner && text === '📌 تخصیص شیفت روزانه') {
@@ -653,15 +642,65 @@ export default async function (message) {
     }
 
     if (owner && text === '⏰ شیفت‌ها') {
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '⏰ مدیریت شیفت‌ها\nدوره: ۱۵:۰۰ تا ۰۳:۰۰ · حداکثر ۲ شیفت برای هر ادمین',
-        reply_markup: ownerShiftMenuInline(),
-      });
+      try {
+        const now = tehranNow();
+        const pdate = periodDateStr(now);
+        let all = [];
+        try {
+          all = (await db.select().from(shifts).all()) || [];
+        } catch (e) {
+          console.error('shifts all', e);
+        }
+        const today = all.filter(function (s) {
+          return (
+            s.status === 'active' &&
+            (s.shiftDate === pdate ||
+              s.shiftDate === 'perm' ||
+              s.shiftDate === 'permanent' ||
+              s.shiftDate === now.date)
+          );
+        });
+        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۱۵:۰۰–۰۳:۰۰)\n\n';
+        if (!today.length) {
+          t += 'هنوز شیفتی ثبت نشده.\n';
+        } else {
+          for (const s of today) {
+            let name = String(s.adminId);
+            try {
+              name = displayName(await getUser(s.adminId), s.adminId);
+            } catch (_e) {}
+            t +=
+              '• ' +
+              ((DEFAULT_CHANNELS[s.channelKey] && DEFAULT_CHANNELS[s.channelKey].title) ||
+                s.channelKey) +
+              ' | ' +
+              String(s.startHm).slice(0, 5) +
+              '–' +
+              String(s.endHm).slice(0, 5) +
+              ' | ' +
+              name +
+              (s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' (دائم)' : '') +
+              '\n';
+          }
+        }
+        t += '\nاز دکمه‌های زیر شیفت بده (مالک: هر ساعتی، ۲۴ ساعت آینده):';
+        await api.sendMessage({
+          chat_id: chatId,
+          text: t,
+          reply_markup: ownerShiftMenuInline(),
+        });
+      } catch (e) {
+        console.error('owner shifts', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در شیفت‌ها: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: ownerKeyboard(),
+        });
+      }
       return;
     }
 
-    
+
     if (owner && state?.kind === 'own_assign' && text.startsWith('شیفت: ')) {
       const title = text.replace('شیفت: ', '');
       const entry = Object.values(DEFAULT_CHANNELS).find((c) => c.title === title);
@@ -686,7 +725,8 @@ export default async function (message) {
       const mode = state.mode;
       const channelKey = state.channelKey;
       await setState(userId, 'own_assign_slot', { mode, channelKey, adminId });
-      const pdate = periodDateStr(tehranNow());
+      const now = tehranNow();
+      const pdate = periodDateStr(now);
       const dayShifts =
         (await db
           .select()
@@ -696,17 +736,18 @@ export default async function (message) {
       const takenMap = {};
       for (const s of dayShifts) {
         if (s.status !== 'active') continue;
-        if (s.shiftDate === pdate || s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
+        if (s.shiftDate === pdate || s.shiftDate === 'perm' || s.shiftDate === 'permanent' || s.shiftDate === now.date) {
           takenMap[s.startHm] = s.adminId;
         }
       }
+      const ownerSlots = buildOwnerShiftSlots(now);
       await api.sendMessage({
         chat_id: chatId,
         text:
           'ساعت را انتخاب کنید (' +
-          (mode === 'perm' ? 'دائمی' : 'روزانه دوره ' + pdate) +
+          (mode === 'perm' ? 'دائمی — هر ساعت' : 'روزانه — ۲۴ ساعت آینده') +
           '):',
-        reply_markup: shiftSlotsInline(channelKey, takenMap, new Set()),
+        reply_markup: shiftSlotsInline(channelKey, takenMap, new Set(), ownerSlots),
       });
       // reuse shift_pick won't know admin - use special callbacks
       // store and intercept - for simplicity owner uses same shift_pick but we need different insert
