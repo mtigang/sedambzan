@@ -366,6 +366,8 @@ export default async function (message) {
         });
 
         if (msgId != null) {
+          // فقط ادمین‌هایی که همین لحظه شیفت فعال همین کانال را دارند.
+          // Pending در دیتابیس باقی می‌ماند و از طریق Batch برای شیفت بعدی قابل بررسی است.
           await notifyShiftAdmins(
             v.channelKey,
             '📨 #' +
