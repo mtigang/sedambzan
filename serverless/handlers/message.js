@@ -130,6 +130,21 @@ export default async function (message) {
 
     if (text === '/start' || text.startsWith('/start ')) {
       try {
+        await db
+          .update(users)
+          .set({
+            started: 1,
+            username: message.from?.username || null,
+            firstName: message.from?.first_name || null,
+            lastName: message.from?.last_name || null,
+            lastSeen: new Date(),
+          })
+          .where(eq(users.userId, userId))
+          .run();
+      } catch (e) {
+        console.error('mark started', e);
+      }
+      try {
         await clearState(userId);
       } catch (_) {}
       try {
@@ -350,7 +365,6 @@ export default async function (message) {
           reply_markup: backKeyboard(),
         });
 
-        // فقط ادمین‌های شیفت فعال — نه مالک مستقیم
         if (msgId != null) {
           await notifyShiftAdmins(
             v.channelKey,
@@ -359,7 +373,7 @@ export default async function (message) {
               ' | ' +
               (ch.title || v.channelKey) +
               '\nاز: ' +
-              userId +
+              displayName(u, userId) +
               '\n\n' +
               v.content,
             reviewInline(msgId),
@@ -554,7 +568,7 @@ export default async function (message) {
           'شیفت‌های ثبت‌شده امروز:\n' +
           today
             .map((s) => {
-              const who = s.adminId === userId ? 'شما' : String(s.adminId);
+              const who = s.adminId === userId ? 'شما' : displayName(await getUser(s.adminId), s.adminId);
               return '• ' + String(s.startHm).slice(0, 5) + '–' + String(s.endHm).slice(0, 5) + ' ← ' + who;
             })
             .join('\n');
@@ -970,7 +984,7 @@ export default async function (message) {
       await clearState(userId);
       const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
       if (!rows?.length) {
-        await api.sendMessage({ chat_id: chatId, text: 'پیدا نشد', reply_markup: ownerKeyboard() });
+        await api.sendMessage({ chat_id: chatId, text: 'پیدا نشد.', reply_markup: searchKeyboard() });
         return;
       }
       const row = rows[0];
@@ -983,7 +997,7 @@ export default async function (message) {
           photoMsg = await api.sendPhoto({
             chat_id: chatId,
             photo: fileId,
-            caption: 'فرستنده: ' + displayName(uu, row.userId) + ' | ' + row.userId,
+            caption: 'فرستنده: ' + displayName(uu, row.userId),
           });
         }
       } catch (_) {}
@@ -992,14 +1006,21 @@ export default async function (message) {
         chat_id: chatId,
         text:
           (map[row.status] || '') + ' #' + row.id + ' | ' + row.status + ' | ' + row.channelKey +
-          '\nuser: ' + row.userId + (uu ? ' (' + displayName(uu, row.userId) + ')' : '') +
-          (row.reviewedBy ? '\nبررسی‌کننده: ' + row.reviewedBy : '') +
+          '\nکاربر: ' + displayName(uu, row.userId) +
+          (row.reviewedBy ? '\nبررسی‌کننده: ' + displayName(await getUser(row.reviewedBy), row.reviewedBy) : '') +
           (row.rejectReason ? '\nدلیل رد: ' + row.rejectReason : '') +
           '\n🕐 ارسال: ' + formatTsJalali(row.submittedAt) +
           (row.reviewedAt ? '\n🕐 بررسی: ' + formatTsJalali(row.reviewedAt) : '') +
-                    '\n\n' + row.content,
-        reply_markup: row.status === 'pending' ? reviewInline(row.id) : ownerKeyboard(),
+          '\n\n' + row.content,
+        reply_markup: row.status === 'pending' ? reviewInline(row.id) : searchKeyboard(),
       });
+      if (row.status === 'pending') {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '🔍 جستجوی دیگری انجام دهید یا به منوی اصلی برگردید.',
+          reply_markup: searchKeyboard(),
+        });
+      }
       return;
     }
 
@@ -1011,7 +1032,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: 'کاربر پیدا نشد.',
-          reply_markup: ownerKeyboard(),
+          reply_markup: searchKeyboard(),
         });
         return;
       }
@@ -1063,13 +1084,13 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: body,
-          reply_markup: ownerKeyboard(),
+          reply_markup: searchKeyboard(),
         });
       } else {
         await api.sendMessage({
           chat_id: chatId,
           text: 'پیامی ثبت نشده.',
-          reply_markup: ownerKeyboard(),
+          reply_markup: searchKeyboard(),
         });
       }
       return;
