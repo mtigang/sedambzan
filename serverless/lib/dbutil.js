@@ -418,14 +418,34 @@ export async function deliverPendingForAdmin(adminId) {
 export async function pendingForViewer(userId) {
   try {
     const role = await getRole(userId);
-    let keys = [];
-    if (role === 'owner') {
-      keys = Object.keys(DEFAULT_CHANNELS);
-    } else {
-      keys = await adminChannels(userId);
+    if (role === 'owner' || isOwner(userId)) {
+      const all = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
+      return all.sort((a, b) => b.id - a.id);
     }
+    const now = tehranNow();
+    const pdate = periodDateStr(now);
+    const mySh =
+      (await db
+        .select()
+        .from(shifts)
+        .where(and(eq(shifts.adminId, userId), eq(shifts.status, 'active')))
+        .all()) || [];
+    const activeKeys = [
+      ...new Set(
+        mySh
+          .filter((s) => {
+            if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
+              return inRange(now.hm, s.startHm, s.endHm);
+            }
+            if (s.shiftDate !== pdate) return false;
+            return inRange(now.hm, s.startHm, s.endHm);
+          })
+          .map((s) => s.channelKey)
+      ),
+    ];
+    if (!activeKeys.length) return [];
     const all = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
-    return all.filter((m) => keys.includes(m.channelKey)).sort((a, b) => b.id - a.id);
+    return all.filter((m) => activeKeys.includes(m.channelKey)).sort((a, b) => b.id - a.id);
   } catch (e) {
     console.error('pendingForViewer', e);
     return [];
