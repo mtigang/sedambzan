@@ -1,4 +1,4 @@
-/** زمان تهران — دوره شیفت ۱۵:۰۰ تا ۰۳:۰۰ + شمسی */
+/** زمان تهران — دوره شیفت ۱۲:۰۰ تا ۰۳:۰۰ + شمسی */
 
 export function tehranNow() {
   const fmt = new Intl.DateTimeFormat('en-GB', {
@@ -31,55 +31,37 @@ export function minToHm(mins) {
   return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 }
 
-/** ترتیب داخل دوره: ۱۵:۰۰=0 … ۲۳:۰۰=8h, ۰۰:۰۰=9h, ۰۲:۰۰=11h */
+/**
+ * ترتیب داخل دوره کاری ۱۲:۰۰ → ۰۳:۰۰
+ */
 export function periodOrd(hm) {
   let m = hmToMin(hm);
-  if (m < 15 * 60) m += 24 * 60;
+  if (m < 12 * 60) m += 24 * 60;
   return m;
 }
 
+/**
+ * آیا hm داخل [startHm, endHm) روی محور دوره است؟
+ */
 export function inRange(hm, startHm, endHm) {
   const t = periodOrd(hm);
   let s = periodOrd(startHm);
-  let e = periodOrd(endHm === '00:00' && startHm !== '00:00' ? '00:00' : endHm);
-  // end 00:00 after 23 means 24:00 in period ord for 23-00 slot
-  if (endHm === '00:00' && hmToMin(startHm) >= 15 * 60) {
-    e = 24 * 60; // midnight end of 23-00
-  }
-  if (endHm === '00:00' && startHm === '00:00') {
-    s = 24 * 60;
-    e = 25 * 60;
-  }
-  // normal: if end < start in raw minutes overnight within period
-  if (hmToMin(endHm) <= hmToMin(startHm) && hmToMin(startHm) >= 15 * 60) {
-    // e.g. 23-00 already handled
-  }
-  // generic period-aware
-  const t0 = periodOrd(hm);
-  let s0 = periodOrd(startHm);
-  let e0 = periodOrd(endHm);
-  if (e0 <= s0) e0 += 24 * 60;
-  if (t0 < s0) {
-    // maybe t is next calendar morning already in periodOrd
-  }
-  return t0 >= s0 && t0 < e0;
+  let e = periodOrd(endHm);
+  if (e <= s) e += 24 * 60;
+  return t >= s && t < e;
 }
 
 /**
- * تاریخ میلادی شروع دوره فعلی (روز تقویمی که ۱۵:۰۰ آن دوره را شروع می‌کند).
- * ساعت ۰۳:۰۰–۱۴:۵۹ → هنوز دوره «امروز ۱۵:۰۰» انتخاب می‌شود (آینده).
- * ساعت ۱۵–۲۳ و ۰۰–۰۲ → دوره از همان/دیروز.
+ * تاریخ میلادی شروع دوره فعلی (۱۲:۰۰ تا ۰۳:۰۰).
  */
 export function periodDateStr(now = tehranNow()) {
-  if (now.hour >= 3 && now.hour < 15) {
-    // بین ۳ صبح تا ۳ عصر: دوره بعدی از امروز ۱۵:۰۰
+  if (now.hour >= 3 && now.hour < 12) {
     return now.date;
   }
   if (now.hour < 3) {
-    // بعد از نیمه‌شب تا ۳: دوره از دیروز ۱۵:۰۰
     return addDays(now.date, -1);
   }
-  return now.date; // ۱۵–۲۳
+  return now.date;
 }
 
 function addDays(iso, delta) {
@@ -95,15 +77,15 @@ function addDays(iso, delta) {
   );
 }
 
+/** کاربران: ۱۲ ظهر تا ۳ صبح */
 export function isWorkHours(now = tehranNow()) {
-  // کاربران: ۳ عصر تا ۳ صبح
   return inRange(now.hm, '12:00', '03:00');
 }
 
-/** همه اسلات‌های پایه دوره ۱۵→۰۳ */
+/** همه اسلات‌های یک‌ساعته دوره ۱۲→۰۳ */
 export function allPeriodSlots() {
   const base = [];
-  for (let h = 15; h <= 23; h++) {
+  for (let h = 12; h <= 23; h++) {
     const start = String(h).padStart(2, '0') + ':00';
     const end = h === 23 ? '00:00' : String(h + 1).padStart(2, '0') + ':00';
     base.push({ start, end, hourKey: start, label: start + '–' + end });
@@ -116,15 +98,9 @@ export function allPeriodSlots() {
   return base;
 }
 
-/**
- * شیفت‌های قابل انتخاب الان:
- * - گذشته حذف
- * - شیفت جاری: از همین دقیقه تا پایان ساعت
- */
 export function buildAvailableShiftSlots(now = tehranNow()) {
   const base = allPeriodSlots();
-  // خارج از ساعات کاری دوره: همه اسلات‌های کامل دوره بعدی (از ۱۵)
-  if (now.hour >= 3 && now.hour < 15) {
+  if (now.hour >= 3 && now.hour < 12) {
     return base.map((s) => ({ ...s }));
   }
 
@@ -135,7 +111,7 @@ export function buildAvailableShiftSlots(now = tehranNow()) {
     let oEnd = periodOrd(s.end);
     if (oEnd <= oStart) oEnd += 24 * 60;
 
-    if (oEnd <= oNow) continue; // گذشته
+    if (oEnd <= oNow) continue;
 
     if (oStart <= oNow && oNow < oEnd) {
       out.push({
@@ -209,7 +185,6 @@ export function toJalaliDisplay(isoDate, hm) {
   return datePart || timePart || '—';
 }
 
-/** timestamp unix یا Date → شمسی تهران */
 export function formatTsJalali(ts) {
   if (ts == null || ts === '') return '—';
   let ms = NaN;
@@ -225,11 +200,9 @@ export function formatTsJalali(ts) {
     ms = d.getTime();
   }
   if (!Number.isFinite(ms) || ms <= 0) return '—';
-  // ثانیه یونیکس (~1.7e9) را به میلی‌ثانیه تبدیل کن
   if (ms >= 1e9 && ms < 1e12) {
     ms = ms * 1000;
   }
-  // ایران بدون DST: UTC+3:30
   const IRAN_OFFSET = 3.5 * 3600 * 1000;
   const adj = new Date(ms + IRAN_OFFSET);
   const y = adj.getUTCFullYear();
@@ -243,7 +216,6 @@ export function formatTsJalali(ts) {
   return toJalaliDisplay(y + '-' + pad(mo) + '-' + da, pad(hh) + ':' + pad(mi));
 }
 
-/** ۲۴ شیفت یک‌ساعته از همین الان — برای تخصیص مالک (بدون محدودیت دوره) */
 export function buildOwnerShiftSlots(now) {
   if (!now) now = tehranNow();
   const slots = [];
@@ -270,20 +242,17 @@ export function buildOwnerShiftSlots(now) {
 
 export { formatTsJalali as formatTehranJalali };
 
-
 export function toFaDigits(s) {
   return String(s).replace(/[0-9]/g, function (d) {
     return '۰۱۲۳۴۵۶۷۸۹'[Number(d)];
   });
 }
 
-/** چند ساعت تا شروع ساعت کاری ۱۲:۰۰ (اگر الان بسته باشد) */
 export function hoursUntilWorkOpen(now) {
   if (!now) now = tehranNow();
   if (isWorkHours(now)) return 0;
   const nowM = hmToMin(now.hm);
   const openM = 12 * 60;
-  // بسته: ۰۳:۰۰ تا ۱۲:۰۰
   if (nowM >= 3 * 60 && nowM < openM) {
     return Math.max(1, Math.ceil((openM - nowM) / 60));
   }
