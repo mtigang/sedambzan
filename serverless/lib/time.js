@@ -97,7 +97,7 @@ function addDays(iso, delta) {
 
 export function isWorkHours(now = tehranNow()) {
   // کاربران: ۳ عصر تا ۳ صبح
-  return inRange(now.hm, '15:00', '03:00');
+  return inRange(now.hm, '12:00', '03:00');
 }
 
 /** همه اسلات‌های پایه دوره ۱۵→۰۳ */
@@ -277,23 +277,23 @@ export function toFaDigits(s) {
   });
 }
 
-/** چند ساعت تا شروع ساعت کاری ۱۵:۰۰ (اگر الان بسته باشد) */
+/** چند ساعت تا شروع ساعت کاری ۱۲:۰۰ (اگر الان بسته باشد) */
 export function hoursUntilWorkOpen(now) {
   if (!now) now = tehranNow();
   if (isWorkHours(now)) return 0;
   const nowM = hmToMin(now.hm);
-  const openM = 15 * 60;
-  if (nowM < openM) {
+  const openM = 12 * 60;
+  // بسته: ۰۳:۰۰ تا ۱۲:۰۰
+  if (nowM >= 3 * 60 && nowM < openM) {
     return Math.max(1, Math.ceil((openM - nowM) / 60));
   }
-  // بعد از نیمه‌شب تا ۳ صبح داخل بازه است؛ اینجا فقط ۳–۱۵
   return Math.max(1, Math.ceil((openM + 24 * 60 - nowM) / 60));
 }
 
 export function workHoursClosedText() {
   const h = hoursUntilWorkOpen();
   const hFa = toFaDigits(h);
-  const a = toFaDigits('15:00');
+  const a = toFaDigits('12:00');
   const b = toFaDigits('03:00');
   return (
     '⏰ ساعت کاری از ' +
