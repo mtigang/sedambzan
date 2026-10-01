@@ -13,8 +13,14 @@ import {
   settingGet,
   settingSet,
   activeShiftAdmins,
-  deliverPendingForAdmin,
   addChannelAdmin,
+  getRole,
+  decideMessage,
+  checkReviewAccess,
+  createReviewBatch,
+  sendReviewBatch,
+  finishReviewBatchIfComplete,
+  getReviewBatch,
 } from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, periodDateStr, formatTsJalali } from 'lib/time';
@@ -27,6 +33,9 @@ import {
   userOpenInline,
   shiftSlotsInline,
   announceProgressInline,
+  reviewNextInline,
+  reviewDoneInline,
+  reviewTakenInline,
 } from 'lib/keyboards';
 
 async function refreshAllShiftBoards(channelKey, date) {
@@ -71,28 +80,36 @@ async function refreshAllShiftBoards(channelKey, date) {
   }
 }
 
+/** ویرایش پیام بعد از تأیید/رد؛ اگر Batch کامل شد دکمه‌ی بعدی یا «صف تمام شد» */
+async function editReviewResult(cq, text, fin) {
+  let markup = null;
+  if (fin && fin.inBatch && fin.complete) {
+    markup = fin.hasMore ? reviewNextInline(fin.batch.batchNumber) : reviewDoneInline();
+  }
+  try {
+    const p = {
+      chat_id: cq.message.chat.id,
+      message_id: cq.message.message_id,
+      text,
+    };
+    if (markup) p.reply_markup = markup;
+    await api.editMessageText(p);
+  } catch (_) {}
+  if (fin && fin.inBatch && fin.complete && !fin.hasMore) {
+    try {
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '📭 پیام Pending دیگری برای شیفت شما وجود ندارد.',
+      });
+    } catch (_) {}
+  }
+}
+
 export default async function (cq) {
   try {
     const data = cq.data || '';
     const userId = cq.from?.id;
     if (!userId) return;
-
-    // ادمین فقط در شیفت بتواند تأیید/رد کند (مالک همیشه)
-    async function assertCanReview(channelKey) {
-      if (isOwner(userId)) return true;
-      const now = tehranNow();
-      const period = periodDateStr(now);
-      const mySh = (await db.select().from(shifts).where(eq(shifts.adminId, userId)).all()) || [];
-      return mySh.some((s) => {
-        if (s.status !== 'active') return false;
-        if (channelKey && s.channelKey !== channelKey) return false;
-        if (s.shiftDate === 'permanent' || s.shiftDate === 'perm') {
-          return inRange(now.hm, s.startHm, s.endHm);
-        }
-        if (s.shiftDate !== period && s.shiftDate !== now.date) return false;
-        return inRange(now.hm, s.startHm, s.endHm);
-      });
-    }
 
     
     if (data.startsWith('uv:')) {
@@ -119,37 +136,16 @@ export default async function (cq) {
 
     if (data.startsWith('approve:')) {
       const id = Number(data.split(':')[1]);
-      const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
-      const row = rows?.[0];
-      if (!row || row.status !== 'pending') {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'قبلاً بررسی شده',
-          show_alert: true,
-        });
+      // pending بودن + شیفت فعال همان کانال + عضویت در Batch + قفل (idempotent)
+      const dec = await decideMessage(userId, id, 'approve');
+      if (!dec.ok) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: dec.text, show_alert: true });
         return;
       }
-      if (!(await assertCanReview(row.channelKey))) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط در شیفت همین کانال',
-          show_alert: true,
-        });
-        return;
-      }
-      await db
-        .update(messages)
-        .set({ status: 'approved', reviewedBy: userId, reviewedAt: new Date() })
-        .where(eq(messages.id, id))
-        .run();
+      const row = dec.row;
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'تأیید شد' });
-      try {
-        await api.editMessageText({
-          chat_id: cq.message.chat.id,
-          message_id: cq.message.message_id,
-          text: '🟢 تأیید #' + id + ' توسط ' + userId,
-        });
-      } catch (_) {}
+      const fin = await finishReviewBatchIfComplete(userId, id);
+      await editReviewResult(cq, '🟢 تأیید #' + id + ' توسط ' + userId, fin);
 
       let link = null;
       try {
@@ -186,14 +182,15 @@ export default async function (cq) {
 
     if (data.startsWith('reject_menu:')) {
       const id = Number(data.split(':')[1]);
-      const _rmRows = await db.select().from(messages).where(eq(messages.id, id)).all();
-      const _rmRow = _rmRows?.[0];
-      if (!(await assertCanReview(_rmRow?.channelKey))) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط در شیفت همین کانال',
-          show_alert: true,
-        });
+      const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
+      const row = rows?.[0];
+      if (!row || row.status !== 'pending') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'قبلاً بررسی شده', show_alert: true });
+        return;
+      }
+      const acc = await checkReviewAccess(userId, row);
+      if (!acc.ok) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: acc.text, show_alert: true });
         return;
       }
       await api.answerCallbackQuery({ callback_query_id: cq.id });
@@ -210,22 +207,36 @@ export default async function (cq) {
     if (data.startsWith('reject_cancel:')) {
       const id = Number(data.split(':')[1]);
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
+      let showNext = false;
+      let bn = null;
+      try {
+        const b = await getReviewBatch(userId);
+        if (b && b.ids.length && Number(b.ids[b.ids.length - 1]) === id) {
+          showNext = true;
+          bn = b.batchNumber;
+        }
+      } catch (_) {}
       try {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: reviewInline(id),
+          reply_markup: reviewInline(id, showNext, bn),
         });
       } catch (_) {}
       return;
     }
 
-    
     if (data.startsWith('reject_other:')) {
       const id = Number(data.split(':')[1]);
-      const _roRows = await db.select().from(messages).where(eq(messages.id, id)).all();
-      if (!(await assertCanReview(_roRows?.[0]?.channelKey))) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط در شیفت همین کانال', show_alert: true });
+      const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
+      const row = rows?.[0];
+      if (!row || row.status !== 'pending') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'قبلاً بررسی شده', show_alert: true });
+        return;
+      }
+      const acc = await checkReviewAccess(userId, row);
+      if (!acc.ok) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: acc.text, show_alert: true });
         return;
       }
       await api.answerCallbackQuery({ callback_query_id: cq.id });
@@ -236,52 +247,94 @@ export default async function (cq) {
       });
       return;
     }
-if (data.startsWith('reject:')) {
+
+    if (data.startsWith('reject:')) {
       const parts = data.split(':');
       const id = Number(parts[1]);
       const reason = parts.slice(2).join(':') || 'نامناسب';
-      const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
-      const row = rows?.[0];
-      if (!row || row.status !== 'pending') {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'قبلاً بررسی شده',
-          show_alert: true,
-        });
+      const dec = await decideMessage(userId, id, 'reject', reason);
+      if (!dec.ok) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: dec.text, show_alert: true });
         return;
       }
-      if (!(await assertCanReview(row.channelKey))) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط در شیفت همین کانال',
-          show_alert: true,
-        });
-        return;
-      }
-      await db
-        .update(messages)
-        .set({
-          status: 'rejected',
-          rejectReason: reason,
-          reviewedBy: userId,
-          reviewedAt: new Date(),
-        })
-        .where(eq(messages.id, id))
-        .run();
+      const row = dec.row;
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'رد شد' });
-      try {
-        await api.editMessageText({
-          chat_id: cq.message.chat.id,
-          message_id: cq.message.message_id,
-          text: '🔴 رد #' + id + '\nدلیل: ' + reason,
-        });
-      } catch (_) {}
+      const fin = await finishReviewBatchIfComplete(userId, id);
+      await editReviewResult(cq, '🔴 رد #' + id + '\nدلیل: ' + reason, fin);
       try {
         await api.sendMessage({
           chat_id: row.userId,
           text: '🔴 پیام #' + id + ' رد شد.\nدلیل: ' + reason,
         });
       } catch (_) {}
+      return;
+    }
+
+    if (data === 'review_noop') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      return;
+    }
+
+    // دریافت Batch بعدی — همه‌ی شرط‌ها دوباره از DB بررسی می‌شود
+    if (data === 'review_next' || data.startsWith('review_next:')) {
+      const want = data.indexOf(':') >= 0 ? Number(data.split(':')[1]) : null;
+      const role = await getRole(userId);
+      if (role !== 'admin' && !isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+        return;
+      }
+      if (want != null) {
+        const cur = await getReviewBatch(userId);
+        if (cur && Number(cur.batchNumber) !== want) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'این دکمه قدیمی است. دوباره «📥 پیام‌های در انتظار» را بزنید.',
+            show_alert: true,
+          });
+          return;
+        }
+      }
+      const res = await createReviewBatch(userId);
+      if (res.status === 'no_shift') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '❌ شیفت شما تمام شده است.', show_alert: true });
+        return;
+      }
+      if (res.status === 'busy') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳ در حال پردازش…', show_alert: true });
+        return;
+      }
+      if (res.status === 'incomplete') {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'اول هر ۱۰ پیام فعلی را بررسی کنید.',
+          show_alert: true,
+        });
+        return;
+      }
+      if (res.status === 'empty') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پیامی نمانده' });
+        try {
+          await api.editMessageReplyMarkup({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            reply_markup: reviewDoneInline(),
+          });
+        } catch (_) {}
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '📭 پیام Pending دیگری برای شیفت شما وجود ندارد.',
+        });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'Batch جدید' });
+      try {
+        await api.editMessageReplyMarkup({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          reply_markup: reviewTakenInline(),
+        });
+      } catch (_) {}
+      await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: false });
       return;
     }
 
@@ -938,17 +991,6 @@ if (data === 'ann_cancel') {
         console.error('refresh', e);
       }
       try {
-        const n = await deliverPendingForAdmin(userId);
-        if (n > 0) {
-          await api.sendMessage({
-            chat_id: userId,
-            text: '📥 ' + n + ' پیام در انتظار برای شیفت شما ارسال شد.',
-          });
-        }
-      } catch (e) {
-        console.error('deliver after shift_pick', e);
-      }
-      try {
         // also edit THIS message keyboard immediately
         const dayShifts =
           (await db
@@ -978,17 +1020,6 @@ if (data === 'ann_cancel') {
       } catch (e) {
         console.error('edit self board', e);
       }
-      try {
-        const n = await deliverPendingForAdmin(userId);
-        if (n > 0) {
-          await api.sendMessage({
-            chat_id: userId,
-            text: '📥 ' + n + ' پیام صف ارسال شد.',
-          });
-        }
-      } catch (e) {
-        console.error('deliver', e);
-      }
       await api.sendMessage({
         chat_id: userId,
         text:
@@ -1000,7 +1031,7 @@ if (data === 'ann_cancel') {
           endHm +
           ' ثبت شد (دوره ' +
           pdate +
-          ').',
+          ').\n\nبرای دریافت پیام‌ها «📥 پیام‌های در انتظار» را بزنید.',
       });
       return;
     }
