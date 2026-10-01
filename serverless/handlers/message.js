@@ -566,14 +566,26 @@ export default async function (message) {
         date +
         '\n۱۲:۰۰ تا ۰۳:۰۰\n🟢 خالی · 🔴 پر/شما\n\n';
       if (today.length) {
-        head +=
-          'شیفت‌های ثبت‌شده امروز:\n' +
-          today
-            .map((s) => {
-              const who = s.adminId === userId ? 'شما' : displayName(await getUser(s.adminId), s.adminId);
-              return '• ' + String(s.startHm).slice(0, 5) + '–' + String(s.endHm).slice(0, 5) + ' ← ' + who;
-            })
-            .join('\n');
+        const shiftLines = [];
+        for (const s of today) {
+          let who = 'شما';
+          if (s.adminId !== userId) {
+            try {
+              who = displayName(await getUser(s.adminId), s.adminId);
+            } catch (_e) {
+              who = String(s.adminId);
+            }
+          }
+          shiftLines.push(
+            '• ' +
+              String(s.startHm).slice(0, 5) +
+              '–' +
+              String(s.endHm).slice(0, 5) +
+              ' ← ' +
+              who
+          );
+        }
+        head += 'شیفت‌های ثبت‌شده امروز:\n' + shiftLines.join('\n');
       } else {
         head += 'هنوز شیفتی ثبت نشده.';
       }
