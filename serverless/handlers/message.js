@@ -26,10 +26,11 @@ import {
   shiftSlotsInline,
   adminListInline,
   announceTargetInline,
+  ownerShiftMenuInline,
 } from 'lib/keyboards';
 import { validateAndFix, normalizeBody } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay } from 'lib/time';
+import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits } from 'lib/time';
 import { resolveUserId } from 'lib/resolve';
 import {
   ensureChannelsSeeded,
@@ -177,7 +178,7 @@ export default async function (message) {
       if (!owner && !isWorkHours()) {
         await api.sendMessage({
           chat_id: chatId,
-          text: '⏰ ساعت کاری از ۱۵:۰۰ تا ۰۳:۰۰ (به وقت تهران) است.\nالان خارج از ساعت کاری هستید.',
+          text: workHoursClosedText(),
           reply_markup: await roleKb(userId),
         });
         return;
@@ -278,7 +279,7 @@ export default async function (message) {
         if (!owner && !isWorkHours()) {
           await api.sendMessage({
             chat_id: chatId,
-            text: '⏰ خارج از ساعت کاری (۱۵:۰۰ تا ۰۳:۰۰ تهران).',
+            text: workHoursClosedText(),
             reply_markup: backKeyboard(),
           });
           return;
@@ -578,16 +579,16 @@ export default async function (message) {
       let head =
         '⏰ شیفت‌های «' +
         entry.title +
-        '»\n📅 ' +
+        '»\n📅 دوره ' +
         date +
-        '\n۱۰ صبح تا ۲ بامداد · حداکثر ۲ شیفت\n🟢 خالی · 🔴 پر\n\n';
+        '\n۱۵:۰۰ تا ۰۳:۰۰ · حداکثر ۲ شیفت\n🟢 خالی · 🔴 پر/شما\n\n';
       if (today.length) {
         head +=
           'شیفت‌های ثبت‌شده امروز:\n' +
           today
             .map((s) => {
               const who = s.adminId === userId ? 'شما' : String(s.adminId);
-              return '• ' + s.startHm + '–' + s.endHm + ' ← ' + who;
+              return '• ' + String(s.startHm).slice(0, 5) + '–' + String(s.endHm).slice(0, 5) + ' ← ' + who;
             })
             .join('\n');
       } else {
@@ -652,29 +653,11 @@ export default async function (message) {
     }
 
     if (owner && text === '⏰ شیفت‌ها') {
-      // also show assign options at end
-
-      try {
-        const { date } = tehranNow();
-        let all = [];
-        try { all = (await db.select().from(shifts).all()) || []; } catch (e) { console.error('shifts all', e); }
-        const today = all.filter((s) => s.shiftDate === date && s.status === 'active');
-        let t = '⏰ شیفت‌های امروز (' + date + ')\n\n';
-        if (!today.length) t += 'خالی';
-        for (const s of today) {
-          let name = String(s.adminId);
-          try { name = displayName(await getUser(s.adminId), s.adminId); } catch (_) {}
-          t += '• ' + (DEFAULT_CHANNELS[s.channelKey]?.title || s.channelKey) + ' | ' + s.startHm + '–' + s.endHm + ' | ' + name + '\n';
-        }
-        await api.sendMessage({ chat_id: chatId, text: t, reply_markup: ownerKeyboard() });
-      } catch (e) {
-        console.error('owner shifts', e);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'خطا در شیفت‌ها: ' + (e && e.message ? e.message : String(e)),
-          reply_markup: ownerKeyboard(),
-        });
-      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '⏰ مدیریت شیفت‌ها\nدوره: ۱۵:۰۰ تا ۰۳:۰۰ · حداکثر ۲ شیفت برای هر ادمین',
+        reply_markup: ownerShiftMenuInline(),
+      });
       return;
     }
 
@@ -905,12 +888,18 @@ export default async function (message) {
           return;
         }
         for (const row of list.slice(0, 20)) {
+          let fname = String(row.userId);
+          try {
+            const uu = await getUser(row.userId);
+            fname = displayName(uu, row.userId);
+          } catch (_e) {}
           await api.sendMessage({
             chat_id: chatId,
-            text: 'فیدبک #' + row.id + '\nاز: ' + row.userId + '\n\n' + row.content,
+            text: 'فیدبک #' + row.id + '\nاز: ' + fname + ' (' + row.userId + ')\n\n' + row.content,
             reply_markup: feedbackInline(row.id, row.userId),
           });
         }
+
       } catch (e) {
         console.error('feedback panel', e);
         await api.sendMessage({
@@ -999,12 +988,11 @@ export default async function (message) {
           '\nuser: ' + row.userId + (uu ? ' (' + displayName(uu, row.userId) + ')' : '') +
           (row.reviewedBy ? '\nبررسی‌کننده: ' + row.reviewedBy : '') +
           (row.rejectReason ? '\nدلیل رد: ' + row.rejectReason : '') +
-          '\n\n' + row.content,
+          '\n🕐 ارسال: ' + formatTsJalali(row.submittedAt) +
+          (row.reviewedAt ? '\n🕐 بررسی: ' + formatTsJalali(row.reviewedAt) : '') +
+                    '\n\n' + row.content,
         reply_markup: row.status === 'pending' ? reviewInline(row.id) : ownerKeyboard(),
       });
-      if (photoMsg?.message_id) {
-        try { await api.deleteMessage({ chat_id: chatId, message_id: photoMsg.message_id }); } catch (_) {}
-      }
       return;
     }
 
@@ -1076,11 +1064,6 @@ export default async function (message) {
           text: 'پیامی ثبت نشده.',
           reply_markup: ownerKeyboard(),
         });
-      }
-      if (photoMsg?.message_id) {
-        try {
-          await api.deleteMessage({ chat_id: chatId, message_id: photoMsg.message_id });
-        } catch (_) {}
       }
       return;
     }
