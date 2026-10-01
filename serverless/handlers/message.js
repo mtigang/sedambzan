@@ -1,5 +1,5 @@
 import { api, db } from 'sdk';
-import { eq, desc } from 'sdk/db';
+import { eq, desc, and } from 'sdk/db';
 import { messages, feedback, shifts, users } from 'schema';
 import {
   WELCOME_TEXT,
@@ -29,7 +29,7 @@ import {
 } from 'lib/keyboards';
 import { validateAndFix, normalizeBody } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow, inRange, hmToMin } from 'lib/time';
+import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay } from 'lib/time';
 import { resolveUserId } from 'lib/resolve';
 import {
   ensureChannelsSeeded,
@@ -189,39 +189,42 @@ export default async function (message) {
           .select()
           .from(messages)
           .where(eq(messages.userId, userId))
-          .orderBy(desc(messages.id))
           .all()) || [];
-      const list = rows.slice(0, 15);
+      const list = rows.sort((a, b) => (b.id || 0) - (a.id || 0)).slice(0, 15);
       if (!list.length) {
         await api.sendMessage({
           chat_id: chatId,
-          text: 'هنوز پیامی ندارید.',
+          text: 'پیامی ثبت نکرده‌اید.',
           reply_markup: await roleKb(userId),
         });
         return;
       }
       const map = { pending: '🟡 در انتظار', approved: '🟢 تأیید', rejected: '🔴 رد' };
-      const body = list
-        .map(
-          (m) =>
-            '#' +
-            m.id +
-            ' | ' +
-            (map[m.status] || m.status) +
-            ' | ' +
-            m.channelKey +
-            '\n' +
-            (m.content || '').slice(0, 80)
-        )
-        .join('\n────────────\n');
+      let body = '📊 پیام‌های شما (' + list.length + ' مورد اخیر)\n\n';
+      for (const row of list) {
+        const short = (row.content || '').replace(/\n/g, ' ').slice(0, 70);
+        const when = formatTsJalali(row.submittedAt);
+        body +=
+          '#' +
+          row.id +
+          ' | ' +
+          (map[row.status] || row.status) +
+          '\n' +
+          short +
+          (short.length >= 70 ? '…' : '') +
+          '\n🕐 ' +
+          when +
+          '\n────────────\n';
+      }
       await api.sendMessage({
         chat_id: chatId,
-        text: '📊 پیام‌های شما\n\n' + body,
+        text: body,
         reply_markup: await roleKb(userId),
       });
       return;
     }
 
+    
     if (text === '💬 انتقادات، پیشنهادات، گزارش مشکل') {
       await setState(userId, 'feedback');
       await api.sendMessage({
@@ -403,28 +406,41 @@ export default async function (message) {
     }
 
     if ((role === 'admin' || owner) && text === '📥 پیام‌های در انتظار') {
-      if (role === 'admin' && !owner) {
-        const { date, hm } = tehranNow();
+      if (!owner) {
+        const now = tehranNow();
+        const pdate = periodDateStr(now);
         const mySh =
           (await db
             .select()
             .from(shifts)
-            .where(eq(shifts.adminId, userId))
+            .where(and(eq(shifts.adminId, userId), eq(shifts.status, 'active')))
             .all()) || [];
-        const activeNow = mySh.filter(
-          (s) => s.shiftDate === date && s.status === 'active' && inRange(hm, s.startHm, s.endHm)
-        );
+        const activeNow = mySh.filter((s) => {
+          if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
+            return inRange(now.hm, s.startHm, s.endHm);
+          }
+          if (s.shiftDate !== pdate) return false;
+          return inRange(now.hm, s.startHm, s.endHm);
+        });
         if (!activeNow.length) {
           const upcoming = mySh
-            .filter((s) => s.shiftDate === date && s.status === 'active')
-            .map((s) => (DEFAULT_CHANNELS[s.channelKey]?.title || s.channelKey) + ' ' + s.startHm + '–' + s.endHm)
+            .filter((s) => s.shiftDate === pdate || s.shiftDate === 'perm' || s.shiftDate === 'permanent')
+            .map(
+              (s) =>
+                (DEFAULT_CHANNELS[s.channelKey]?.title || s.channelKey) +
+                ' ' +
+                s.startHm +
+                '–' +
+                s.endHm +
+                (s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' (دائم)' : '')
+            )
             .join('\n');
           await api.sendMessage({
             chat_id: chatId,
             text:
               '⏰ الان داخل بازه شیفت فعال نیستید.\n' +
-              (upcoming ? ('شیفت‌های امروز شما:\n' + upcoming) : 'شیفتی برای امروز ثبت نشده.') +
-              '\n\nوقتی ساعت شیفت برسد، پیام‌های صف خودکار می‌آید.',
+              (upcoming ? 'شیفت‌های دوره شما:\n' + upcoming : 'شیفتی برای این دوره ثبت نشده.') +
+              '\n\nدوره: ۳ عصر تا ۳ صبح\nوقتی ساعت شیفت برسد صف خودکار می‌آید.',
             reply_markup: await roleKb(userId),
           });
           return;
@@ -459,6 +475,7 @@ export default async function (message) {
       return;
     }
 
+    
     // ========== ADMIN: performance ==========
     if ((role === 'admin' || owner) && text === '📊 عملکرد من') {
       const all =
@@ -522,7 +539,8 @@ export default async function (message) {
         });
         return;
       }
-      const { date } = tehranNow();
+      const now = tehranNow();
+      const date = periodDateStr(now);
       const dayShifts =
         (await db
           .select()
@@ -530,7 +548,9 @@ export default async function (message) {
           .where(eq(shifts.channelKey, entry.key))
           .all()) || [];
       const today = dayShifts.filter(
-        (s) => s.shiftDate === date && s.status === 'active'
+        (s) =>
+          (s.shiftDate === date || s.shiftDate === 'permanent' || s.shiftDate === now.date) &&
+          s.status === 'active'
       );
       const takenMap = {};
       const myStarts = new Set();
@@ -576,7 +596,48 @@ export default async function (message) {
       return;
     }
 
+    
+    if (owner && text === '➕ اختصاص شیفت') {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'نوع شیفت را انتخاب کنید:',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📅 شیفت روزانه (این دوره)', callback_data: 'own_shift:daily', style: 'primary' }],
+            [{ text: '♾️ شیفت دائمی', callback_data: 'own_shift:perm', style: 'success' }],
+          ],
+        },
+      });
+      return;
+    }
+
+    
+    if (owner && text === '📌 تخصیص شیفت روزانه') {
+      await setState(userId, 'own_assign', { mode: 'daily' });
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'کانال را انتخاب کنید:',
+        reply_markup: shiftChannelPickKeyboard(
+          Object.values(DEFAULT_CHANNELS).map((c) => ({ key: c.key, title: c.title }))
+        ),
+      });
+      return;
+    }
+    if (owner && text === '📌 تخصیص شیفت دائمی') {
+      await setState(userId, 'own_assign', { mode: 'perm' });
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'کانال را انتخاب کنید:',
+        reply_markup: shiftChannelPickKeyboard(
+          Object.values(DEFAULT_CHANNELS).map((c) => ({ key: c.key, title: c.title }))
+        ),
+      });
+      return;
+    }
+
     if (owner && text === '⏰ شیفت‌ها') {
+      // also show assign options at end
+
       try {
         const { date } = tehranNow();
         let all = [];
@@ -598,6 +659,58 @@ export default async function (message) {
           reply_markup: ownerKeyboard(),
         });
       }
+      return;
+    }
+
+    
+    if (owner && state?.kind === 'own_assign' && text.startsWith('شیفت: ')) {
+      const title = text.replace('شیفت: ', '');
+      const entry = Object.values(DEFAULT_CHANNELS).find((c) => c.title === title);
+      if (!entry) {
+        await api.sendMessage({ chat_id: chatId, text: 'کانال نامعتبر', reply_markup: ownerKeyboard() });
+        return;
+      }
+      await setState(userId, 'own_assign_admin', { mode: state.mode, channelKey: entry.key });
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'آیدی عددی ادمین را بفرستید:',
+        reply_markup: backKeyboard(),
+      });
+      return;
+    }
+    if (owner && state?.kind === 'own_assign_admin' && text) {
+      const adminId = Number(String(text).replace(/\D/g, ''));
+      if (!adminId) {
+        await api.sendMessage({ chat_id: chatId, text: 'آیدی نامعتبر', reply_markup: backKeyboard() });
+        return;
+      }
+      const mode = state.mode;
+      const channelKey = state.channelKey;
+      await setState(userId, 'own_assign_slot', { mode, channelKey, adminId });
+      const pdate = periodDateStr(tehranNow());
+      const dayShifts =
+        (await db
+          .select()
+          .from(shifts)
+          .where(eq(shifts.channelKey, channelKey))
+          .all()) || [];
+      const takenMap = {};
+      for (const s of dayShifts) {
+        if (s.status !== 'active') continue;
+        if (s.shiftDate === pdate || s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
+          takenMap[s.startHm] = s.adminId;
+        }
+      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          'ساعت را انتخاب کنید (' +
+          (mode === 'perm' ? 'دائمی' : 'روزانه دوره ' + pdate) +
+          '):',
+        reply_markup: shiftSlotsInline(channelKey, takenMap, new Set()),
+      });
+      // reuse shift_pick won't know admin - use special callbacks
+      // store and intercept - for simplicity owner uses same shift_pick but we need different insert
       return;
     }
 
