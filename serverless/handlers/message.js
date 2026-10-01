@@ -896,7 +896,13 @@ export default async function (message) {
             '👮 ادمین‌ها (یکتا): ' + adminIds.size + '\n' +
             '⏰ شیفت فعال امروز: ' + shToday + '\n\n' +
             '📺 تفکیک کانال:\n' + by,
-          reply_markup: ownerKeyboard(),
+          reply_markup: {
+          inline_keyboard: [
+            [{ text: '👮 آمار ادمین‌ها (امروز)', callback_data: 'admin_stats:0', style: 'primary' }],
+            [{ text: '📅 دیروز', callback_data: 'admin_stats:1', style: 'primary' }],
+            [{ text: '📅 ۲ روز پیش', callback_data: 'admin_stats:2', style: 'primary' }],
+          ],
+        },
         });
       } catch (e) {
         console.error('stats', e);
@@ -994,59 +1000,94 @@ export default async function (message) {
     }
 
     if (owner && state?.kind === 'search_msg' && text) {
-      const id = Number(String(text).replace(/\D/g, ''));
-      await clearState(userId);
+      let id = null;
+      let linkHint = '';
+      const linkMatch = String(text).match(/t\.me\/([A-Za-z0-9_]+)\/(\d+)/i);
+      if (linkMatch) {
+        const uname = linkMatch[1];
+        const mid = Number(linkMatch[2]);
+        const nameMap = { callmearail: 'sadambazan', inkarbariral: 'inkarbar' };
+        const key = nameMap[String(uname).toLowerCase()] || null;
+        if (key && mid) {
+          try {
+            const mapped = await settingGet('chmsg:' + key + ':' + mid, '');
+            if (mapped) id = Number(mapped);
+          } catch (_e) {}
+          if (!id) {
+            linkHint =
+              'لینک کانال شناسایی شد (' +
+              uname +
+              '/' +
+              mid +
+              ') ولی در دیتابیس map نشده. آیدی داخلی را بفرستید یا بعد از انتشارهای جدید امتحان کنید.';
+          }
+        }
+      }
+      if (id == null) {
+        const onlyNum = String(text).replace(/\D/g, '');
+        if (onlyNum) id = Number(onlyNum);
+      }
+      if (!id) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            (linkHint ? linkHint + '\n\n' : '') +
+            'آیدی یا لینک معتبر بفرستید.\nمثال: 123 یا https://t.me/callMeAraIl/108010',
+          reply_markup: backKeyboard(),
+        });
+        return;
+      }
       const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
-      if (!rows?.length) {
-        await api.sendMessage({ chat_id: chatId, text: 'پیدا نشد.', reply_markup: searchKeyboard() });
+      if (!rows || !rows.length) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            (linkHint ? linkHint + '\n\n' : '') +
+            'پیام #' +
+            id +
+            ' پیدا نشد.\nآیدی یا لینک بعدی را بفرستید:',
+          reply_markup: backKeyboard(),
+        });
         return;
       }
       const row = rows[0];
       const uu = await getUser(row.userId);
-      let photoMsg = null;
-      try {
-        const photos = await api.getUserProfilePhotos({ user_id: row.userId, limit: 1 });
-        const fileId = photos?.photos?.[0]?.[0]?.file_id;
-        if (fileId) {
-          photoMsg = await api.sendPhoto({
-            chat_id: chatId,
-            photo: fileId,
-            caption: 'فرستنده: ' + displayName(uu, row.userId),
-          });
-        }
-      } catch (_) {}
       const map = { pending: '🟡', approved: '🟢', rejected: '🔴' };
       await api.sendMessage({
         chat_id: chatId,
         text:
-          (map[row.status] || '') + ' #' + row.id + ' | ' + row.status + ' | ' + row.channelKey +
-          '\nکاربر: ' + displayName(uu, row.userId) +
-          (row.reviewedBy ? '\nبررسی‌کننده: ' + displayName(await getUser(row.reviewedBy), row.reviewedBy) : '') +
+          (map[row.status] || '') +
+          ' #' +
+          row.id +
+          ' | ' +
+          row.status +
+          ' | ' +
+          row.channelKey +
+          '\nuser: ' +
+          row.userId +
+          (uu ? ' (' + displayName(uu, row.userId) + ')' : '') +
+          (row.reviewedBy ? '\nبررسی‌کننده: ' + row.reviewedBy : '') +
           (row.rejectReason ? '\nدلیل رد: ' + row.rejectReason : '') +
-          '\n🕐 ارسال: ' + formatTsJalali(row.submittedAt) +
+          '\n🕐 ارسال: ' +
+          formatTsJalali(row.submittedAt) +
           (row.reviewedAt ? '\n🕐 بررسی: ' + formatTsJalali(row.reviewedAt) : '') +
-          '\n\n' + row.content,
-        reply_markup: row.status === 'pending' ? reviewInline(row.id) : searchKeyboard(),
+          '\n\n' +
+          row.content +
+          '\n\n🔎 آیدی یا لینک بعدی را بفرستید (یا ◀️ بازگشت):',
+        reply_markup: row.status === 'pending' ? reviewInline(row.id) : backKeyboard(),
       });
-      if (row.status === 'pending') {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: '🔍 جستجوی دیگری انجام دهید یا به منوی اصلی برگردید.',
-          reply_markup: searchKeyboard(),
-        });
-      }
       return;
     }
 
-    
+
     if (owner && state?.kind === 'search_user' && text) {
       const id = await resolveUserId(text);
-      await clearState(userId);
+      // clearState نزین — جستجوی بعدی
       if (!id) {
         await api.sendMessage({
           chat_id: chatId,
-          text: 'کاربر پیدا نشد.',
-          reply_markup: searchKeyboard(),
+          text: 'کاربر پیدا نشد.\nآیدی بعدی را بفرستید یا ◀️ بازگشت',
+          reply_markup: backKeyboard(),
         });
         return;
       }
