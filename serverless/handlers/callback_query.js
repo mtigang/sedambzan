@@ -54,7 +54,10 @@ async function refreshAllShiftBoards(channelKey, date) {
       )
       .all()) || [];
   const takenMap = {};
-  for (const s of dayShifts) takenMap[s.startHm] = s.adminId;
+  for (const s of dayShifts) {
+          if (String(s.startHm) === String(s.endHm)) continue;
+          takenMap[s.startHm] = s.adminId;
+        }
 
   // همه boardهای ذخیره‌شده برای این کانال/روز
   try {
@@ -558,7 +561,125 @@ export default async function (cq) {
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'برای لغو روی «لغو» بزنید' });
       return;
     }
-    if (data.startsWith('shift_cancel:')) {
+    
+    if (data.startsWith('shift_ocancel:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const parts = data.split(':');
+      const channelKey = parts[1];
+      const hourKey = parts[2];
+      const now = tehranNow();
+      const pdate = periodDateStr(now);
+      const all =
+        (await db
+          .select()
+          .from(shifts)
+          .where(and(eq(shifts.channelKey, channelKey), eq(shifts.status, 'active')))
+          .all()) || [];
+      let cancelled = 0;
+      for (const s of all) {
+        const sameDate =
+          s.shiftDate === pdate ||
+          s.shiftDate === 'perm' ||
+          s.shiftDate === 'permanent' ||
+          s.shiftDate === now.date;
+        if (!sameDate) continue;
+        const sh = String(s.startHm || '');
+        const bucket =
+          String(Number(String(sh).split(':')[0]) || 0).padStart(2, '0') + ':00';
+        if (bucket !== hourKey && sh !== hourKey) continue;
+        await db
+          .update(shifts)
+          .set({ status: 'cancelled' })
+          .where(and(eq(shifts.id, s.id)))
+          .run();
+        cancelled++;
+        try {
+          await api.sendMessage({
+            chat_id: s.adminId,
+            text:
+              '⚠️ شیفت شما در «' +
+              ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
+              '» ' +
+              sh +
+              ' توسط مالک لغو شد.',
+          });
+        } catch (_e) {}
+      }
+      await api.answerCallbackQuery({
+        callback_query_id: cq.id,
+        text: cancelled ? 'لغو شد (' + cancelled + ')' : 'پیدا نشد',
+        show_alert: true,
+      });
+      try {
+        await refreshAllShiftBoards(channelKey, pdate);
+      } catch (_e) {}
+      return;
+    }
+
+    if (data.startsWith('shift_oclear:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const channelKey = data.split(':')[1];
+      const now = tehranNow();
+      const pdate = periodDateStr(now);
+      const all =
+        (await db
+          .select()
+          .from(shifts)
+          .where(and(eq(shifts.channelKey, channelKey), eq(shifts.status, 'active')))
+          .all()) || [];
+      let cancelled = 0;
+      const notified = {};
+      for (const s of all) {
+        const sameDate =
+          s.shiftDate === pdate ||
+          s.shiftDate === 'perm' ||
+          s.shiftDate === 'permanent' ||
+          s.shiftDate === now.date;
+        if (!sameDate) continue;
+        await db
+          .update(shifts)
+          .set({ status: 'cancelled' })
+          .where(and(eq(shifts.id, s.id)))
+          .run();
+        cancelled++;
+        if (!notified[s.adminId]) {
+          notified[s.adminId] = true;
+          try {
+            await api.sendMessage({
+              chat_id: s.adminId,
+              text:
+                '⚠️ تمام شیفت‌های امروز شما در «' +
+                ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
+                '» توسط مالک لغو شد.',
+            });
+          } catch (_e) {}
+        }
+      }
+      await api.answerCallbackQuery({
+        callback_query_id: cq.id,
+        text: 'لغو همه: ' + cancelled,
+        show_alert: true,
+      });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: '🗑 همه شیفت‌های امروز «' + channelKey + '» لغو شد (' + cancelled + ').',
+        });
+      } catch (_e) {}
+      try {
+        await refreshAllShiftBoards(channelKey, pdate);
+      } catch (_e) {}
+      return;
+    }
+
+if (data.startsWith('shift_cancel:')) {
       const parts = data.split(':');
       const channelKey = parts[1];
       const hourKey = parts[2];
@@ -618,7 +739,10 @@ export default async function (cq) {
             )
             .all()) || [];
         const takenMap = {};
-        for (const s of dayShifts) takenMap[s.startHm] = s.adminId;
+        for (const s of dayShifts) {
+          if (String(s.startHm) === String(s.endHm)) continue;
+          takenMap[s.startHm] = s.adminId;
+        }
         const myStarts = new Set(
           dayShifts.filter(function (s) { return s.adminId === userId; }).map(function (s) { return s.startHm; })
         );
@@ -1241,7 +1365,10 @@ if (data.startsWith('own_shift:')) {
             )
             .all()) || [];
         const takenMap = {};
-        for (const s of dayShifts) takenMap[s.startHm] = s.adminId;
+        for (const s of dayShifts) {
+          if (String(s.startHm) === String(s.endHm)) continue;
+          takenMap[s.startHm] = s.adminId;
+        }
         const myStarts = new Set(
           dayShifts.filter((s) => s.adminId === userId).map((s) => s.startHm)
         );
