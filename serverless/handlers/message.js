@@ -58,7 +58,7 @@ async function checkRateLimit(uid) {
   const key = 'rate:' + uid;
   const raw = await settingGet(key, '[]');
   let arr = [];
-  try { arr = JSON.parse(raw) || []; } catch { arr = []; }
+  try { arr = JSON.parse(raw) || []; } catch (_e) { arr = []; }
   const now = Date.now();
   arr = arr.filter((t) => now - t < 10 * 60 * 1000);
   if (arr.length >= 6) return { ok: false, left: arr.length };
