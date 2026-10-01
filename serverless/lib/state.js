@@ -30,7 +30,7 @@ export async function getState(userId) {
     if (!rows || !rows[0] || !rows[0].value) return null;
     try {
       return JSON.parse(rows[0].value);
-    } catch {
+    } catch (_e) {
       return null;
     }
   } catch (e) {
