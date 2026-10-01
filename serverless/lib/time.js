@@ -241,3 +241,39 @@ export function formatTsJalali(ts) {
 }
 
 export { formatTsJalali as formatTehranJalali };
+
+
+export function toFaDigits(s) {
+  return String(s).replace(/[0-9]/g, function (d) {
+    return '۰۱۲۳۴۵۶۷۸۹'[Number(d)];
+  });
+}
+
+/** چند ساعت تا شروع ساعت کاری ۱۵:۰۰ (اگر الان بسته باشد) */
+export function hoursUntilWorkOpen(now) {
+  if (!now) now = tehranNow();
+  if (isWorkHours(now)) return 0;
+  const nowM = hmToMin(now.hm);
+  const openM = 15 * 60;
+  if (nowM < openM) {
+    return Math.max(1, Math.ceil((openM - nowM) / 60));
+  }
+  // بعد از نیمه‌شب تا ۳ صبح داخل بازه است؛ اینجا فقط ۳–۱۵
+  return Math.max(1, Math.ceil((openM + 24 * 60 - nowM) / 60));
+}
+
+export function workHoursClosedText() {
+  const h = hoursUntilWorkOpen();
+  const hFa = toFaDigits(h);
+  const a = toFaDigits('15:00');
+  const b = toFaDigits('03:00');
+  return (
+    '⏰ ساعت کاری از ' +
+    a +
+    ' تا ' +
+    b +
+    ' است.\nالان خارج از ساعت کاری هستید.\nحدود ' +
+    hFa +
+    ' ساعت تا شروع کار مانده.'
+  );
+}
