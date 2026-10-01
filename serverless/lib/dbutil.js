@@ -7,7 +7,7 @@ import {
   CHANNEL_IDS,
   ADMIN_GROUP_IDS,
 } from 'lib/config';
-import { tehranNow, inRange } from 'lib/time';
+import { tehranNow, inRange, periodDateStr } from 'lib/time';
 
 export async function ensureChannelsSeeded() {
   try {
@@ -314,20 +314,21 @@ export async function syncAllAdminGroups(force = false) {
 
 export async function activeShiftAdmins(channelKey) {
   try {
-    const { date, hm } = tehranNow();
+    const now = tehranNow();
+    const pdate = periodDateStr(now);
     const rows =
       (await db
         .select()
         .from(shifts)
-        .where(
-          and(
-            eq(shifts.channelKey, channelKey),
-            eq(shifts.shiftDate, date),
-            eq(shifts.status, 'active')
-          )
-        )
+        .where(and(eq(shifts.channelKey, channelKey), eq(shifts.status, 'active')))
         .all()) || [];
-    return rows.filter((s) => inRange(hm, s.startHm, s.endHm)).map((s) => s.adminId);
+    return rows
+      .filter((s) => {
+        if (s.shiftDate === 'perm') return inRange(now.hm, s.startHm, s.endHm);
+        if (s.shiftDate !== pdate) return false;
+        return inRange(now.hm, s.startHm, s.endHm);
+      })
+      .map((s) => s.adminId);
   } catch (e) {
     console.error('activeShiftAdmins', e);
     return [];
@@ -361,16 +362,18 @@ export async function notifyShiftAdmins(channelKey, text, replyMarkup, msgId) {
 export async function deliverPendingForAdmin(adminId) {
   const keys = await adminChannels(adminId);
   if (!keys.length) return 0;
-  const { date, hm } = tehranNow();
-  // آیا الان شیفت فعال دارد؟
-  const allShifts =
-    (await db
-      .select()
-      .from(shifts)
-      .where(and(eq(shifts.adminId, adminId), eq(shifts.shiftDate, date), eq(shifts.status, 'active')))
-      .all()) || [];
+  const now = tehranNow();
+  const period = periodDateStr(now);
+  const allShifts = (await db.select().from(shifts).where(eq(shifts.adminId, adminId)).all()) || [];
   const activeKeys = allShifts
-    .filter((s) => inRange(hm, s.startHm, s.endHm))
+    .filter((s) => {
+      if (s.status !== 'active') return false;
+      if (s.shiftDate === 'permanent' || s.shiftDate === 'perm') {
+        return inRange(now.hm, s.startHm, s.endHm);
+      }
+      if (s.shiftDate !== period && s.shiftDate !== now.date) return false;
+      return inRange(now.hm, s.startHm, s.endHm);
+    })
     .map((s) => s.channelKey);
   if (!activeKeys.length) return 0;
 
@@ -397,8 +400,8 @@ export async function deliverPendingForAdmin(adminId) {
         reply_markup: {
           inline_keyboard: [
             [
-              { text: '🟢 تأیید', callback_data: 'approve:' + row.id },
-              { text: '🔴 رد', callback_data: 'reject_menu:' + row.id },
+              { text: '🟢 تأیید', callback_data: 'approve:' + row.id, style: 'success' },
+              { text: '🔴 رد', callback_data: 'reject_menu:' + row.id, style: 'danger' },
             ],
           ],
         },
