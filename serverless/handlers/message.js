@@ -575,15 +575,9 @@ export default async function (message) {
       let head =
         '⏰ شیفت‌های «' +
         entry.title +
-        '»
-📅 دوره ' +
+        '»\n📅 دوره ' +
         date +
-        '
-ساعت کاری: ۱۲:۰۰ تا ۰۳:۰۰
-حداکثر ۳ شیفت یک‌ساعته
-🟢 خالی  ·  🔴 پر
-
-';
+        '\nساعت کاری: ۱۲:۰۰ تا ۰۳:۰۰\nحداکثر ۳ شیفت یک‌ساعته\n🟢 خالی  ·  🔴 پر\n\n';
       if (today.length) {
         const shiftLines = [];
         for (const s of today) {
@@ -594,19 +588,13 @@ export default async function (message) {
             } catch (_e) {}
           }
           shiftLines.push(
-            '────────────
-🕐 ' + normHm(s.startHm) + ' تا ' + normHm(s.endHm) + '
-👤 ' + who
+            '────────────\n🕐 ' + normHm(s.startHm) + ' تا ' + normHm(s.endHm) + '\n👤 ' + who
           );
         }
-        head += 'شیفت‌های معتبر امروز:
-' + shiftLines.join('
-');
+        head += 'شیفت‌های معتبر امروز:\n' + shiftLines.join('\n');
         const invalid = todayRaw.length - today.length;
         if (invalid > 0) {
-          head += '
-
-⚠️ ' + invalid + ' شیفت نامعتبر (مثل ۰۰–۰۰) مخفی شد.';
+          head += '\n\n⚠️ ' + invalid + ' شیفت نامعتبر (مثل ۰۰–۰۰) مخفی شد.';
         }
       } else {
         head += 'هنوز شیفت معتبری ثبت نشده.';
@@ -615,7 +603,6 @@ export default async function (message) {
         chat_id: chatId,
         text: head,
         reply_markup: shiftSlotsInline(entry.key, takenMap, myStarts, null, !!owner),
-      });
       });
       try {
         const mid = board && board.message_id;
