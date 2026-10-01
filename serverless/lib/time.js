@@ -210,7 +210,7 @@ export function toJalaliDisplay(isoDate, hm) {
 }
 
 /** timestamp unix یا Date → شمسی تهران */
-export function formatTehranJalali(ts) {
+export function formatTsJalali(ts) {
   if (!ts) {
     const n = tehranNow();
     return toJalaliDisplay(n.date, n.hm);
@@ -239,3 +239,5 @@ export function formatTehranJalali(ts) {
   const hm = parts.hour + ':' + parts.minute;
   return toJalaliDisplay(date, hm);
 }
+
+export { formatTsJalali as formatTehranJalali };
