@@ -549,7 +549,7 @@ export default async function (cq) {
       return;
     }
 
-    if (data.startsWith('shift_full:')) {
+    if (data.startsWith('shift_full|') || data.startsWith('shift_full:')) {
       await api.answerCallbackQuery({
         callback_query_id: cq.id,
         text: 'این شیفت پر است',
@@ -562,14 +562,23 @@ export default async function (cq) {
       return;
     }
     
-    if (data.startsWith('shift_ocancel:')) {
+    if (data.startsWith('shift_ocancel|') || data.startsWith('shift_ocancel:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
-      const parts = data.split(':');
-      const channelKey = parts[1];
-      const hourKey = parts[2];
+      let channelKey, hourKey;
+      if (data.indexOf('|') >= 0) {
+        const parts = data.split('|');
+        channelKey = parts[1];
+        hourKey = parts[2];
+      } else {
+        const parts = data.split(':');
+        channelKey = parts[1];
+        hourKey = parts.length >= 4
+          ? String(parts[2]).padStart(2, '0') + ':' + String(parts[3] || '00').padStart(2, '0')
+          : parts[2];
+      }
       const now = tehranNow();
       const pdate = periodDateStr(now);
       const all =
@@ -619,12 +628,12 @@ export default async function (cq) {
       return;
     }
 
-    if (data.startsWith('shift_oclear:')) {
+    if (data.startsWith('shift_oclear|') || data.startsWith('shift_oclear:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
-      const channelKey = data.split(':')[1];
+      const channelKey = data.indexOf('|') >= 0 ? data.split('|')[1] : data.split(':')[1];
       const now = tehranNow();
       const pdate = periodDateStr(now);
       const all =
@@ -679,10 +688,18 @@ export default async function (cq) {
       return;
     }
 
-if (data.startsWith('shift_cancel:')) {
-      const parts = data.split(':');
-      const channelKey = parts[1];
-      const hourKey = parts[2];
+if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
+                  let channelKey, hourKey;
+            if (data.indexOf('|') >= 0) {
+                    const parts = data.split('|');
+              channelKey = parts[1];
+              hourKey = parts[2];
+            } else {
+                    const parts = data.split(':');
+              channelKey = parts[1];
+              hourKey = parts.length > 3 ? parts[2] + ':00' : parts[2];
+              if (parts.length >= 4) hourKey = String(parts[2]).padStart(2, '0') + ':' + String(parts[3] || '00').padStart(2, '0');
+            }
       const now = tehranNow();
       const pdate = periodDateStr(now);
       const mySh =
@@ -1151,7 +1168,96 @@ if (data.startsWith('own_shift:')) {
     }
 
 
-    if (data === 'ann_continue') {
+    
+    if (data.startsWith('ann_target:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      const target = data.split(':')[1];
+      const st = await getState(userId);
+      const annText = st && st.annText;
+      await clearState(userId);
+      if (!annText) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'متن اطلاعیه پیدا نشد. دوباره از «📣 اطلاعیه» شروع کنید.',
+        });
+        return;
+      }
+      let ids = [];
+      const seen = {};
+      try {
+        if (target === 'admins') {
+          const ads = (await db.select().from(channelAdmins).all()) || [];
+          for (const a of ads) {
+            const id = Number(a.userId || a.user_id);
+            if (id && !seen[id]) {
+              seen[id] = true;
+              ids.push(id);
+            }
+          }
+        } else {
+          const all = (await db.select().from(users).all()) || [];
+          for (const u of all) {
+            const id = Number(u.userId || u.user_id);
+            if (id && !seen[id]) {
+              seen[id] = true;
+              ids.push(id);
+            }
+          }
+        }
+      } catch (e) {
+        console.error('ann collect', e);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'خطا در جمع‌آوری مخاطبین: ' + (e && e.message ? e.message : e),
+        });
+        return;
+      }
+      if (!ids.length) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'هیچ مخاطبی پیدا نشد.',
+        });
+        return;
+      }
+      const job = {
+        status: 'running',
+        text: annText,
+        ids: ids,
+        cursor: 0,
+        ok: 0,
+        fail: 0,
+        target: target,
+        ownerId: userId,
+      };
+      await saveAnnounceJob(job);
+      const progress = await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '📣 صف آماده شد: ' + ids.length + ' نفر\nاولین دسته در حال ارسال...',
+        reply_markup: announceProgressInline(false),
+      });
+      const mid = progress && progress.message_id;
+      await runAnnounceBatch(cq.message.chat.id, mid);
+      return;
+    }
+
+    if (data === 'ann_cancel') {
+      await clearState(userId);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: 'اطلاعیه لغو شد.',
+        });
+      } catch (_e) {}
+      return;
+    }
+
+if (data === 'ann_continue') {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
@@ -1194,11 +1300,47 @@ if (data.startsWith('own_shift:')) {
     }
 
 
-    if (data.startsWith('shift_pick:')) {
-      const parts = data.split(':');
-      const channelKey = parts[1];
-      const startHm = parts[2];
-      const endHm = parts[3];
+    if (data.startsWith('shift_pick|') || data.startsWith('shift_pick:')) {
+      // فرمت درست: shift_pick|channel|HH:MM|HH:MM  (نه split روی :)
+      let channelKey, startHm, endHm;
+      if (data.indexOf('|') >= 0) {
+        const parts = data.split('|');
+        channelKey = parts[1];
+        startHm = parts[2];
+        endHm = parts[3];
+      } else {
+        // سازگاری قدیمی — ممکن است خراب باشد
+        const rest = data.slice('shift_pick:'.length);
+        const firstColon = rest.indexOf(':');
+        channelKey = rest.slice(0, firstColon);
+        const times = rest.slice(firstColon + 1);
+        const m = times.match(/^(\d{1,2}:\d{2}):(\d{1,2}:\d{2})$/);
+        if (m) {
+          startHm = m[1];
+          endHm = m[2];
+        } else {
+          const p = times.split(':');
+          startHm = (p[0] || '0').padStart(2, '0') + ':00';
+          endHm = (p[1] || '0').padStart(2, '0') + ':00';
+        }
+      }
+      if (!channelKey || !startHm || !endHm) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'داده نامعتبر', show_alert: true });
+        return;
+      }
+      // نرمال HH:MM
+      function padHm(x) {
+        const p = String(x).split(':');
+        const h = String(Number(p[0]) || 0).padStart(2, '0');
+        const m = String(Number(p[1]) || 0).padStart(2, '0');
+        return h + ':' + m;
+      }
+      startHm = padHm(startHm);
+      endHm = padHm(endHm);
+      if (startHm === endHm) {
+        const h = (Number(startHm.split(':')[0]) + 1) % 24;
+        endHm = String(h).padStart(2, '0') + ':00';
+      }
       const now = tehranNow();
       const pdate = periodDateStr(now);
       const stAssign = await getState(userId);
