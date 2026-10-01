@@ -729,20 +729,22 @@ export async function decideMessage(adminId, id, decision, reason) {
  */
 export async function notifyShiftAdmins(channelKey, text, replyMarkup, msgId) {
   try {
-    const admins = await listAdminsByChannel(channelKey);
+    const admins = [...new Set((await activeShiftAdmins(channelKey)).map(Number))];
     const sent = [];
-    for (const admin of admins) {
+
+    for (const adminId of admins) {
       try {
         await api.sendMessage({
-          chat_id: admin.userId,
+          chat_id: adminId,
           text,
           reply_markup: replyMarkup,
         });
-        sent.push(Number(admin.userId));
+        sent.push(adminId);
       } catch (e) {
-        console.error('notifyChannelAdmin', admin.userId, channelKey, e);
+        console.error('notifyActiveShiftAdmin', adminId, channelKey, msgId, e);
       }
     }
+
     return sent;
   } catch (e) {
     console.error('notifyShiftAdmins', channelKey, msgId, e);
