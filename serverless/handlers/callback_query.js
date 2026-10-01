@@ -155,6 +155,9 @@ export default async function (cq) {
           const sent = await api.sendMessage({ chat_id: conf.chatId, text: toBoldHtml(row.content), parse_mode: 'HTML' });
           const mid = sent && sent.message_id;
           link = channelMessageLink(conf.chatId, mid, row.channelKey);
+          try {
+            if (mid) await settingSet('chmsg:' + row.channelKey + ':' + mid, String(id));
+          } catch (_e) {}
         }
       } catch (e) {
         console.error('publish', e);
@@ -787,6 +790,104 @@ export default async function (cq) {
       }
     }
 
+
+
+    if (data.startsWith('admin_stats:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      const daysAgo = Number(data.split(':')[1]) || 0;
+      const now = tehranNow();
+      // تاریخ هدف: daysAgo روز قبل (میلادی ساده)
+      const parts = now.date.split('-').map(Number);
+      const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+      dt.setUTCDate(dt.getUTCDate() - daysAgo);
+      const y = dt.getUTCFullYear();
+      const mo = String(dt.getUTCMonth() + 1).padStart(2, '0');
+      const da = String(dt.getUTCDate()).padStart(2, '0');
+      const day = y + '-' + mo + '-' + da;
+      const allMsg = (await db.select().from(messages).all()) || [];
+      const allSh = (await db.select().from(shifts).all()) || [];
+      let body = '👮 آمار ادمین‌ها\\n📅 ' + day + (daysAgo ? ' (' + daysAgo + ' روز پیش)' : ' (امروز)') + '\\n\\n';
+      for (const conf of Object.values(DEFAULT_CHANNELS)) {
+        body += '—— «' + conf.title + '» ——\\n';
+        const dayShifts = allSh.filter(function (s) {
+          return (
+            s.channelKey === conf.key &&
+            s.status === 'active' &&
+            (s.shiftDate === day || s.shiftDate === 'perm' || s.shiftDate === 'permanent')
+          );
+        });
+        const adminIds = [];
+        const seenA = {};
+        for (const s of dayShifts) {
+          const aid = Number(s.adminId);
+          if (aid && !seenA[aid]) {
+            seenA[aid] = true;
+            adminIds.push(aid);
+          }
+        }
+        // همچنین ادمین‌هایی که همان روز review کرده‌اند
+        for (const msg of allMsg) {
+          if (msg.channelKey !== conf.key || !msg.reviewedBy) continue;
+          // تاریخ review تقریبی از reviewedAt
+          let okDay = false;
+          const aid = Number(msg.reviewedBy);
+          if (aid && !seenA[aid]) {
+            seenA[aid] = true;
+            adminIds.push(aid);
+          }
+        }
+        if (!adminIds.length) {
+          body += 'بدون فعالیت\\n\\n';
+          continue;
+        }
+        for (const aid of adminIds) {
+          let name = String(aid);
+          try {
+            name = displayName(await getUser(aid), aid);
+          } catch (_e) {}
+          const reviewed = allMsg.filter(function (msg) {
+            return msg.channelKey === conf.key && Number(msg.reviewedBy) === aid;
+          });
+          const ap = reviewed.filter(function (x) { return x.status === 'approved'; }).length;
+          const rj = reviewed.filter(function (x) { return x.status === 'rejected'; }).length;
+          const shList = dayShifts
+            .filter(function (s) { return Number(s.adminId) === aid; })
+            .map(function (s) {
+              return String(s.startHm).slice(0, 5) + '–' + String(s.endHm).slice(0, 5);
+            })
+            .join(', ');
+          body +=
+            '• ' +
+            name +
+            '\\n  شیفت: ' +
+            (shList || '—') +
+            '\\n  🟢' +
+            ap +
+            ' 🔴' +
+            rj +
+            ' (کل بررسی: ' +
+            reviewed.length +
+            ')\\n';
+        }
+        body += '\\n';
+      }
+      // split if long
+      const chunks = [];
+      let cur = body;
+      while (cur.length > 3500) {
+        chunks.push(cur.slice(0, 3500));
+        cur = cur.slice(3500);
+      }
+      chunks.push(cur);
+      for (const c of chunks) {
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: c });
+      }
+      return;
+    }
 
 if (data === 'ann_cancel') {
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
