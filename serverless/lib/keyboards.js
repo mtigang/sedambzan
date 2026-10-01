@@ -201,7 +201,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
         rows.push([
           {
             text: s.label + ' (پر — لغو مالک)',
-            callback_data: 'shift_ocancel:' + channelKey + ':' + key,
+            callback_data: 'shift_ocancel|' + channelKey + '|' + key,
             style: 'danger',
           },
         ]);
@@ -209,7 +209,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
         rows.push([
           {
             text: s.label + ' (پر)',
-            callback_data: 'shift_full:' + channelKey + ':' + key,
+            callback_data: 'shift_full|' + channelKey + '|' + key,
             style: 'danger',
           },
         ]);
@@ -218,7 +218,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
       rows.push([
         {
           text: s.label + ' (شما — لغو)',
-          callback_data: 'shift_cancel:' + channelKey + ':' + key,
+          callback_data: 'shift_cancel|' + channelKey + '|' + key,
           style: 'danger',
         },
       ]);
@@ -226,7 +226,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
       rows.push([
         {
           text: s.label,
-          callback_data: 'shift_pick:' + channelKey + ':' + s.start + ':' + s.end,
+          callback_data: 'shift_pick|' + channelKey + '|' + s.start + '|' + s.end,
           style: 'success',
         },
       ]);
@@ -236,7 +236,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
     rows.push([
       {
         text: '🗑 لغو همه شیفت‌های این کانال (امروز)',
-        callback_data: 'shift_oclear:' + channelKey,
+        callback_data: 'shift_oclear|' + channelKey,
         style: 'danger',
       },
     ]);
