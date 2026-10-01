@@ -25,7 +25,6 @@ export function ownerKeyboard() {
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌ها' }],
       [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
-      [{ text: '➕ اختصاص شیفت' }],
       [{ text: '📬 پیام کاربران' }, { text: '🔍 جستجو' }],
       [{ text: '⚙️ تنظیمات' }],
     ],
@@ -142,8 +141,8 @@ export function userOpenInline(userId) {
 }
 
 /** takenMap: startHm -> adminId ; myStarts: Set */
-export function shiftSlotsInline(channelKey, takenMap, myStarts) {
-  const slots = buildShiftSlots();
+export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride) {
+  const slots = slotsOverride && slotsOverride.length ? slotsOverride : buildShiftSlots();
   const rows = [];
   for (const s of slots) {
     const key = s.hourKey || s.start;
@@ -233,10 +232,8 @@ export function announceTargetInline() {
 export function ownerShiftMenuInline() {
   return {
     inline_keyboard: [
-      [{ text: '📋 مشاهده شیفت‌های دوره', callback_data: 'own_shift_list', style: 'primary' }],
       [{ text: '📅 تخصیص شیفت روزانه', callback_data: 'own_shift:daily', style: 'success' }],
       [{ text: '♾️ تخصیص شیفت دائمی', callback_data: 'own_shift:perm', style: 'primary' }],
-      [{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }],
     ],
   };
 }
