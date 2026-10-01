@@ -34,6 +34,7 @@ import {
   userOpenInline,
   shiftSlotsInline,
   announceProgressInline,
+  ownerCancelShiftsInline,
   reviewNextInline,
   reviewDoneInline,
   reviewTakenInline,
@@ -653,34 +654,167 @@ export default async function (cq) {
       const pdate = periodDateStr(now);
       const all = (await db.select().from(shifts).all()) || [];
       const today = all.filter(function (s) {
-        return s.status === 'active' && (s.shiftDate === pdate || s.shiftDate === 'perm' || s.shiftDate === 'permanent');
+        return (
+          s.status === 'active' &&
+          (s.shiftDate === pdate ||
+            s.shiftDate === 'perm' ||
+            s.shiftDate === 'permanent' ||
+            s.shiftDate === now.date)
+        );
       });
-      let t = '⏰ شیفت‌های دوره ' + pdate + '\n(دائمی هم نمایش داده می‌شود)\n\n';
-      if (!today.length) t += 'خالی';
+      const rows = [];
+      let t =
+        '⏰ شیفت‌های دوره ' +
+        pdate +
+        '\nروی هر دکمه بزنید تا همان شیفت لغو شود.\n\n';
+      if (!today.length) {
+        t += 'خالی — شیفتی برای لغو نیست.';
+      }
       for (const s of today) {
         let name = String(s.adminId);
         try {
           name = displayName(await getUser(s.adminId), s.adminId);
         } catch (_e) {}
-        t +=
-          '• ' +
-          (DEFAULT_CHANNELS[s.channelKey] && DEFAULT_CHANNELS[s.channelKey].title
+        const title =
+          DEFAULT_CHANNELS[s.channelKey] && DEFAULT_CHANNELS[s.channelKey].title
             ? DEFAULT_CHANNELS[s.channelKey].title
-            : s.channelKey) +
+            : s.channelKey;
+        t +=
+          '• #' +
+          s.id +
           ' | ' +
-          s.startHm +
+          title +
+          ' | ' +
+          String(s.startHm).slice(0, 5) +
           '–' +
-          s.endHm +
+          String(s.endHm).slice(0, 5) +
           ' | ' +
           name +
           (s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' (دائم)' : '') +
           '\n';
+        rows.push({
+          id: s.id,
+          channelKey: s.channelKey,
+          channelTitle: title,
+          startHm: s.startHm,
+          endHm: s.endHm,
+          adminId: s.adminId,
+          name: name,
+        });
       }
-      await api.sendMessage({ chat_id: cq.message.chat.id, text: t });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: t,
+        reply_markup: today.length ? ownerCancelShiftsInline(rows) : undefined,
+      });
       return;
     }
 
-    if (data.startsWith('own_shift:')) {
+
+    if (data.startsWith('own_sc:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const sid = Number(data.split(':')[1]);
+      if (!sid) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
+        return;
+      }
+      const rows = (await db.select().from(shifts).where(eq(shifts.id, sid)).all()) || [];
+      const row = rows[0];
+      if (!row || row.status !== 'active') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پیدا نشد / قبلاً لغو', show_alert: true });
+        return;
+      }
+      await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, sid)).run();
+      let name = String(row.adminId);
+      try {
+        name = displayName(await getUser(row.adminId), row.adminId);
+      } catch (_e) {}
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو شد' });
+      try {
+        await api.sendMessage({
+          chat_id: row.adminId,
+          text:
+            '⚠️ شیفت شما توسط مالک لغو شد:\n' +
+            ((DEFAULT_CHANNELS[row.channelKey] && DEFAULT_CHANNELS[row.channelKey].title) ||
+              row.channelKey) +
+            ' ' +
+            String(row.startHm).slice(0, 5) +
+            '–' +
+            String(row.endHm).slice(0, 5),
+        });
+      } catch (_e) {}
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text:
+            (cq.message.text || '') +
+            '\n\n❌ لغو شد: #' +
+            sid +
+            ' | ' +
+            name +
+            ' | ' +
+            String(row.startHm).slice(0, 5),
+        });
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '❌ شیفت #' + sid + ' لغو شد (' + name + ').',
+        });
+      }
+      return;
+    }
+
+    if (data === 'own_cancel_all') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const now = tehranNow();
+      const pdate = periodDateStr(now);
+      const all = (await db.select().from(shifts).all()) || [];
+      const today = all.filter(function (s) {
+        return (
+          s.status === 'active' &&
+          (s.shiftDate === pdate ||
+            s.shiftDate === 'perm' ||
+            s.shiftDate === 'permanent' ||
+            s.shiftDate === now.date)
+        );
+      });
+      let n = 0;
+      const notified = {};
+      for (const s of today) {
+        try {
+          await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, s.id)).run();
+          n++;
+          if (!notified[s.adminId]) {
+            notified[s.adminId] = true;
+            try {
+              await api.sendMessage({
+                chat_id: s.adminId,
+                text: '⚠️ مالک همه شیفت‌های دوره فعلی را لغو کرد.',
+              });
+            } catch (_e) {}
+          }
+        } catch (_e) {}
+      }
+      await api.answerCallbackQuery({
+        callback_query_id: cq.id,
+        text: n ? 'لغو شد: ' + n : 'چیزی نبود',
+        show_alert: true,
+      });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '🗑 تعداد ' + n + ' شیفت دوره «' + pdate + '» (و دائم‌های نمایش‌داده‌شده) لغو شد.',
+      });
+      return;
+    }
+
+if (data.startsWith('own_shift:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
