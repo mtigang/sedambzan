@@ -26,6 +26,7 @@ import {
   adminListInline,
   userOpenInline,
   shiftSlotsInline,
+  announceProgressInline,
 } from 'lib/keyboards';
 
 async function refreshAllShiftBoards(channelKey, date) {
@@ -639,6 +640,96 @@ if (data.startsWith('reject:')) {
       return;
     }
 
+
+    async function loadAnnounceJob() {
+      const raw = await settingGet('announce_job', '');
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    async function saveAnnounceJob(job) {
+      await settingSet('announce_job', JSON.stringify(job));
+    }
+
+    async function runAnnounceBatch(chatId, progressMessageId) {
+      const BATCH = 80;
+      const job = await loadAnnounceJob();
+      if (!job || job.status !== 'running') {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: job && job.status === 'done' ? '✅ اطلاعیه قبلاً تمام شده.' : 'هیچ ارسال فعالی نیست.',
+        });
+        return;
+      }
+      const ids = job.ids || [];
+      const text = job.text || '';
+      let cursor = Number(job.cursor) || 0;
+      let ok = Number(job.ok) || 0;
+      let fail = Number(job.fail) || 0;
+      const total = ids.length;
+      const end = Math.min(cursor + BATCH, total);
+
+      for (let i = cursor; i < end; i++) {
+        try {
+          await api.sendMessage({ chat_id: ids[i], text: text });
+          ok++;
+        } catch (_e) {
+          fail++;
+        }
+      }
+      cursor = end;
+      job.cursor = cursor;
+      job.ok = ok;
+      job.fail = fail;
+      const finished = cursor >= total;
+      if (finished) job.status = 'done';
+      await saveAnnounceJob(job);
+
+      const pct = total ? Math.floor((cursor / total) * 10) : 10;
+      let bar = '';
+      for (let i = 0; i < 10; i++) bar += i < pct ? '█' : '░';
+      const body =
+        (finished ? '✅ اطلاعیه تمام شد\n' : '📣 در حال ارسال (تکه‌تکه)\n') +
+        bar +
+        ' ' +
+        cursor +
+        '/' +
+        total +
+        '\n✅ ' +
+        ok +
+        '  ❌ ' +
+        fail +
+        (finished ? '' : '\n\nبرای دسته بعدی «ادامه ارسال» را بزن.');
+
+      try {
+        if (progressMessageId) {
+          await api.editMessageText({
+            chat_id: chatId,
+            message_id: progressMessageId,
+            text: body,
+            reply_markup: announceProgressInline(finished),
+          });
+        } else {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: body,
+            reply_markup: announceProgressInline(finished),
+          });
+        }
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: body,
+          reply_markup: announceProgressInline(finished),
+        });
+      }
+    }
+
+
 if (data === 'ann_cancel') {
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
       await clearState(userId);
@@ -659,103 +750,89 @@ if (data === 'ann_cancel') {
         return;
       }
       let ids = [];
+      const seen = {};
       if (target === 'admins') {
         const ads = (await db.select().from(channelAdmins).all()) || [];
-        ids = [];
-        const seen = {};
         for (const a of ads) {
           const id = a.userId || a.user_id;
-          if (id && !seen[id]) {
+          if (id && !seen[id] && id !== userId) {
             seen[id] = true;
             ids.push(id);
           }
         }
       } else {
         const all = (await db.select().from(users).all()) || [];
-        ids = [];
-        const seen = {};
         for (const u of all) {
           const id = u.userId || u.user_id;
-          if (id && !seen[id]) {
+          if (id && !seen[id] && id !== userId) {
             seen[id] = true;
             ids.push(id);
           }
         }
       }
-      ids = ids.filter(function (id) { return id && id !== userId; });
-      const total = ids.length;
-      let ok = 0;
-      let fail = 0;
-      const failed = [];
+      const job = {
+        status: 'running',
+        text: annText,
+        ids: ids,
+        cursor: 0,
+        ok: 0,
+        fail: 0,
+        target: target,
+        ownerId: userId,
+      };
+      await saveAnnounceJob(job);
       const progress = await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: '📣 شروع ارسال به ' + total + ' نفر...',
+        text: '📣 صف ارسال آماده شد: ' + ids.length + ' نفر\nاولین دسته در حال ارسال...',
+        reply_markup: announceProgressInline(false),
       });
-      function bar(done, tot) {
-        const n = tot ? Math.floor((done / tot) * 10) : 0;
-        let s = '';
-        for (let i = 0; i < 10; i++) s += i < n ? '█' : '░';
-        return s;
-      }
-      async function updateProg(i) {
-        try {
-          await api.editMessageText({
-            chat_id: cq.message.chat.id,
-            message_id: progress.message_id,
-            text:
-              '📣 در حال ارسال\n' +
-              bar(i, total) +
-              ' ' +
-              i +
-              '/' +
-              total +
-              '\n✅ ' +
-              ok +
-              '  ❌ ' +
-              fail,
-          });
-        } catch (_e) {}
-      }
-      const BATCH = 25;
-      for (let i = 0; i < ids.length; i++) {
-        try {
-          await api.sendMessage({ chat_id: ids[i], text: annText });
-          ok++;
-        } catch (_e) {
-          fail++;
-          failed.push(ids[i]);
-        }
-        if ((i + 1) % BATCH === 0 || i === ids.length - 1) {
-          await updateProg(i + 1);
-        }
-      }
-      // یک‌بار تلاش مجدد برای ناموفق‌ها
-      if (failed.length) {
-        const retry = failed.slice();
-        failed.length = 0;
-        for (let j = 0; j < retry.length; j++) {
-          try {
-            await api.sendMessage({ chat_id: retry[j], text: annText });
-            ok++;
-            fail--;
-          } catch (_e) {
-            failed.push(retry[j]);
-          }
-        }
-        await updateProg(total);
-      }
-      await api.sendMessage({
-        chat_id: cq.message.chat.id,
-        text:
-          '✅ اطلاعیه تمام شد.\nموفق: ' +
-          ok +
-          '\nناموفق: ' +
-          fail +
-          '\nکل: ' +
-          total,
-      });
+      const mid = progress && progress.message_id;
+      await runAnnounceBatch(cq.message.chat.id, mid);
       return;
     }
+
+    if (data === 'ann_continue') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ادامه...' });
+      await runAnnounceBatch(cq.message.chat.id, cq.message.message_id);
+      return;
+    }
+
+    if (data === 'ann_stop') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const job = await loadAnnounceJob();
+      if (job && job.status === 'running') {
+        job.status = 'stopped';
+        await saveAnnounceJob(job);
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'متوقف شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text:
+            '⏹ ارسال متوقف شد.\n' +
+            (job
+              ? 'پیشرفت: ' + (job.cursor || 0) + '/' + ((job.ids && job.ids.length) || 0) +
+                '\n✅ ' + (job.ok || 0) + '  ❌ ' + (job.fail || 0)
+              : ''),
+          reply_markup: announceProgressInline(true),
+        });
+      } catch (_e) {}
+      return;
+    }
+
+    if (data === 'ann_noop') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      return;
+    }
+
 
     if (data.startsWith('shift_pick:')) {
       const parts = data.split(':');
