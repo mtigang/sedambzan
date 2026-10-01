@@ -41,9 +41,8 @@ export function settingsKeyboard(botOn) {
     keyboard: [
       [{ text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
       [{ text: '📣 ارسال به کانال' }, { text: '📣 اطلاعیه' }],
-      [{ text: '🧪 تست کانال‌ها' }, { text: '🔄 همگام‌سازی ادمین‌ها' }],
+      [{ text: '🧪 تست کانال‌ها' }],
       [{ text: '🧹 پاک‌سازی صف' }],
-      [{ text: '📦 بازیابی بکاپ' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
@@ -96,48 +95,15 @@ export function confirmPostInline() {
   };
 }
 
-export function reviewInline(id, showNextButton = false, batchNumber = null) {
-  const rows = [
-    [
-      { text: 'تأیید', callback_data: 'approve:' + id, style: 'success' },
-      { text: 'رد', callback_data: 'reject_menu:' + id, style: 'danger' },
-    ],
-  ];
-  if (showNextButton) {
-    rows.push([
-      {
-        text: '▶️ دریافت ۱۰ پیام بعدی',
-        callback_data: batchNumber != null ? 'review_next:' + batchNumber : 'review_next',
-        style: 'primary',
-      },
-    ]);
-  }
-  return { inline_keyboard: rows };
-}
-
-/** فقط دکمه‌ی «Batch بعدی» (بعد از کامل شدن Batch) */
-export function reviewNextInline(batchNumber) {
+export function reviewInline(id) {
   return {
     inline_keyboard: [
       [
-        {
-          text: '▶️ دریافت ۱۰ پیام بعدی',
-          callback_data: batchNumber != null ? 'review_next:' + batchNumber : 'review_next',
-          style: 'primary',
-        },
+        { text: 'تأیید', callback_data: 'approve:' + id, style: 'success' },
+        { text: 'رد', callback_data: 'reject_menu:' + id, style: 'danger' },
       ],
     ],
   };
-}
-
-/** وقتی صف تمام شده */
-export function reviewDoneInline() {
-  return { inline_keyboard: [[{ text: '✅ صف تمام شد', callback_data: 'review_noop', style: 'success' }]] };
-}
-
-/** بعد از گرفتن Batch جدید، دکمه‌ی قبلی بی‌اثر می‌شود */
-export function reviewTakenInline() {
-  return { inline_keyboard: [[{ text: '✅ Batch بعدی دریافت شد', callback_data: 'review_noop', style: 'success' }]] };
 }
 
 export function rejectReasonsInline(id) {
@@ -177,24 +143,24 @@ export function userOpenInline(userId) {
 export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride) {
   const slots = slotsOverride && slotsOverride.length ? slotsOverride : buildShiftSlots();
   const rows = [];
+  function bucket(hm) {
+    const parts = String(hm || '0').split(':');
+    const h = Number(parts[0]) || 0;
+    return String(h).padStart(2, '0') + ':00';
+  }
+  // normalize takenMap to hour buckets
+  const takenNorm = {};
+  for (const [k, v] of Object.entries(takenMap || {})) {
+    takenNorm[bucket(k)] = v;
+  }
+  const myNorm = new Set();
+  if (myStarts) {
+    for (const x of myStarts) myNorm.add(bucket(x));
+  }
   for (const s of slots) {
-    const key = s.hourKey || s.start;
-    // takenMap may use hourKey or startHm
-    let takenBy = takenMap[key] || takenMap[s.start];
-    if (!takenBy) {
-      // match any taken start in same hour bucket
-      for (const [k, v] of Object.entries(takenMap || {})) {
-        if (String(k).slice(0, 2) === String(key).slice(0, 2)) {
-          takenBy = v;
-          break;
-        }
-      }
-    }
-    const isMine =
-      myStarts &&
-      (myStarts.has(s.start) ||
-        myStarts.has(key) ||
-        [...myStarts].some((x) => String(x).slice(0, 2) === String(key).slice(0, 2)));
+    const key = bucket(s.hourKey || s.start);
+    const takenBy = takenNorm[key];
+    const isMine = myNorm.has(key);
     if (takenBy && !isMine) {
       rows.push([
         {
