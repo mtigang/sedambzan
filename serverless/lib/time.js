@@ -31,18 +31,13 @@ export function minToHm(mins) {
   return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 }
 
-/**
- * ترتیب داخل دوره کاری ۱۲:۰۰ → ۰۳:۰۰
- */
+/** محور دوره ۱۲:۰۰ → ۰۳:۰۰ */
 export function periodOrd(hm) {
   let m = hmToMin(hm);
   if (m < 12 * 60) m += 24 * 60;
   return m;
 }
 
-/**
- * آیا hm داخل [startHm, endHm) روی محور دوره است؟
- */
 export function inRange(hm, startHm, endHm) {
   const t = periodOrd(hm);
   let s = periodOrd(startHm);
@@ -51,16 +46,9 @@ export function inRange(hm, startHm, endHm) {
   return t >= s && t < e;
 }
 
-/**
- * تاریخ میلادی شروع دوره فعلی (۱۲:۰۰ تا ۰۳:۰۰).
- */
 export function periodDateStr(now = tehranNow()) {
-  if (now.hour >= 3 && now.hour < 12) {
-    return now.date;
-  }
-  if (now.hour < 3) {
-    return addDays(now.date, -1);
-  }
+  if (now.hour >= 3 && now.hour < 12) return now.date;
+  if (now.hour < 3) return addDays(now.date, -1);
   return now.date;
 }
 
@@ -77,12 +65,11 @@ function addDays(iso, delta) {
   );
 }
 
-/** کاربران: ۱۲ ظهر تا ۳ صبح */
 export function isWorkHours(now = tehranNow()) {
   return inRange(now.hm, '12:00', '03:00');
 }
 
-/** همه اسلات‌های یک‌ساعته دوره ۱۲→۰۳ */
+/** اسلات یک‌ساعته از ۱۲ ظهر تا ۳ بامداد */
 export function allPeriodSlots() {
   const base = [];
   for (let h = 12; h <= 23; h++) {
@@ -103,16 +90,13 @@ export function buildAvailableShiftSlots(now = tehranNow()) {
   if (now.hour >= 3 && now.hour < 12) {
     return base.map((s) => ({ ...s }));
   }
-
   const oNow = periodOrd(now.hm);
   const out = [];
   for (const s of base) {
     let oStart = periodOrd(s.start);
     let oEnd = periodOrd(s.end);
     if (oEnd <= oStart) oEnd += 24 * 60;
-
     if (oEnd <= oNow) continue;
-
     if (oStart <= oNow && oNow < oEnd) {
       out.push({
         start: now.hm,
@@ -153,21 +137,7 @@ function gregorianToJalali(gy, gm, gd) {
   return [jy, jm, jd];
 }
 
-const JMONTHS = [
-  '',
-  'فروردین',
-  'اردیبهشت',
-  'خرداد',
-  'تیر',
-  'مرداد',
-  'شهریور',
-  'مهر',
-  'آبان',
-  'آذر',
-  'دی',
-  'بهمن',
-  'اسفند',
-];
+const JMONTHS = ['', 'فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور', 'مهر', 'آبان', 'آذر', 'دی', 'بهمن', 'اسفند'];
 
 export function toJalaliDisplay(isoDate, hm) {
   if (!isoDate && !hm) return '—';
@@ -188,54 +158,33 @@ export function toJalaliDisplay(isoDate, hm) {
 export function formatTsJalali(ts) {
   if (ts == null || ts === '') return '—';
   let ms = NaN;
-  if (ts instanceof Date) {
-    ms = ts.getTime();
-  } else if (typeof ts === 'number') {
-    ms = ts > 1e12 ? ts : ts * 1000;
-  } else if (typeof ts === 'string' && /^\d+$/.test(ts.trim())) {
+  if (ts instanceof Date) ms = ts.getTime();
+  else if (typeof ts === 'number') ms = ts > 1e12 ? ts : ts * 1000;
+  else if (typeof ts === 'string' && /^\d+$/.test(ts.trim())) {
     const n = Number(ts.trim());
     ms = n > 1e12 ? n : n * 1000;
-  } else {
-    const d = new Date(ts);
-    ms = d.getTime();
-  }
+  } else ms = new Date(ts).getTime();
   if (!Number.isFinite(ms) || ms <= 0) return '—';
-  if (ms >= 1e9 && ms < 1e12) {
-    ms = ms * 1000;
-  }
-  const IRAN_OFFSET = 3.5 * 3600 * 1000;
-  const adj = new Date(ms + IRAN_OFFSET);
-  const y = adj.getUTCFullYear();
-  const mo = adj.getUTCMonth() + 1;
-  const da = adj.getUTCDate();
-  const hh = adj.getUTCHours();
-  const mi = adj.getUTCMinutes();
-  const pad = function (n) {
-    return String(n).padStart(2, '0');
-  };
-  return toJalaliDisplay(y + '-' + pad(mo) + '-' + da, pad(hh) + ':' + pad(mi));
+  if (ms >= 1e9 && ms < 1e12) ms = ms * 1000;
+  const adj = new Date(ms + 3.5 * 3600 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return toJalaliDisplay(
+    adj.getUTCFullYear() + '-' + pad(adj.getUTCMonth() + 1) + '-' + pad(adj.getUTCDate()),
+    pad(adj.getUTCHours()) + ':' + pad(adj.getUTCMinutes())
+  );
 }
 
 export function buildOwnerShiftSlots(now) {
   if (!now) now = tehranNow();
   const slots = [];
-  const pad = function (n) {
-    return String(n).padStart(2, '0');
-  };
+  const pad = (n) => String(n).padStart(2, '0');
   for (let i = 0; i < 24; i++) {
     const startH = (now.hour + i) % 24;
     const endH = (startH + 1) % 24;
     let start = pad(startH) + ':00';
     const end = pad(endH) + ':00';
-    if (i === 0 && now.minute > 0) {
-      start = pad(now.hour) + ':' + pad(now.minute);
-    }
-    slots.push({
-      start: start,
-      end: end,
-      label: start + '–' + end,
-      hourKey: pad(startH) + ':00',
-    });
+    if (i === 0 && now.minute > 0) start = pad(now.hour) + ':' + pad(now.minute);
+    slots.push({ start, end, label: start + '–' + end, hourKey: pad(startH) + ':00' });
   }
   return slots;
 }
@@ -243,9 +192,7 @@ export function buildOwnerShiftSlots(now) {
 export { formatTsJalali as formatTehranJalali };
 
 export function toFaDigits(s) {
-  return String(s).replace(/[0-9]/g, function (d) {
-    return '۰۱۲۳۴۵۶۷۸۹'[Number(d)];
-  });
+  return String(s).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[Number(d)]);
 }
 
 export function hoursUntilWorkOpen(now) {
@@ -253,24 +200,19 @@ export function hoursUntilWorkOpen(now) {
   if (isWorkHours(now)) return 0;
   const nowM = hmToMin(now.hm);
   const openM = 12 * 60;
-  if (nowM >= 3 * 60 && nowM < openM) {
-    return Math.max(1, Math.ceil((openM - nowM) / 60));
-  }
+  if (nowM >= 3 * 60 && nowM < openM) return Math.max(1, Math.ceil((openM - nowM) / 60));
   return Math.max(1, Math.ceil((openM + 24 * 60 - nowM) / 60));
 }
 
 export function workHoursClosedText() {
   const h = hoursUntilWorkOpen();
-  const hFa = toFaDigits(h);
-  const a = toFaDigits('12:00');
-  const b = toFaDigits('03:00');
   return (
     '⏰ ساعت کاری از ' +
-    a +
+    toFaDigits('12:00') +
     ' تا ' +
-    b +
+    toFaDigits('03:00') +
     ' است.\nالان خارج از ساعت کاری هستید.\nحدود ' +
-    hFa +
+    toFaDigits(h) +
     ' ساعت تا شروع کار مانده.'
   );
 }
