@@ -95,6 +95,17 @@ export function confirmPostInline() {
   };
 }
 
+export function ownerReviewInline(id) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ تأیید', callback_data: 'approve:' + id, style: 'success' },
+        { text: '❌ رد', callback_data: 'reject_direct:' + id, style: 'danger' },
+      ],
+    ],
+  };
+}
+
 export function reviewInline(id, showNext, batchNumber) {
   const rows = [
     [
