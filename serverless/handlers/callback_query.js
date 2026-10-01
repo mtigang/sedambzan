@@ -17,7 +17,7 @@ import {
   addChannelAdmin,
 } from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow, inRange, periodDateStr } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, formatTsJalali } from 'lib/time';
 import { DEFAULT_CHANNELS } from 'lib/config';
 import { channelMessageLink } from 'lib/resolve';
 import {
@@ -155,7 +155,7 @@ export default async function (cq) {
         if (conf?.chatId) {
           const sent = await api.sendMessage({ chat_id: conf.chatId, text: toBoldHtml(row.content), parse_mode: 'HTML' });
           const mid = sent && sent.message_id;
-          link = channelMessageLink(conf.chatId, mid);
+          link = channelMessageLink(conf.chatId, mid, row.channelKey);
         }
       } catch (e) {
         console.error('publish', e);
@@ -167,10 +167,18 @@ export default async function (cq) {
         } catch (_) {}
       }
       try {
-        let txt = '✅ پیام #' + id + ' تأیید و منتشر شد.';
-        if (link) txt += '\n' + link;
-        await api.sendMessage({ chat_id: row.userId, text: txt });
-      } catch (_) {}
+        const conf2 = DEFAULT_CHANNELS[row.channelKey];
+        const title = (conf2 && conf2.title) || row.channelKey;
+        let txt = '✅ پیام شما تأیید و منتشر شد.';
+        if (link) {
+          txt += '\n\nمشاهده در کانال «' + title + '»:\n' + link;
+        }
+        await api.sendMessage({
+          chat_id: row.userId,
+          text: txt,
+          link_preview_options: link ? { is_disabled: false, url: link } : undefined,
+        });
+      } catch (_e) {}
       return;
     }
 
@@ -311,21 +319,39 @@ if (data.startsWith('reject:')) {
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       const uu = await getUser(uid);
       const ms = (await db.select().from(messages).where(eq(messages.userId, uid)).all()) || [];
-      const pending = ms.filter((m) => m.status === 'pending');
+      const pe = ms.filter(function (m) { return m.status === 'pending'; }).length;
+      const ap = ms.filter(function (m) { return m.status === 'approved'; }).length;
+      const rj = ms.filter(function (m) { return m.status === 'rejected'; }).length;
+      const map = { pending: '🟡', approved: '🟢', rejected: '🔴' };
       let body =
-        '👤 ' + displayName(uu, uid) + '\nآیدی: ' + uid + '\n\n— پیام‌ها —\n';
-      for (const m of ms.slice(0, 25)) {
-        body += '#' + m.id + ' | ' + m.status + '\n' + (m.content || '') + '\n\n';
+        '👤 ' +
+        displayName(uu, uid) +
+        '\n🆔 ' +
+        uid +
+        (uu && uu.username ? '\n@' + uu.username : '') +
+        '\nنقش: ' +
+        ((uu && uu.role) || 'user') +
+        '\n📨 پیام‌ها: ' +
+        ms.length +
+        ' | 🟡' +
+        pe +
+        ' 🟢' +
+        ap +
+        ' 🔴' +
+        rj;
+      try {
+        if (uu && uu.createdAt) body += '\n📅 عضویت: ' + formatTsJalali(uu.createdAt);
+      } catch (_e) {}
+      await api.sendMessage({ chat_id: cq.message.chat.id, text: body });
+      if (ms.length) {
+        const last = ms.sort(function (a, b) { return b.id - a.id; }).slice(0, 15);
+        let list = 'آخرین پیام‌ها:\n';
+        for (const row of last) {
+          const short = (row.content || '').replace(/\n/g, ' ').slice(0, 70);
+          list += (map[row.status] || '•') + ' #' + row.id + ' | ' + row.status + '\n' + short + '\n\n';
+        }
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: list.slice(0, 3500) });
       }
-      if (pending.length) {
-        body += '— در صف —\n';
-        for (const m of pending) body += '#' + m.id + '\n' + m.content + '\n\n';
-      }
-      await api.sendMessage({
-        chat_id: cq.message.chat.id,
-        text: body.slice(0, 3500),
-        reply_markup: userOpenInline(uid),
-      });
       return;
     }
 
@@ -434,7 +460,7 @@ if (data.startsWith('reject:')) {
         const sent = await postToChannel(st.channelKey, st.postText);
         await clearState(userId);
         const conf = DEFAULT_CHANNELS[st.channelKey];
-        const link = channelMessageLink(conf?.chatId, sent?.message_id);
+        const link = channelMessageLink(conf && conf.chatId, sent && sent.message_id, state && state.channelKey);
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ارسال شد' });
         try {
           await api.editMessageText({
@@ -466,7 +492,79 @@ if (data.startsWith('reject:')) {
       return;
     }
     if (data.startsWith('shift_mine:')) {
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'شیفت شماست' });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'برای لغو روی «لغو» بزنید' });
+      return;
+    }
+    if (data.startsWith('shift_cancel:')) {
+      const parts = data.split(':');
+      const channelKey = parts[1];
+      const hourKey = parts[2];
+      const now = tehranNow();
+      const pdate = periodDateStr(now);
+      const mySh =
+        (await db
+          .select()
+          .from(shifts)
+          .where(and(eq(shifts.adminId, userId), eq(shifts.status, 'active')))
+          .all()) || [];
+      let cancelled = 0;
+      for (const s of mySh) {
+        const sameHour =
+          s.startHm === hourKey ||
+          String(s.startHm).slice(0, 2) === String(hourKey).slice(0, 2);
+        const sameDate =
+          s.shiftDate === pdate ||
+          s.shiftDate === 'perm' ||
+          s.shiftDate === 'permanent' ||
+          s.shiftDate === now.date;
+        if (s.channelKey === channelKey && sameHour && sameDate) {
+          await db
+            .update(shifts)
+            .set({ status: 'cancelled' })
+            .where(
+              and(
+                eq(shifts.adminId, userId),
+                eq(shifts.channelKey, channelKey),
+                eq(shifts.startHm, s.startHm),
+                eq(shifts.shiftDate, s.shiftDate)
+              )
+            )
+            .run();
+          cancelled++;
+        }
+      }
+      await api.answerCallbackQuery({
+        callback_query_id: cq.id,
+        text: cancelled ? 'لغو شد' : 'پیدا نشد',
+        show_alert: true,
+      });
+      try {
+        await refreshAllShiftBoards(channelKey, pdate);
+      } catch (_e) {}
+      try {
+        const dayShifts =
+          (await db
+            .select()
+            .from(shifts)
+            .where(
+              and(
+                eq(shifts.channelKey, channelKey),
+                eq(shifts.shiftDate, pdate),
+                eq(shifts.status, 'active')
+              )
+            )
+            .all()) || [];
+        const takenMap = {};
+        for (const s of dayShifts) takenMap[s.startHm] = s.adminId;
+        const myStarts = new Set(
+          dayShifts.filter(function (s) { return s.adminId === userId; }).map(function (s) { return s.startHm; })
+        );
+        await api.editMessageReplyMarkup({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          reply_markup: shiftSlotsInline(channelKey, takenMap, myStarts),
+        });
+      } catch (_e) {}
       return;
     }
     if (data === 'shift_close') {
@@ -482,7 +580,66 @@ if (data.startsWith('reject:')) {
     }
 
     
-    if (data === 'ann_cancel') {
+    
+    if (data === 'own_shift_list') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      const now = tehranNow();
+      const pdate = periodDateStr(now);
+      const all = (await db.select().from(shifts).all()) || [];
+      const today = all.filter(function (s) {
+        return s.status === 'active' && (s.shiftDate === pdate || s.shiftDate === 'perm' || s.shiftDate === 'permanent');
+      });
+      let t = '⏰ شیفت‌های دوره ' + pdate + '\n(دائمی هم نمایش داده می‌شود)\n\n';
+      if (!today.length) t += 'خالی';
+      for (const s of today) {
+        let name = String(s.adminId);
+        try {
+          name = displayName(await getUser(s.adminId), s.adminId);
+        } catch (_e) {}
+        t +=
+          '• ' +
+          (DEFAULT_CHANNELS[s.channelKey] && DEFAULT_CHANNELS[s.channelKey].title
+            ? DEFAULT_CHANNELS[s.channelKey].title
+            : s.channelKey) +
+          ' | ' +
+          s.startHm +
+          '–' +
+          s.endHm +
+          ' | ' +
+          name +
+          (s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' (دائم)' : '') +
+          '\n';
+      }
+      await api.sendMessage({ chat_id: cq.message.chat.id, text: t });
+      return;
+    }
+
+    if (data.startsWith('own_shift:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const mode = data.split(':')[1];
+      await setState(userId, 'own_assign', { mode: mode });
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'کانال را انتخاب کنید:',
+        reply_markup: {
+          keyboard: Object.values(DEFAULT_CHANNELS).map(function (c) {
+            return [{ text: 'شیفت: ' + c.title }];
+          }).concat([[{ text: '◀️ بازگشت' }]]),
+          resize_keyboard: true,
+        },
+      });
+      return;
+    }
+
+if (data === 'ann_cancel') {
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
       await clearState(userId);
       return;
@@ -504,53 +661,98 @@ if (data.startsWith('reject:')) {
       let ids = [];
       if (target === 'admins') {
         const ads = (await db.select().from(channelAdmins).all()) || [];
-        ids = [...new Set(ads.map((a) => a.userId || a.user_id).filter(Boolean))];
+        ids = [];
+        const seen = {};
+        for (const a of ads) {
+          const id = a.userId || a.user_id;
+          if (id && !seen[id]) {
+            seen[id] = true;
+            ids.push(id);
+          }
+        }
       } else {
         const all = (await db.select().from(users).all()) || [];
-        ids = all.map((u) => u.userId || u.user_id).filter(Boolean);
+        ids = [];
+        const seen = {};
+        for (const u of all) {
+          const id = u.userId || u.user_id;
+          if (id && !seen[id]) {
+            seen[id] = true;
+            ids.push(id);
+          }
+        }
       }
-      ids = ids.filter((id) => id && id !== userId);
+      ids = ids.filter(function (id) { return id && id !== userId; });
       const total = ids.length;
       let ok = 0;
       let fail = 0;
+      const failed = [];
       const progress = await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: '📣 در حال ارسال... 0/' + total,
+        text: '📣 شروع ارسال به ' + total + ' نفر...',
       });
-      const bar = (done, tot) => {
+      function bar(done, tot) {
         const n = tot ? Math.floor((done / tot) * 10) : 0;
-        return '█'.repeat(n) + '░'.repeat(10 - n);
-      };
+        let s = '';
+        for (let i = 0; i < 10; i++) s += i < n ? '█' : '░';
+        return s;
+      }
+      async function updateProg(i) {
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: progress.message_id,
+            text:
+              '📣 در حال ارسال\n' +
+              bar(i, total) +
+              ' ' +
+              i +
+              '/' +
+              total +
+              '\n✅ ' +
+              ok +
+              '  ❌ ' +
+              fail,
+          });
+        } catch (_e) {}
+      }
+      const BATCH = 25;
       for (let i = 0; i < ids.length; i++) {
         try {
           await api.sendMessage({ chat_id: ids[i], text: annText });
           ok++;
-        } catch (_) {
+        } catch (_e) {
           fail++;
+          failed.push(ids[i]);
         }
-        if (i % 25 === 0 || i === ids.length - 1) {
+        if ((i + 1) % BATCH === 0 || i === ids.length - 1) {
+          await updateProg(i + 1);
+        }
+      }
+      // یک‌بار تلاش مجدد برای ناموفق‌ها
+      if (failed.length) {
+        const retry = failed.slice();
+        failed.length = 0;
+        for (let j = 0; j < retry.length; j++) {
           try {
-            await api.editMessageText({
-              chat_id: cq.message.chat.id,
-              message_id: progress.message_id,
-              text:
-                '📣 ارسال\n' +
-                bar(i + 1, total) +
-                ' ' +
-                (i + 1) +
-                '/' +
-                total +
-                '\n✅ ' +
-                ok +
-                ' ❌ ' +
-                fail,
-            });
-          } catch (_) {}
+            await api.sendMessage({ chat_id: retry[j], text: annText });
+            ok++;
+            fail--;
+          } catch (_e) {
+            failed.push(retry[j]);
+          }
         }
+        await updateProg(total);
       }
       await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: '✅ اطلاعیه تمام شد.\nموفق: ' + ok + ' / ناموفق: ' + fail + ' از ' + total,
+        text:
+          '✅ اطلاعیه تمام شد.\nموفق: ' +
+          ok +
+          '\nناموفق: ' +
+          fail +
+          '\nکل: ' +
+          total,
       });
       return;
     }
