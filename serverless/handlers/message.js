@@ -31,7 +31,8 @@ import {
 } from 'lib/keyboards';
 import { validateAndFix, normalizeBody } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots } from 'lib/time';
+import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm } from 'lib/time';
+// normHm via time
 import { resolveUserId } from 'lib/resolve';
 import {
   ensureChannelsSeeded,
@@ -547,52 +548,74 @@ export default async function (message) {
           .from(shifts)
           .where(eq(shifts.channelKey, entry.key))
           .all()) || [];
-      const today = dayShifts.filter(
+      const todayRaw = dayShifts.filter(
         (s) =>
-          (s.shiftDate === date || s.shiftDate === 'permanent' || s.shiftDate === now.date) &&
+          (s.shiftDate === date ||
+            s.shiftDate === 'permanent' ||
+            s.shiftDate === 'perm' ||
+            s.shiftDate === now.date) &&
           s.status === 'active'
       );
+      const today = todayRaw.filter(function (s) {
+        try {
+          const a = normHm(s.startHm);
+          const b = normHm(s.endHm);
+          return a && b && a !== b;
+        } catch (_e) {
+          return false;
+        }
+      });
       const takenMap = {};
       const myStarts = new Set();
       for (const s of today) {
-        takenMap[s.startHm] = s.adminId;
-        if (s.adminId === userId) myStarts.add(s.startHm);
+        takenMap[normHm(s.startHm)] = s.adminId;
+        if (Number(s.adminId) === Number(userId)) myStarts.add(normHm(s.startHm));
       }
       await clearState(userId);
       let head =
         '⏰ شیفت‌های «' +
         entry.title +
-        '»\n📅 دوره ' +
+        '»
+📅 دوره ' +
         date +
-        '\n۱۲:۰۰ تا ۰۳:۰۰\n🟢 خالی · 🔴 پر/شما\n\n';
+        '
+ساعت کاری: ۱۲:۰۰ تا ۰۳:۰۰
+حداکثر ۳ شیفت یک‌ساعته
+🟢 خالی  ·  🔴 پر
+
+';
       if (today.length) {
         const shiftLines = [];
         for (const s of today) {
-          let who = 'شما';
-          if (s.adminId !== userId) {
+          let who = Number(s.adminId) === Number(userId) ? 'شما' : String(s.adminId);
+          if (Number(s.adminId) !== Number(userId)) {
             try {
               who = displayName(await getUser(s.adminId), s.adminId);
-            } catch (_e) {
-              who = String(s.adminId);
-            }
+            } catch (_e) {}
           }
           shiftLines.push(
-            '────────────\n' +
-              String(s.startHm).slice(0, 5) +
-              ' تا ' +
-              String(s.endHm).slice(0, 5) +
-              '\n👤 ' +
-              who
+            '────────────
+🕐 ' + normHm(s.startHm) + ' تا ' + normHm(s.endHm) + '
+👤 ' + who
           );
         }
-        head += 'شیفت‌های ثبت‌شده امروز:\n' + shiftLines.join('\n');
+        head += 'شیفت‌های معتبر امروز:
+' + shiftLines.join('
+');
+        const invalid = todayRaw.length - today.length;
+        if (invalid > 0) {
+          head += '
+
+⚠️ ' + invalid + ' شیفت نامعتبر (مثل ۰۰–۰۰) مخفی شد.';
+        }
       } else {
-        head += 'هنوز شیفتی ثبت نشده.';
+        head += 'هنوز شیفت معتبری ثبت نشده.';
       }
       const board = await api.sendMessage({
         chat_id: chatId,
         text: head,
-        reply_markup: shiftSlotsInline(entry.key, takenMap, myStarts),
+        reply_markup: shiftSlotsInline(entry.key, takenMap, myStarts, null, !!owner),
+      });
       });
       try {
         const mid = board && board.message_id;
@@ -646,8 +669,9 @@ export default async function (message) {
           console.error('shifts all', e);
         }
         const today = all.filter(function (s) {
+          if (s.status !== 'active') return false;
+          if (String(s.startHm) === String(s.endHm)) return false;
           return (
-            s.status === 'active' &&
             (s.shiftDate === pdate ||
               s.shiftDate === 'perm' ||
               s.shiftDate === 'permanent' ||
@@ -741,7 +765,7 @@ export default async function (message) {
           'ساعت را انتخاب کنید (' +
           (mode === 'perm' ? 'دائمی — هر ساعت' : 'روزانه — ۲۴ ساعت آینده') +
           '):',
-        reply_markup: shiftSlotsInline(channelKey, takenMap, new Set(), ownerSlots),
+        reply_markup: shiftSlotsInline(channelKey, takenMap, new Set(), ownerSlots, true),
       });
       // reuse shift_pick won't know admin - use special callbacks
       // store and intercept - for simplicity owner uses same shift_pick but we need different insert
