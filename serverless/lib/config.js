@@ -1,6 +1,7 @@
+import { buildAvailableShiftSlots } from 'lib/time';
+
 export const OWNER_IDS = [6666610646, 8302194171, 8434360251];
 
-/** آیدی عددی کانال‌ها — ثابت تا آخر */
 export const CHANNEL_USERNAMES = {
   sadambazan: 'callMeAraIl',
   inkarbar: null,
@@ -13,7 +14,6 @@ export const CHANNEL_IDS = {
   zendegi: -1004371148799,
 };
 
-/** گروه ادمین‌های هر کانال — اعضا = ادمین همان کانال در ربات */
 export const ADMIN_GROUP_IDS = {
   sadambazan: -1004444089094,
   inkarbar: -1004335935102,
@@ -27,8 +27,8 @@ export const DEFAULT_CHANNELS = {
     prefixes: ['صدام بزن'],
     chatId: CHANNEL_IDS.sadambazan,
     adminGroupId: ADMIN_GROUP_IDS.sadambazan,
-    workStart: '00:00',
-    workEnd: '23:59',
+    workStart: '15:00',
+    workEnd: '03:00',
   },
   inkarbar: {
     key: 'inkarbar',
@@ -36,8 +36,8 @@ export const DEFAULT_CHANNELS = {
     prefixes: ['این کاربر'],
     chatId: CHANNEL_IDS.inkarbar,
     adminGroupId: ADMIN_GROUP_IDS.inkarbar,
-    workStart: '00:00',
-    workEnd: '23:59',
+    workStart: '15:00',
+    workEnd: '03:00',
   },
   zendegi: {
     key: 'zendegi',
@@ -45,8 +45,8 @@ export const DEFAULT_CHANNELS = {
     prefixes: ['تو زندگی بعدی'],
     chatId: CHANNEL_IDS.zendegi,
     adminGroupId: ADMIN_GROUP_IDS.zendegi,
-    workStart: '11:00',
-    workEnd: '00:00',
+    workStart: '15:00',
+    workEnd: '03:00',
   },
 };
 
@@ -55,21 +55,6 @@ export const CHANNEL_PREFIXES = [
   { key: 'inkarbar', prefix: 'این کاربر' },
   { key: 'zendegi', prefix: 'تو زندگی بعدی' },
 ];
-
-/** شیفت‌ها: ۱۰ صبح تا ۲ بامداد، یک‌ساعته */
-export function buildShiftSlots() {
-  const slots = [];
-  // 10:00 .. 23:00
-  for (let h = 10; h <= 23; h++) {
-    const start = String(h).padStart(2, '0') + ':00';
-    const end = h === 23 ? '00:00' : String(h + 1).padStart(2, '0') + ':00';
-    slots.push({ start, end, label: start + '–' + end });
-  }
-  // 00:00-01:00, 01:00-02:00
-  slots.push({ start: '00:00', end: '01:00', label: '00:00–01:00' });
-  slots.push({ start: '01:00', end: '02:00', label: '01:00–02:00' });
-  return slots;
-}
 
 export const WELCOME_TEXT =
   'به ربات هوشمند آرال خوش آمدید.\n\nاز منوی زیر یک گزینه را انتخاب کنید.';
@@ -92,3 +77,7 @@ export const FEEDBACK_HINT =
   'اگر می‌خواهید پیام‌تان در کانال منتشر شود، از گزینه\n' +
   '📝 ارسال پیام\n' +
   'استفاده کنید.';
+
+export function buildShiftSlots() {
+  return buildAvailableShiftSlots();
+}
