@@ -8,6 +8,7 @@ import {
   ADMIN_GROUP_IDS,
 } from 'lib/config';
 import { tehranNow, inRange, periodDateStr } from 'lib/time';
+import { reviewInline } from 'lib/keyboards';
 
 export async function ensureChannelsSeeded() {
   try {
@@ -336,117 +337,374 @@ export async function activeShiftAdmins(channelKey) {
   }
 }
 
-/**
- * اطلاع‌رسانی: فقط ادمین‌های شیفت فعال کانال.
- * اگر شیفت نبود → فقط در صف می‌ماند (مالک مستقیم نمی‌گیرد مگر صف را باز کند).
- * delivered flag در settings: delivered:{msgId}:{adminId}
- */
-export async function notifyShiftAdmins(channelKey, text, replyMarkup, msgId) {
-  const onShift = await activeShiftAdmins(channelKey);
-  const sent = [];
-  for (const id of onShift) {
-    if (isOwner(id)) continue; // مالک فقط از صف
-    try {
-      const flag = 'delivered:' + msgId + ':' + id;
-      if ((await settingGet(flag, '')) === '1') continue;
-      await api.sendMessage({ chat_id: id, text, reply_markup: replyMarkup });
-      await settingSet(flag, '1');
-      sent.push(id);
-    } catch (e) {
-      console.error('notifyShift', id, e);
-    }
-  }
-  return sent;
+/* ============================================================
+ *  سیستم Batch بررسی پیام‌ها (Serverless-safe)
+ *  - هیچ Pending ای خودکار برای ادمین ارسال نمی‌شود (No Push).
+ *  - ادمین با دکمه‌ی «📥 پیام‌های در انتظار» یک Batch ده‌تایی می‌گیرد.
+ *  - IDهای Batch در settings با کلید review_batch:<adminId> ذخیره می‌شوند.
+ *  - Lock با Timestamp در DB (بدون setTimeout)؛ TTL کوتاه.
+ *  - Batch state ≠ Message state: حذف Batch هیچ پیامی را تغییر نمی‌دهد.
+ * ============================================================ */
+
+export const REVIEW_BATCH_SIZE = 10;
+const REVIEW_LOCK_TTL_MS = 10 * 1000;
+
+function reviewBatchKey(adminId) {
+  return 'review_batch:' + Number(adminId);
 }
 
-/** وقتی شیفت ادمین شروع می‌شود / یا هر تعامل: صف کانال‌هایش را تحویل بده */
-export async function deliverPendingForAdmin(adminId) {
-  const keys = await adminChannels(adminId);
-  if (!keys.length) return 0;
-  const now = tehranNow();
-  const period = periodDateStr(now);
-  const allShifts = (await db.select().from(shifts).where(eq(shifts.adminId, adminId)).all()) || [];
-  const activeKeys = allShifts
-    .filter((s) => {
-      if (s.status !== 'active') return false;
-      if (s.shiftDate === 'permanent' || s.shiftDate === 'perm') {
-        return inRange(now.hm, s.startHm, s.endHm);
-      }
-      if (s.shiftDate !== period && s.shiftDate !== now.date) return false;
-      return inRange(now.hm, s.startHm, s.endHm);
-    })
-    .map((s) => s.channelKey);
-  if (!activeKeys.length) return 0;
-
-  const pending =
-    (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
-  let n = 0;
-  for (const row of pending) {
-    if (!activeKeys.includes(row.channelKey)) continue;
-    const flag = 'delivered:' + row.id + ':' + adminId;
-    if ((await settingGet(flag, '')) === '1') continue;
-    try {
-      const ch = await getChannel(row.channelKey);
-      await api.sendMessage({
-        chat_id: adminId,
-        text:
-          '📨 #' +
-          row.id +
-          ' | ' +
-          (ch?.title || row.channelKey) +
-          '\nاز: ' +
-          row.userId +
-          '\n\n' +
-          row.content,
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '🟢 تأیید', callback_data: 'approve:' + row.id, style: 'success' },
-              { text: '🔴 رد', callback_data: 'reject_menu:' + row.id, style: 'danger' },
-            ],
-          ],
-        },
-      });
-      await settingSet(flag, '1');
-      n++;
-    } catch (e) {
-      console.error('deliver', row.id, e);
-    }
+/** آیا این رکورد shift همین الان (تهران) فعال است؟ */
+function shiftActiveNow(s, now, pdate) {
+  if (!s || s.status !== 'active') return false;
+  if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
+    return inRange(now.hm, s.startHm, s.endHm);
   }
-  return n;
+  if (s.shiftDate !== pdate && s.shiftDate !== now.date) return false;
+  return inRange(now.hm, s.startHm, s.endHm);
 }
 
-export async function pendingForViewer(userId) {
+/** کلید کانال‌هایی که ادمین همین الان برایشان شیفت فعال دارد */
+export async function activeShiftChannelKeys(adminId) {
   try {
-    const role = await getRole(userId);
-    if (role === 'owner' || isOwner(userId)) {
-      const all = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
-      return all.sort((a, b) => b.id - a.id);
-    }
     const now = tehranNow();
     const pdate = periodDateStr(now);
-    const mySh =
+    const rows =
       (await db
         .select()
         .from(shifts)
-        .where(and(eq(shifts.adminId, userId), eq(shifts.status, 'active')))
+        .where(and(eq(shifts.adminId, Number(adminId)), eq(shifts.status, 'active')))
         .all()) || [];
-    const activeKeys = [
-      ...new Set(
-        mySh
-          .filter((s) => {
-            if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
-              return inRange(now.hm, s.startHm, s.endHm);
-            }
-            if (s.shiftDate !== pdate) return false;
-            return inRange(now.hm, s.startHm, s.endHm);
-          })
-          .map((s) => s.channelKey)
-      ),
-    ];
-    if (!activeKeys.length) return [];
-    const all = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
-    return all.filter((m) => activeKeys.includes(m.channelKey)).sort((a, b) => b.id - a.id);
+    return [...new Set(rows.filter((s) => shiftActiveNow(s, now, pdate)).map((s) => s.channelKey))];
+  } catch (e) {
+    console.error('activeShiftChannelKeys', e);
+    return [];
+  }
+}
+
+/** مالک همیشه true. ادمین: شیفت فعال (اختیاری: برای کانال مشخص) */
+export async function hasActiveShift(adminId, channelKey) {
+  if (isOwner(adminId)) return true;
+  const keys = await activeShiftChannelKeys(adminId);
+  return channelKey ? keys.includes(channelKey) : keys.length > 0;
+}
+
+export async function canAdminReviewMessage(adminId, channelKey) {
+  if (isOwner(adminId)) return true;
+  const keys = await activeShiftChannelKeys(adminId);
+  return keys.includes(channelKey);
+}
+
+/* ---------- Lock مبتنی بر Timestamp در DB ---------- */
+
+/**
+ * گرفتن قفل. insert روی کلید یکتا (PRIMARY KEY) اتمیک است.
+ * اگر قفل موجود ولی منقضی بود، با compare-and-swap تصاحب می‌شود.
+ * برمی‌گرداند: توکن قفل (string) یا null (مشغول).
+ */
+async function acquireLock(key, ttl = REVIEW_LOCK_TTL_MS) {
+  const now = Date.now();
+  const mine = JSON.stringify({
+    lockedAt: now,
+    token: now + ':' + Math.random().toString(36).slice(2),
+  });
+  try {
+    await db.insert(settings).values({ key, value: mine }).run();
+    return mine;
+  } catch (_e) {
+    // کلید قبلاً وجود دارد؛ ادامه
+  }
+  try {
+    const rows = await db.select().from(settings).where(eq(settings.key, key)).all();
+    const cur = rows && rows[0];
+    if (!cur) return null;
+    let at = 0;
+    try {
+      at = Number(JSON.parse(cur.value || '{}').lockedAt) || 0;
+    } catch (_e) {
+      at = 0;
+    }
+    if (at && now - at < ttl) return null; // قفل تازه است → مشغول
+    await db
+      .update(settings)
+      .set({ value: mine })
+      .where(and(eq(settings.key, key), eq(settings.value, cur.value)))
+      .run();
+    const again = await db.select().from(settings).where(eq(settings.key, key)).all();
+    return again && again[0] && again[0].value === mine ? mine : null;
+  } catch (e) {
+    console.error('acquireLock', key, e);
+    return null;
+  }
+}
+
+async function releaseLock(key, mine) {
+  if (!mine) return;
+  try {
+    await db.delete(settings).where(and(eq(settings.key, key), eq(settings.value, mine))).run();
+  } catch (e) {
+    console.error('releaseLock', key, e);
+  }
+}
+
+/* ---------- ذخیره/خواندن Batch ---------- */
+
+export async function getReviewBatch(adminId) {
+  const raw = await settingGet(reviewBatchKey(adminId), '');
+  if (!raw) return null;
+  try {
+    const b = JSON.parse(raw);
+    if (b && Array.isArray(b.ids)) return b;
+  } catch (_e) {}
+  return null;
+}
+
+/** برخلاف settingSet خطا را می‌اندازد تا Batch نیمه‌کاره ثبت نشود */
+async function saveReviewBatch(adminId, batch) {
+  const key = reviewBatchKey(adminId);
+  const value = JSON.stringify(batch);
+  const rows = await db.select().from(settings).where(eq(settings.key, key)).all();
+  if (rows && rows.length) {
+    await db.update(settings).set({ value }).where(eq(settings.key, key)).run();
+  } else {
+    await db.insert(settings).values({ key, value }).run();
+  }
+}
+
+/** فقط state Batch را پاک می‌کند؛ هیچ پیامی تغییر نمی‌کند */
+export async function clearReviewBatch(adminId) {
+  try {
+    await db.delete(settings).where(eq(settings.key, reviewBatchKey(adminId))).run();
+  } catch (e) {
+    console.error('clearReviewBatch', e);
+  }
+}
+
+async function getMessageById(id) {
+  const rows = await db.select().from(messages).where(eq(messages.id, Number(id))).all();
+  return (rows && rows[0]) || null;
+}
+
+/** ردیف‌های پیام‌های Batch به ترتیب ذخیره‌شده */
+export async function getReviewBatchMessages(adminId) {
+  const b = await getReviewBatch(adminId);
+  if (!b) return [];
+  const out = [];
+  for (const id of b.ids) {
+    const row = await getMessageById(id);
+    if (row) out.push(row);
+  }
+  return out;
+}
+
+/** Batch کامل است اگر هیچ‌کدام از IDها دیگر pending نباشد (بدون Batch = کامل) */
+export async function isReviewBatchComplete(adminId) {
+  const b = await getReviewBatch(adminId);
+  if (!b) return true;
+  const rows = await getReviewBatchMessages(adminId);
+  return rows.every((r) => r.status !== 'pending');
+}
+
+/** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول */
+async function selectReviewablePending(adminId) {
+  const pending = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
+  pending.sort((a, b) => a.id - b.id);
+  if (isOwner(adminId)) return pending;
+  const keys = await activeShiftChannelKeys(adminId);
+  if (!keys.length) return [];
+  return pending.filter((m) => keys.includes(m.channelKey));
+}
+
+/**
+ * وضعیت Batch بعد از هر تأیید/رد (فقط‌خواندنی).
+ * messageId اختیاری: اگر پیام عضو Batch نباشد inBatch=false.
+ */
+export async function finishReviewBatchIfComplete(adminId, messageId) {
+  try {
+    const batch = await getReviewBatch(adminId);
+    if (!batch) return { inBatch: false, complete: true, hasMore: false, batch: null };
+    if (messageId != null && !batch.ids.map(Number).includes(Number(messageId))) {
+      return { inBatch: false, complete: false, hasMore: false, batch };
+    }
+    const complete = await isReviewBatchComplete(adminId);
+    let hasMore = false;
+    if (complete) hasMore = (await selectReviewablePending(adminId)).length > 0;
+    return { inBatch: true, complete, hasMore, batch };
+  } catch (e) {
+    console.error('finishReviewBatchIfComplete', e);
+    return { inBatch: false, complete: false, hasMore: false, batch: null };
+  }
+}
+
+/**
+ * ساخت (یا بازیابی) Batch.
+ * status:
+ *   no_shift   → ادمین شیفت فعال ندارد
+ *   busy       → درخواست هم‌زمان دیگری در حال اجراست
+ *   incomplete → Batch قبلی ناقص است (همان Batch برگردانده می‌شود)
+ *   empty      → Pending مناسبی نیست
+ *   created    → Batch جدید ساخته شد
+ */
+export async function createReviewBatch(adminId) {
+  adminId = Number(adminId);
+  const owner = isOwner(adminId);
+  let keys = null;
+  if (!owner) {
+    keys = await activeShiftChannelKeys(adminId);
+    if (!keys.length) return { status: 'no_shift' };
+  }
+
+  const lockKey = 'review_lock:' + adminId;
+  const lock = await acquireLock(lockKey);
+  if (!lock) return { status: 'busy' };
+
+  try {
+    const old = await getReviewBatch(adminId);
+    if (old) {
+      const rows = await getReviewBatchMessages(adminId);
+      let pendingRows = rows.filter((r) => r.status === 'pending');
+      if (pendingRows.length && !owner) {
+        // سیاست شیفت بعدی: Batch ناقص ادامه می‌یابد، فقط برای کانال‌های شیفت فعلی.
+        // پیام‌های کانال‌های غیرفعال از Batch کنار گذاشته می‌شوند (در صف pending می‌مانند).
+        const stale = pendingRows.filter((r) => !keys.includes(r.channelKey));
+        if (stale.length) {
+          const drop = new Set(stale.map((r) => Number(r.id)));
+          pendingRows = pendingRows.filter((r) => !drop.has(Number(r.id)));
+          if (pendingRows.length) {
+            old.ids = old.ids.filter((id) => !drop.has(Number(id)));
+            await saveReviewBatch(adminId, old);
+          }
+        }
+      }
+      if (pendingRows.length) return { status: 'incomplete', batch: old, messages: pendingRows };
+    }
+
+    const candidates = (await selectReviewablePending(adminId)).slice(0, REVIEW_BATCH_SIZE);
+    if (!candidates.length) return { status: 'empty' };
+
+    const batch = {
+      ids: candidates.map((m) => Number(m.id)),
+      batchNumber: (old && Number(old.batchNumber) ? Number(old.batchNumber) : 0) + 1,
+      createdAt: Date.now(),
+      periodDate: periodDateStr(),
+    };
+    await saveReviewBatch(adminId, batch);
+    return { status: 'created', batch, messages: candidates };
+  } finally {
+    await releaseLock(lockKey, lock);
+  }
+}
+
+/** ارسال پیام‌های Batch به ادمین (حداکثر ۱۰ + یک پیام سرتیتر) */
+export async function sendReviewBatch(chatId, batch, rows, opts) {
+  const resumed = !!(opts && opts.resumed);
+  const lastId = Number(batch.ids[batch.ids.length - 1]);
+  const head = resumed
+    ? '⏳ Batch فعلی هنوز کامل بررسی نشده است.\nBatch شماره ' +
+      batch.batchNumber +
+      ' — ' +
+      rows.length +
+      ' پیام باقی‌مانده دوباره ارسال شد.'
+    : '📥 Batch شماره ' + batch.batchNumber + '\n' + rows.length + ' پیام برای بررسی دریافت شد.';
+  await api.sendMessage({ chat_id: chatId, text: head });
+  for (const row of rows) {
+    try {
+      const ch = await getChannel(row.channelKey);
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '#' +
+          row.id +
+          ' | ' +
+          ((ch && ch.title) || row.channelKey) +
+          ' | user:' +
+          row.userId +
+          '\n\n' +
+          String(row.content || '').slice(0, 3800),
+        reply_markup: reviewInline(row.id, Number(row.id) === lastId, batch.batchNumber),
+      });
+    } catch (e) {
+      console.error('sendReviewBatch', row.id, e);
+    }
+  }
+}
+
+/**
+ * بررسی مجوز ادمین برای یک پیام (هر Callback باید دوباره بررسی کند).
+ * مالک: مستثنی. ادمین: شیفت فعال همان کانال + عضویت در Batch فعلی.
+ */
+export async function checkReviewAccess(adminId, row) {
+  if (isOwner(adminId)) return { ok: true };
+  const keys = await activeShiftChannelKeys(adminId);
+  if (!keys.length) return { ok: false, code: 'shift_ended', text: '❌ شیفت شما تمام شده است.' };
+  if (!row || !keys.includes(row.channelKey)) {
+    return { ok: false, code: 'channel', text: '⛔ این پیام مربوط به کانال شیفت فعلی شما نیست.' };
+  }
+  const batch = await getReviewBatch(adminId);
+  if (!batch || !batch.ids.map(Number).includes(Number(row.id))) {
+    return { ok: false, code: 'not_in_batch', text: '⛔ این پیام در Batch فعلی شما نیست.' };
+  }
+  return { ok: true };
+}
+
+/**
+ * تأیید/رد idempotent با قفل per-message.
+ * decision: 'approve' | 'reject'
+ * فقط یک فراخوانی ok:true می‌گیرد؛ بقیه code='done' یا 'busy'.
+ */
+export async function decideMessage(adminId, id, decision, reason) {
+  id = Number(id);
+  const row = await getMessageById(id);
+  if (!row) return { ok: false, code: 'notfound', text: 'پیام پیدا نشد.' };
+  if (row.status !== 'pending') return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
+
+  const access = await checkReviewAccess(adminId, row);
+  if (!access.ok) return access;
+
+  const lockKey = 'review_msg_lock:' + id;
+  const lock = await acquireLock(lockKey);
+  if (!lock) return { ok: false, code: 'busy', text: '⏳ در حال پردازش…' };
+  try {
+    const fresh = await getMessageById(id);
+    if (!fresh || fresh.status !== 'pending') return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
+    const patch =
+      decision === 'approve'
+        ? { status: 'approved', reviewedBy: Number(adminId), reviewedAt: new Date() }
+        : {
+            status: 'rejected',
+            rejectReason: reason || 'نامناسب',
+            reviewedBy: Number(adminId),
+            reviewedAt: new Date(),
+          };
+    await db
+      .update(messages)
+      .set(patch)
+      .where(and(eq(messages.id, id), eq(messages.status, 'pending')))
+      .run();
+    return { ok: true, row: fresh };
+  } finally {
+    await releaseLock(lockKey, lock);
+  }
+}
+
+/**
+ * قدیمی: دیگر Push ندارد. پیام‌های Pending فقط با دکمه‌ی
+ * «📥 پیام‌های در انتظار» (Batch) دریافت می‌شوند.
+ * برای سازگاری export می‌شود و ارسال تلگرامی انجام نمی‌دهد.
+ */
+export async function notifyShiftAdmins(_channelKey, _text, _replyMarkup, _msgId) {
+  return [];
+}
+
+/** قدیمی: دیگر Push ندارد (compat) */
+export async function deliverPendingForAdmin(_adminId) {
+  return 0;
+}
+
+/** لیست Pending قابل‌بررسی (فقط خواندن؛ جدیدترین اول) — compat */
+export async function pendingForViewer(userId) {
+  try {
+    const all = await selectReviewablePending(userId);
+    return all.sort((a, b) => b.id - a.id);
   } catch (e) {
     console.error('pendingForViewer', e);
     return [];
