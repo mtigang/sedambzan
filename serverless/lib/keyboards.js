@@ -25,7 +25,6 @@ export function ownerKeyboard() {
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌ها' }],
       [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
-      [{ text: '📌 تخصیص شیفت روزانه' }, { text: '📌 تخصیص شیفت دائمی' }],
       [{ text: '➕ اختصاص شیفت' }],
       [{ text: '📬 پیام کاربران' }, { text: '🔍 جستجو' }],
       [{ text: '⚙️ تنظیمات' }],
@@ -175,8 +174,8 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts) {
     } else if (isMine) {
       rows.push([
         {
-          text: s.label + ' (شما)',
-          callback_data: 'shift_mine:' + channelKey + ':' + key,
+          text: s.label + ' (شما — لغو)',
+          callback_data: 'shift_cancel:' + channelKey + ':' + key,
           style: 'danger',
         },
       ]);
@@ -227,6 +226,17 @@ export function announceTargetInline() {
       [{ text: '👮 فقط ادمین‌ها', callback_data: 'ann_target:admins', style: 'primary' }],
       [{ text: '👥 همه کاربران', callback_data: 'ann_target:all', style: 'success' }],
       [{ text: 'لغو', callback_data: 'ann_cancel', style: 'danger' }],
+    ],
+  };
+}
+
+export function ownerShiftMenuInline() {
+  return {
+    inline_keyboard: [
+      [{ text: '📋 مشاهده شیفت‌های دوره', callback_data: 'own_shift_list', style: 'primary' }],
+      [{ text: '📅 تخصیص شیفت روزانه', callback_data: 'own_shift:daily', style: 'success' }],
+      [{ text: '♾️ تخصیص شیفت دائمی', callback_data: 'own_shift:perm', style: 'primary' }],
+      [{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }],
     ],
   };
 }
