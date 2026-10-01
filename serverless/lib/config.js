@@ -27,7 +27,7 @@ export const DEFAULT_CHANNELS = {
     prefixes: ['صدام بزن'],
     chatId: CHANNEL_IDS.sadambazan,
     adminGroupId: ADMIN_GROUP_IDS.sadambazan,
-    workStart: '15:00',
+    workStart: '12:00',
     workEnd: '03:00',
   },
   inkarbar: {
@@ -36,7 +36,7 @@ export const DEFAULT_CHANNELS = {
     prefixes: ['این کاربر'],
     chatId: CHANNEL_IDS.inkarbar,
     adminGroupId: ADMIN_GROUP_IDS.inkarbar,
-    workStart: '15:00',
+    workStart: '12:00',
     workEnd: '03:00',
   },
   zendegi: {
@@ -45,7 +45,7 @@ export const DEFAULT_CHANNELS = {
     prefixes: ['تو زندگی بعدی'],
     chatId: CHANNEL_IDS.zendegi,
     adminGroupId: ADMIN_GROUP_IDS.zendegi,
-    workStart: '15:00',
+    workStart: '12:00',
     workEnd: '03:00',
   },
 };
