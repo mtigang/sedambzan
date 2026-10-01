@@ -749,41 +749,8 @@ export async function decideMessage(adminId, id, decision, reason) {
  * برای سازگاری export می‌شود و ارسال تلگرامی انجام نمی‌دهد.
  */
 export async function notifyShiftAdmins(channelKey, text, replyMarkup, msgId) {
-  try {
-    // فقط ادمین‌هایی که همین لحظه شیفت فعال همین کانال را دارند.
-    // مالک جداگانه نوتیف نمی‌گیرد مگر خودش در لیست شیفت فعال باشد.
-    const raw = await activeShiftAdmins(channelKey);
-    const admins = [];
-    const seen = {};
-    for (const a of raw || []) {
-      const id = Number(a);
-      if (!id || seen[id]) continue;
-      seen[id] = true;
-      admins.push(id);
-    }
-    const sent = [];
-    for (const adminId of admins) {
-      try {
-        await api.sendMessage({
-          chat_id: adminId,
-          text: text,
-          reply_markup: replyMarkup,
-        });
-        if (msgId != null) {
-          try {
-            await settingSet('delivered:' + msgId + ':' + adminId, '1');
-          } catch (_e) {}
-        }
-        sent.push(adminId);
-      } catch (e) {
-        console.error('notifyActiveShiftAdmin', adminId, channelKey, msgId, e);
-      }
-    }
-    return sent;
-  } catch (e) {
-    console.error('notifyShiftAdmins', channelKey, msgId, e);
-    return [];
-  }
+  // عمداً خالی: پیام جدید فقط از طریق Batch (📥 پیام‌های در انتظار) می‌آید، نه Push لحظه‌ای.
+  return [];
 }
 
 /** قدیمی: دیگر Push ندارد (compat) */
