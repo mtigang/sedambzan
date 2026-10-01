@@ -96,15 +96,48 @@ export function confirmPostInline() {
   };
 }
 
-export function reviewInline(id) {
+export function reviewInline(id, showNextButton = false, batchNumber = null) {
+  const rows = [
+    [
+      { text: 'تأیید', callback_data: 'approve:' + id, style: 'success' },
+      { text: 'رد', callback_data: 'reject_menu:' + id, style: 'danger' },
+    ],
+  ];
+  if (showNextButton) {
+    rows.push([
+      {
+        text: '▶️ دریافت ۱۰ پیام بعدی',
+        callback_data: batchNumber != null ? 'review_next:' + batchNumber : 'review_next',
+        style: 'primary',
+      },
+    ]);
+  }
+  return { inline_keyboard: rows };
+}
+
+/** فقط دکمه‌ی «Batch بعدی» (بعد از کامل شدن Batch) */
+export function reviewNextInline(batchNumber) {
   return {
     inline_keyboard: [
       [
-        { text: 'تأیید', callback_data: 'approve:' + id, style: 'success' },
-        { text: 'رد', callback_data: 'reject_menu:' + id, style: 'danger' },
+        {
+          text: '▶️ دریافت ۱۰ پیام بعدی',
+          callback_data: batchNumber != null ? 'review_next:' + batchNumber : 'review_next',
+          style: 'primary',
+        },
       ],
     ],
   };
+}
+
+/** وقتی صف تمام شده */
+export function reviewDoneInline() {
+  return { inline_keyboard: [[{ text: '✅ صف تمام شد', callback_data: 'review_noop', style: 'success' }]] };
+}
+
+/** بعد از گرفتن Batch جدید، دکمه‌ی قبلی بی‌اثر می‌شود */
+export function reviewTakenInline() {
+  return { inline_keyboard: [[{ text: '✅ Batch بعدی دریافت شد', callback_data: 'review_noop', style: 'success' }]] };
 }
 
 export function rejectReasonsInline(id) {
