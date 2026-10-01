@@ -174,6 +174,14 @@ export default async function (message) {
         await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
         return;
       }
+      if (!owner && !isWorkHours()) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '⏰ ساعت کاری از ۱۵:۰۰ تا ۰۳:۰۰ (به وقت تهران) است.\nالان خارج از ساعت کاری هستید.',
+          reply_markup: await roleKb(userId),
+        });
+        return;
+      }
       await setState(userId, 'user_send');
       await api.sendMessage({
         chat_id: chatId,
@@ -267,6 +275,14 @@ export default async function (message) {
 
     if (state?.kind === 'user_send' && text) {
       try {
+        if (!owner && !isWorkHours()) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '⏰ خارج از ساعت کاری (۱۵:۰۰ تا ۰۳:۰۰ تهران).',
+            reply_markup: backKeyboard(),
+          });
+          return;
+        }
         if (!(await isBotOn())) {
           await clearState(userId);
           await api.sendMessage({
