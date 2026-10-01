@@ -7,7 +7,7 @@ import {
   CHANNEL_IDS,
   ADMIN_GROUP_IDS,
 } from 'lib/config';
-import { tehranNow, inRange, periodDateStr } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf } from 'lib/time';
 import { reviewInline } from 'lib/keyboards';
 
 export async function ensureChannelsSeeded() {
@@ -356,11 +356,14 @@ function reviewBatchKey(adminId) {
 /** آیا این رکورد shift همین الان (تهران) فعال است؟ */
 function shiftActiveNow(s, now, pdate) {
   if (!s || s.status !== 'active') return false;
+  const start = String(s.startHm || '');
+  const end = String(s.endHm || '');
+  if (!start || !end || start === end) return false;
   if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
-    return inRange(now.hm, s.startHm, s.endHm);
+    return inRange(now.hm, start, end);
   }
   if (s.shiftDate !== pdate && s.shiftDate !== now.date) return false;
-  return inRange(now.hm, s.startHm, s.endHm);
+  return inRange(now.hm, start, end);
 }
 
 /** کلید کانال‌هایی که ادمین همین الان برایشان شیفت فعال دارد */
@@ -610,7 +613,25 @@ export async function createReviewBatch(adminId) {
           }
         }
       }
-      if (pendingRows.length) return { status: 'incomplete', batch: old, messages: pendingRows };
+      if (pendingRows.length) {
+        if (!owner) {
+          keys = await activeShiftChannelKeys(adminId);
+          if (!keys.length) {
+            await clearReviewBatch(adminId);
+            return { status: 'no_shift' };
+          }
+          pendingRows = pendingRows.filter((r) => keys.includes(r.channelKey));
+          if (!pendingRows.length) {
+            await clearReviewBatch(adminId);
+          } else {
+            old.ids = pendingRows.map((r) => r.id);
+            await saveReviewBatch(adminId, old);
+            return { status: 'incomplete', batch: old, messages: pendingRows };
+          }
+        } else {
+          return { status: 'incomplete', batch: old, messages: pendingRows };
+        }
+      }
     }
 
     const candidates = (await selectReviewablePending(adminId)).slice(0, REVIEW_BATCH_SIZE);
