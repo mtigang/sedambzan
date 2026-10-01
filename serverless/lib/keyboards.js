@@ -95,14 +95,48 @@ export function confirmPostInline() {
   };
 }
 
-export function reviewInline(id) {
+export function reviewInline(id, showNext, batchNumber) {
+  const rows = [
+    [
+      { text: 'تأیید', callback_data: 'approve:' + id, style: 'success' },
+      { text: 'رد', callback_data: 'reject_menu:' + id, style: 'danger' },
+    ],
+  ];
+  if (showNext) {
+    rows.push([
+      {
+        text: '📥 Batch بعدی' + (batchNumber != null ? ' (' + batchNumber + ')' : ''),
+        callback_data: 'review_next' + (batchNumber != null ? ':' + batchNumber : ''),
+        style: 'primary',
+      },
+    ]);
+  }
+  return { inline_keyboard: rows };
+}
+
+export function reviewNextInline(batchNumber) {
   return {
     inline_keyboard: [
       [
-        { text: 'تأیید', callback_data: 'approve:' + id, style: 'success' },
-        { text: 'رد', callback_data: 'reject_menu:' + id, style: 'danger' },
+        {
+          text: '📥 دریافت Batch بعدی' + (batchNumber != null ? ' (' + batchNumber + ')' : ''),
+          callback_data: 'review_next' + (batchNumber != null ? ':' + batchNumber : ''),
+          style: 'success',
+        },
       ],
     ],
+  };
+}
+
+export function reviewDoneInline() {
+  return {
+    inline_keyboard: [[{ text: '✅ صف خالی شد', callback_data: 'review_done', style: 'primary' }]],
+  };
+}
+
+export function reviewTakenInline() {
+  return {
+    inline_keyboard: [[{ text: '📥 ارسال شد', callback_data: 'review_taken', style: 'primary' }]],
   };
 }
 
