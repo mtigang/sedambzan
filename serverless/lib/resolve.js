@@ -9,7 +9,7 @@ export async function resolveUserId(input) {
   if (!uname) return null;
   try {
     const chat = await api.getChat({ chat_id: '@' + uname });
-    return chat?.id || null;
+    return chat && chat.id ? chat.id : null;
   } catch (e) {
     console.error('resolveUserId', e);
     return null;
@@ -22,5 +22,11 @@ export function channelMessageLink(chatId, messageId, channelKey) {
   if (uname) return 'https://t.me/' + uname + '/' + messageId;
   const s = String(chatId || '');
   if (s.startsWith('-100')) return 'https://t.me/c/' + s.slice(4) + '/' + messageId;
+  return null;
+}
+
+export function channelPublicBase(channelKey) {
+  const uname = CHANNEL_USERNAMES && CHANNEL_USERNAMES[channelKey];
+  if (uname) return 'https://t.me/' + uname + '/';
   return null;
 }
