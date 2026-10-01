@@ -237,3 +237,15 @@ export function ownerShiftMenuInline() {
     ],
   };
 }
+
+export function announceProgressInline(done) {
+  if (done) {
+    return { inline_keyboard: [[{ text: '✅ تمام شد', callback_data: 'ann_noop', style: 'success' }]] };
+  }
+  return {
+    inline_keyboard: [
+      [{ text: '▶️ ادامه ارسال', callback_data: 'ann_continue', style: 'success' }],
+      [{ text: '⏹ توقف', callback_data: 'ann_stop', style: 'danger' }],
+    ],
+  };
+}
