@@ -165,7 +165,7 @@ export async function getUser(id) {
 }
 
 export function displayName(u, id) {
-  if (!u) return String(id);
+  if (!u || Number(u.started) !== 1) return String(id);
   const n = [u.firstName, u.lastName].filter(Boolean).join(' ');
   if (n) return n;
   if (u.username) return '@' + u.username;
@@ -364,6 +364,41 @@ function shiftActiveNow(s, now, pdate) {
 }
 
 /** کلید کانال‌هایی که ادمین همین الان برایشان شیفت فعال دارد */
+export function shiftIntervalOverlaps(startHm, endHm, otherStartHm, otherEndHm) {
+  const toOrd = (hm) => {
+    const parts = String(hm || '0:0').split(':').map(Number);
+    let m = (parts[0] || 0) * 60 + (parts[1] || 0);
+    if (m < 12 * 60) m += 24 * 60;
+    return m;
+  };
+  const s1 = toOrd(startHm);
+  let e1 = toOrd(endHm);
+  const s2 = toOrd(otherStartHm);
+  let e2 = toOrd(otherEndHm);
+  if (e1 <= s1) e1 += 24 * 60;
+  if (e2 <= s2) e2 += 24 * 60;
+  return s1 < e2 && s2 < e1;
+}
+
+export async function findAdminShiftConflict(adminId, shiftDate, startHm, endHm, excludeId = null) {
+  try {
+    const rows = (await db.select().from(shifts).where(
+      and(eq(shifts.adminId, Number(adminId)), eq(shifts.status, 'active'))
+    ).all()) || [];
+    const newPermanent = shiftDate === 'perm' || shiftDate === 'permanent';
+    return rows.find((s) => {
+      if (excludeId != null && Number(s.id) === Number(excludeId)) return false;
+      const oldPermanent = s.shiftDate === 'perm' || s.shiftDate === 'permanent';
+      const samePeriod = newPermanent || oldPermanent || String(s.shiftDate) === String(shiftDate);
+      if (!samePeriod) return false;
+      return shiftIntervalOverlaps(startHm, endHm, s.startHm, s.endHm);
+    }) || null;
+  } catch (e) {
+    console.error('findAdminShiftConflict', e);
+    return null;
+  }
+}
+
 export async function activeShiftChannelKeys(adminId) {
   try {
     const now = tehranNow();
@@ -609,6 +644,7 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
   for (const row of rows) {
     try {
       const ch = await getChannel(row.channelKey);
+      const sender = await getUser(row.userId);
       await api.sendMessage({
         chat_id: chatId,
         text:
@@ -616,8 +652,8 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
           row.id +
           ' | ' +
           ((ch && ch.title) || row.channelKey) +
-          ' | user:' +
-          row.userId +
+          ' | کاربر: ' +
+          displayName(sender, row.userId) +
           '\n\n' +
           String(row.content || '').slice(0, 3800),
         reply_markup: reviewInline(row.id, Number(row.id) === lastId, batch.batchNumber),
@@ -691,8 +727,27 @@ export async function decideMessage(adminId, id, decision, reason) {
  * «📥 پیام‌های در انتظار» (Batch) دریافت می‌شوند.
  * برای سازگاری export می‌شود و ارسال تلگرامی انجام نمی‌دهد.
  */
-export async function notifyShiftAdmins(_channelKey, _text, _replyMarkup, _msgId) {
-  return [];
+export async function notifyShiftAdmins(channelKey, text, replyMarkup, msgId) {
+  try {
+    const admins = await listAdminsByChannel(channelKey);
+    const sent = [];
+    for (const admin of admins) {
+      try {
+        await api.sendMessage({
+          chat_id: admin.userId,
+          text,
+          reply_markup: replyMarkup,
+        });
+        sent.push(Number(admin.userId));
+      } catch (e) {
+        console.error('notifyChannelAdmin', admin.userId, channelKey, e);
+      }
+    }
+    return sent;
+  } catch (e) {
+    console.error('notifyShiftAdmins', channelKey, msgId, e);
+    return [];
+  }
 }
 
 /** قدیمی: دیگر Push ندارد (compat) */
