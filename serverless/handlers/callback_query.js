@@ -30,6 +30,7 @@ import { channelMessageLink } from 'lib/resolve';
 import {
   rejectReasonsInline,
   reviewInline,
+  ownerReviewInline,
   adminListInline,
   userOpenInline,
   shiftSlotsInline,
@@ -141,44 +142,80 @@ export default async function (cq) {
 
     if (data.startsWith('approve:')) {
       const id = Number(data.split(':')[1]);
-      // pending بودن + شیفت فعال همان کانال + عضویت در Batch + قفل (idempotent)
-      const dec = await decideMessage(userId, id, 'approve');
-      if (!dec.ok) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: dec.text, show_alert: true });
+      const rows0 = await db.select().from(messages).where(eq(messages.id, id)).all();
+      const pendingRow = rows0 && rows0[0];
+      if (!pendingRow || pendingRow.status !== 'pending') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'قبلاً بررسی شده', show_alert: true });
         return;
       }
-      const row = dec.row;
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'تأیید شد' });
-      const fin = await finishReviewBatchIfComplete(userId, id);
-      await editReviewResult(cq, '🟢 تأیید #' + id + ' توسط ' + userId, fin);
+      const acc = await checkReviewAccess(userId, pendingRow);
+      if (!acc.ok) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: acc.text, show_alert: true });
+        return;
+      }
 
+      // ۱) اول انتشار در کانال — اگر شکست، pending می‌ماند
+      const conf = DEFAULT_CHANNELS[pendingRow.channelKey];
+      if (!conf || !conf.chatId) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'کانال پیکربندی نشده',
+          show_alert: true,
+        });
+        return;
+      }
       let link = null;
+      let mid = null;
       try {
-        const conf = DEFAULT_CHANNELS[row.channelKey];
-        if (conf?.chatId) {
-          const sent = await api.sendMessage({ chat_id: conf.chatId, text: toBoldHtml(row.content), parse_mode: 'HTML' });
-          const mid = sent && sent.message_id;
-          link = channelMessageLink(conf.chatId, mid, row.channelKey);
-          try {
-            if (mid) await settingSet('chmsg:' + row.channelKey + ':' + mid, String(id));
-          } catch (_e) {}
-        }
+        const sent = await api.sendMessage({
+          chat_id: conf.chatId,
+          text: toBoldHtml(pendingRow.content),
+          parse_mode: 'HTML',
+        });
+        mid = sent && sent.message_id;
+        if (!mid) throw new Error('message_id خالی');
+        link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
+        try {
+          await settingSet('chmsg:' + pendingRow.channelKey + ':' + mid, String(id));
+        } catch (_e) {}
       } catch (e) {
-        console.error('publish', e);
+        console.error('publish first', e);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'ارسال به کانال ناموفق — تأیید نشد',
+          show_alert: true,
+        });
         try {
           await api.sendMessage({
             chat_id: userId,
-            text: '⚠️ تأیید شد ولی ارسال کانال ناموفق: ' + (e?.description || e),
+            text:
+              '⚠️ پیام #' +
+              id +
+              ' تأیید نشد چون در کانال منتشر نشد.\n' +
+              (e && (e.description || e.message) ? e.description || e.message : String(e)),
           });
-        } catch (_) {}
+        } catch (_e) {}
+        return;
       }
+
+      // ۲) بعد از انتشار موفق → وضعیت approved
+      const dec = await decideMessage(userId, id, 'approve');
+      if (!dec.ok) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'منتشر شد ولی ثبت وضعیت: ' + (dec.text || 'خطا'),
+          show_alert: true,
+        });
+        return;
+      }
+      const row = dec.row || pendingRow;
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'تأیید و منتشر شد' });
+      const fin = await finishReviewBatchIfComplete(userId, id);
+      await editReviewResult(cq, '🟢 تأیید و منتشر شد #' + id, fin);
       try {
-        const conf2 = DEFAULT_CHANNELS[row.channelKey];
-        const title = (conf2 && conf2.title) || row.channelKey;
+        const title = conf.title || row.channelKey;
         let txt = '✅ پیام شما تأیید و منتشر شد.';
-        if (link) {
-          txt += '\n\nمشاهده در کانال «' + title + '»:\n' + link;
-        }
+        if (link) txt += '\n\nمشاهده در کانال «' + title + '»:\n' + link;
         await api.sendMessage({
           chat_id: row.userId,
           text: txt,
@@ -188,7 +225,41 @@ export default async function (cq) {
       return;
     }
 
-    if (data.startsWith('reject_menu:')) {
+    
+    if (data.startsWith('reject_direct:')) {
+      const id = Number(data.split(':')[1]);
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const dec = await decideMessage(userId, id, 'reject', 'رد مالک');
+      if (!dec.ok) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: dec.text, show_alert: true });
+        return;
+      }
+      const row = dec.row;
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'رد شد' });
+      try {
+        await api.editMessageReplyMarkup({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          reply_markup: { inline_keyboard: [] },
+        });
+      } catch (_e) {}
+      try {
+        await api.sendMessage({
+          chat_id: row.userId,
+          text: '🔴 پیام #' + id + ' رد شد.',
+        });
+      } catch (_e) {}
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '🔴 #' + id + ' رد شد.',
+      });
+      return;
+    }
+
+if (data.startsWith('reject_menu:')) {
       const id = Number(data.split(':')[1]);
       const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
       const row = rows?.[0];
