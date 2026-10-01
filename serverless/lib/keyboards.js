@@ -25,6 +25,8 @@ export function ownerKeyboard() {
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌ها' }],
       [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
+      [{ text: '📌 تخصیص شیفت روزانه' }, { text: '📌 تخصیص شیفت دائمی' }],
+      [{ text: '➕ اختصاص شیفت' }],
       [{ text: '📬 پیام کاربران' }, { text: '🔍 جستجو' }],
       [{ text: '⚙️ تنظیمات' }],
     ],
@@ -145,21 +147,37 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts) {
   const slots = buildShiftSlots();
   const rows = [];
   for (const s of slots) {
-    const takenBy = takenMap[s.start];
-    if (takenBy && !(myStarts && myStarts.has(s.start))) {
+    const key = s.hourKey || s.start;
+    // takenMap may use hourKey or startHm
+    let takenBy = takenMap[key] || takenMap[s.start];
+    if (!takenBy) {
+      // match any taken start in same hour bucket
+      for (const [k, v] of Object.entries(takenMap || {})) {
+        if (String(k).slice(0, 2) === String(key).slice(0, 2)) {
+          takenBy = v;
+          break;
+        }
+      }
+    }
+    const isMine =
+      myStarts &&
+      (myStarts.has(s.start) ||
+        myStarts.has(key) ||
+        [...myStarts].some((x) => String(x).slice(0, 2) === String(key).slice(0, 2)));
+    if (takenBy && !isMine) {
       rows.push([
         {
           text: s.label + ' (پر)',
-          callback_data: 'shift_full:' + channelKey + ':' + s.start,
+          callback_data: 'shift_full:' + channelKey + ':' + key,
           style: 'danger',
         },
       ]);
-    } else if (myStarts && myStarts.has(s.start)) {
+    } else if (isMine) {
       rows.push([
         {
           text: s.label + ' (شما)',
-          callback_data: 'shift_mine:' + channelKey + ':' + s.start,
-          style: 'primary',
+          callback_data: 'shift_mine:' + channelKey + ':' + key,
+          style: 'danger',
         },
       ]);
     } else {
