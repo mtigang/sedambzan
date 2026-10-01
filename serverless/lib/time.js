@@ -211,33 +211,61 @@ export function toJalaliDisplay(isoDate, hm) {
 
 /** timestamp unix یا Date → شمسی تهران */
 export function formatTsJalali(ts) {
-  if (!ts) {
-    const n = tehranNow();
-    return toJalaliDisplay(n.date, n.hm);
-  }
-  let d;
-  if (ts instanceof Date) d = ts;
-  else if (typeof ts === 'number') d = new Date(ts > 1e12 ? ts : ts * 1000);
-  else if (typeof ts === 'string' && /^\d+$/.test(ts)) {
-    const n = Number(ts);
-    d = new Date(n > 1e12 ? n : n * 1000);
+  if (ts == null || ts === '') return '—';
+  let ms = NaN;
+  if (ts instanceof Date) {
+    ms = ts.getTime();
+  } else if (typeof ts === 'number') {
+    ms = ts > 1e12 ? ts : ts * 1000;
+  } else if (typeof ts === 'string' && /^\d+$/.test(ts.trim())) {
+    const n = Number(ts.trim());
+    ms = n > 1e12 ? n : n * 1000;
   } else {
-    d = new Date(ts);
+    const d = new Date(ts);
+    ms = d.getTime();
   }
-  if (isNaN(d.getTime())) return '—';
-  const fmt = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Tehran',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
-  const parts = Object.fromEntries(fmt.formatToParts(d).map((p) => [p.type, p.value]));
-  const date = parts.year + '-' + parts.month + '-' + parts.day;
-  const hm = parts.hour + ':' + parts.minute;
-  return toJalaliDisplay(date, hm);
+  if (!Number.isFinite(ms) || ms <= 0) return '—';
+  // ثانیه یونیکس (~1.7e9) را به میلی‌ثانیه تبدیل کن
+  if (ms >= 1e9 && ms < 1e12) {
+    ms = ms * 1000;
+  }
+  // ایران بدون DST: UTC+3:30
+  const IRAN_OFFSET = 3.5 * 3600 * 1000;
+  const adj = new Date(ms + IRAN_OFFSET);
+  const y = adj.getUTCFullYear();
+  const mo = adj.getUTCMonth() + 1;
+  const da = adj.getUTCDate();
+  const hh = adj.getUTCHours();
+  const mi = adj.getUTCMinutes();
+  const pad = function (n) {
+    return String(n).padStart(2, '0');
+  };
+  return toJalaliDisplay(y + '-' + pad(mo) + '-' + da, pad(hh) + ':' + pad(mi));
+}
+
+/** ۲۴ شیفت یک‌ساعته از همین الان — برای تخصیص مالک (بدون محدودیت دوره) */
+export function buildOwnerShiftSlots(now) {
+  if (!now) now = tehranNow();
+  const slots = [];
+  const pad = function (n) {
+    return String(n).padStart(2, '0');
+  };
+  for (let i = 0; i < 24; i++) {
+    const startH = (now.hour + i) % 24;
+    const endH = (startH + 1) % 24;
+    let start = pad(startH) + ':00';
+    const end = pad(endH) + ':00';
+    if (i === 0 && now.minute > 0) {
+      start = pad(now.hour) + ':' + pad(now.minute);
+    }
+    slots.push({
+      start: start,
+      end: end,
+      label: start + '–' + end,
+      hourKey: pad(startH) + ':00',
+    });
+  }
+  return slots;
 }
 
 export { formatTsJalali as formatTehranJalali };
