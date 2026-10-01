@@ -677,7 +677,7 @@ export default async function (message) {
               '\n';
           }
         }
-        t += '\nاز دکمه‌های زیر شیفت بده (مالک: هر ساعتی، ۲۴ ساعت آینده):';
+        t += '\nاز دکمه‌های زیر:\n• تخصیص روزانه/دائمی\n• لیست و لغو تک‌تک\n• لغو همه شیفت‌های دوره';
         await api.sendMessage({
           chat_id: chatId,
           text: t,
