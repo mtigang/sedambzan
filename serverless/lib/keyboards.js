@@ -173,8 +173,8 @@ export function userOpenInline(userId) {
   };
 }
 
-/** takenMap: startHm -> adminId ; myStarts: Set */
-export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride) {
+/** takenMap: startHm -> adminId ; myStarts: Set ; ownerMode: مالک بتواند شیفت دیگران را لغو کند */
+export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, ownerMode) {
   const slots = slotsOverride && slotsOverride.length ? slotsOverride : buildShiftSlots();
   const rows = [];
   function bucket(hm) {
@@ -182,9 +182,10 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride) 
     const h = Number(parts[0]) || 0;
     return String(h).padStart(2, '0') + ':00';
   }
-  // normalize takenMap to hour buckets
   const takenNorm = {};
   for (const [k, v] of Object.entries(takenMap || {})) {
+    // skip invalid zero-length markers
+    if (!k) continue;
     takenNorm[bucket(k)] = v;
   }
   const myNorm = new Set();
@@ -196,13 +197,23 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride) 
     const takenBy = takenNorm[key];
     const isMine = myNorm.has(key);
     if (takenBy && !isMine) {
-      rows.push([
-        {
-          text: s.label + ' (پر)',
-          callback_data: 'shift_full:' + channelKey + ':' + key,
-          style: 'danger',
-        },
-      ]);
+      if (ownerMode) {
+        rows.push([
+          {
+            text: s.label + ' (پر — لغو مالک)',
+            callback_data: 'shift_ocancel:' + channelKey + ':' + key,
+            style: 'danger',
+          },
+        ]);
+      } else {
+        rows.push([
+          {
+            text: s.label + ' (پر)',
+            callback_data: 'shift_full:' + channelKey + ':' + key,
+            style: 'danger',
+          },
+        ]);
+      }
     } else if (isMine) {
       rows.push([
         {
@@ -220,6 +231,15 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride) 
         },
       ]);
     }
+  }
+  if (ownerMode) {
+    rows.push([
+      {
+        text: '🗑 لغو همه شیفت‌های این کانال (امروز)',
+        callback_data: 'shift_oclear:' + channelKey,
+        style: 'danger',
+      },
+    ]);
   }
   rows.push([{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }]);
   return { inline_keyboard: rows };
