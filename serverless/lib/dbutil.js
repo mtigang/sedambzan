@@ -11,8 +11,7 @@ import { tehranNow, inRange, periodDateStr } from 'lib/time';
 
 export async function ensureChannelsSeeded() {
   try {
-    const rows = await db.select().from(channels).all();
-    if (rows && rows.length >= 3) return rows;
+    // همیشه از DEFAULT_CHANNELS همگام کن (ساعت کاری ۱۲:۰۰–۰۳:۰۰)
     for (const c of Object.values(DEFAULT_CHANNELS)) {
       try {
         const exist = await db.select().from(channels).where(eq(channels.key, c.key)).all();
@@ -23,8 +22,8 @@ export async function ensureChannelsSeeded() {
               title: c.title,
               link: String(c.chatId),
               enabled: 1,
-              workStart: c.workStart,
-              workEnd: c.workEnd,
+              workStart: c.workStart || '12:00',
+              workEnd: c.workEnd || '03:00',
             })
             .where(eq(channels.key, c.key))
             .run();
@@ -36,8 +35,8 @@ export async function ensureChannelsSeeded() {
               title: c.title,
               link: String(c.chatId),
               enabled: 1,
-              workStart: c.workStart,
-              workEnd: c.workEnd,
+              workStart: c.workStart || '12:00',
+              workEnd: c.workEnd || '03:00',
             })
             .run();
         }
@@ -53,8 +52,8 @@ export async function ensureChannelsSeeded() {
       title: c.title,
       link: String(c.chatId),
       enabled: 1,
-      workStart: c.workStart,
-      workEnd: c.workEnd,
+      workStart: c.workStart || '12:00',
+      workEnd: c.workEnd || '03:00',
     }));
   }
 }
