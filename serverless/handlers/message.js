@@ -27,6 +27,7 @@ import {
   adminListInline,
   announceTargetInline,
   ownerShiftMenuInline,
+  reviewNextInline,
 } from 'lib/keyboards';
 import { validateAndFix, normalizeBody } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
@@ -48,8 +49,10 @@ import {
   syncAdminsFromGroup,
   syncAllAdminGroups,
   notifyShiftAdmins,
-  deliverPendingForAdmin,
-  pendingForViewer,
+  createReviewBatch,
+  sendReviewBatch,
+  decideMessage,
+  finishReviewBatchIfComplete,
   testChannels,
   displayName,
   settingGet,
@@ -118,20 +121,7 @@ export default async function (message) {
     const owner = isOwner(userId);
     const role = await getRole(userId);
 
-    // تحویل صف به ادمین در شیفت
-    if (role === 'admin' || owner) {
-      try {
-        const n = await deliverPendingForAdmin(userId);
-        if (n > 0) {
-          await api.sendMessage({
-            chat_id: chatId,
-            text: '📥 ' + n + ' پیام در انتظار برای شیفت فعلی‌تان ارسال شد.',
-          });
-        }
-      } catch (e) {
-        console.error('deliver on interact', e);
-      }
-    }
+    // تحویل خودکار Pending حذف شد: فقط با دکمه «📥 پیام‌های در انتظار» (Batch)
 
     let state = null;
     try {
@@ -392,23 +382,19 @@ export default async function (message) {
 
     if ((role === 'admin' || owner) && state?.kind === 'reject_custom' && text) {
       const reason = String(text).trim().slice(0, 22);
-      const msgId = state.msgId;
+      const msgId = Number(state.msgId);
       await clearState(userId);
       if (!msgId) {
         await api.sendMessage({ chat_id: chatId, text: 'خطا', reply_markup: await roleKb(userId) });
         return;
       }
-      const rows = await db.select().from(messages).where(eq(messages.id, msgId)).all();
-      const row = rows && rows[0];
-      if (!row || row.status !== 'pending') {
-        await api.sendMessage({ chat_id: chatId, text: 'قبلاً بررسی شده', reply_markup: await roleKb(userId) });
+      // شیفت + کانال + عضویت در Batch + pending بودن دوباره از DB بررسی می‌شود
+      const dec = await decideMessage(userId, msgId, 'reject', reason);
+      if (!dec.ok) {
+        await api.sendMessage({ chat_id: chatId, text: dec.text, reply_markup: await roleKb(userId) });
         return;
       }
-      await db
-        .update(messages)
-        .set({ status: 'rejected', rejectReason: reason, reviewedBy: userId, reviewedAt: new Date() })
-        .where(eq(messages.id, msgId))
-        .run();
+      const row = dec.row;
       try {
         await api.sendMessage({
           chat_id: row.userId,
@@ -420,76 +406,56 @@ export default async function (message) {
         text: 'رد شد #' + msgId + ' — ' + reason,
         reply_markup: await roleKb(userId),
       });
+      const fin = await finishReviewBatchIfComplete(userId, msgId);
+      if (fin.inBatch && fin.complete) {
+        if (fin.hasMore) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '✅ همه‌ی پیام‌های Batch شماره ' + fin.batch.batchNumber + ' بررسی شدند.',
+            reply_markup: reviewNextInline(fin.batch.batchNumber),
+          });
+        } else {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '📭 پیام Pending دیگری برای شیفت شما وجود ندارد.',
+          });
+        }
+      }
       return;
     }
 
     if ((role === 'admin' || owner) && text === '📥 پیام‌های در انتظار') {
-      if (!owner) {
-        const now = tehranNow();
-        const pdate = periodDateStr(now);
-        const mySh =
-          (await db
-            .select()
-            .from(shifts)
-            .where(and(eq(shifts.adminId, userId), eq(shifts.status, 'active')))
-            .all()) || [];
-        const activeNow = mySh.filter((s) => {
-          if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
-            return inRange(now.hm, s.startHm, s.endHm);
-          }
-          if (s.shiftDate !== pdate) return false;
-          return inRange(now.hm, s.startHm, s.endHm);
-        });
-        if (!activeNow.length) {
-          const upcoming = mySh
-            .filter((s) => s.shiftDate === pdate || s.shiftDate === 'perm' || s.shiftDate === 'permanent')
-            .map(
-              (s) =>
-                (DEFAULT_CHANNELS[s.channelKey]?.title || s.channelKey) +
-                ' ' +
-                s.startHm +
-                '–' +
-                s.endHm +
-                (s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' (دائم)' : '')
-            )
-            .join('\n');
-          await api.sendMessage({
-            chat_id: chatId,
-            text:
-              '⏰ الان داخل بازه شیفت فعال نیستید.\n' +
-              (upcoming ? 'شیفت‌های دوره شما:\n' + upcoming : 'شیفتی برای این دوره ثبت نشده.') +
-              '\n\nدوره: ۱۲ ظهر تا ۳ صبح\nوقتی ساعت شیفت برسد صف خودکار می‌آید.',
-            reply_markup: await roleKb(userId),
-          });
-          return;
-        }
-      }
-      const list = (await pendingForViewer(userId)).slice(0, 40);
-      if (!list.length) {
+      // تنها مسیر دریافت Pending: ساخت/بازیابی Batch ده‌تایی (شیفت داخل createReviewBatch چک می‌شود)
+      const res = await createReviewBatch(userId);
+      if (res.status === 'no_shift') {
         await api.sendMessage({
           chat_id: chatId,
-          text: 'صف خالی است.',
+          text: '⏰ در حال حاضر شیفت فعال ندارید.',
           reply_markup: await roleKb(userId),
         });
         return;
       }
-      await api.sendMessage({ chat_id: chatId, text: '📥 ' + list.length + ' پیام در صف' });
-      for (const row of list) {
-        const ch = await getChannel(row.channelKey);
+      if (res.status === 'busy') {
         await api.sendMessage({
           chat_id: chatId,
-          text:
-            '#' +
-            row.id +
-            ' | ' +
-            (ch?.title || row.channelKey) +
-            ' | user:' +
-            row.userId +
-            '\n\n' +
-            row.content,
-          reply_markup: reviewInline(row.id),
+          text: '⏳ درخواست قبلی شما در حال پردازش است. چند ثانیه بعد دوباره تلاش کنید.',
+          reply_markup: await roleKb(userId),
         });
+        return;
       }
+      if (res.status === 'empty') {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '📭 در حال حاضر پیام در انتظاری وجود ندارد.',
+          reply_markup: await roleKb(userId),
+        });
+        return;
+      }
+      if (res.status === 'incomplete') {
+        await sendReviewBatch(chatId, res.batch, res.messages, { resumed: true });
+        return;
+      }
+      await sendReviewBatch(chatId, res.batch, res.messages, { resumed: false });
       return;
     }
 
