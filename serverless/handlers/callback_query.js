@@ -17,7 +17,7 @@ import {
   addChannelAdmin,
 } from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow, inRange } from 'lib/time';
+import { tehranNow, inRange, periodDateStr } from 'lib/time';
 import { DEFAULT_CHANNELS } from 'lib/config';
 import { channelMessageLink } from 'lib/resolve';
 import {
@@ -79,14 +79,17 @@ export default async function (cq) {
     // ادمین فقط در شیفت بتواند تأیید/رد کند (مالک همیشه)
     async function assertCanReview() {
       if (isOwner(userId)) return true;
-      const { date, hm } = tehranNow();
-      const mySh =
-        (await db
-          .select()
-          .from(shifts)
-          .where(and(eq(shifts.adminId, userId), eq(shifts.shiftDate, date), eq(shifts.status, 'active')))
-          .all()) || [];
-      return mySh.some((s) => inRange(hm, s.startHm, s.endHm));
+      const now = tehranNow();
+      const period = periodDateStr(now);
+      const mySh = (await db.select().from(shifts).where(eq(shifts.adminId, userId)).all()) || [];
+      return mySh.some((s) => {
+        if (s.status !== 'active') return false;
+        if (s.shiftDate === 'permanent' || s.shiftDate === 'perm') {
+          return inRange(now.hm, s.startHm, s.endHm);
+        }
+        if (s.shiftDate !== period && s.shiftDate !== now.date) return false;
+        return inRange(now.hm, s.startHm, s.endHm);
+      });
     }
 
     
@@ -102,17 +105,17 @@ export default async function (cq) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text:
-          '👤 کاربر\n' +
-          'نام: ' + name + '\n' +
-          'یوزرنیم: ' + un + '\n' +
-          'آیدی: `' + uid + '`\n' +
-          '(به‌خاطر حریم خصوصی تلگرام لینک مستقیم پیوی ممکن نیست)',
-        parse_mode: 'Markdown',
+          '👤 ' +
+          name +
+          '\nیوزرنیم: ' +
+          un +
+          '\nآیدی: ' +
+          uid,
       });
       return;
     }
 
-if (data.startsWith('approve:')) {
+    if (data.startsWith('approve:')) {
       if (!(await assertCanReview())) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
@@ -552,29 +555,72 @@ if (data.startsWith('reject:')) {
       return;
     }
 
-if (data.startsWith('shift_pick:')) {
+    if (data.startsWith('shift_pick:')) {
       const parts = data.split(':');
       const channelKey = parts[1];
       const startHm = parts[2];
       const endHm = parts[3];
-      const { date } = tehranNow();
+      const now = tehranNow();
+      const pdate = periodDateStr(now);
+      const stAssign = await getState(userId);
+      if (stAssign && stAssign.kind === 'own_assign_slot') {
+        const targetAdmin = stAssign.adminId;
+        const mode = stAssign.mode;
+        const shiftDate = mode === 'perm' ? 'perm' : pdate;
+        await clearState(userId);
+        await db
+          .insert(shifts)
+          .values({
+            channelKey,
+            adminId: targetAdmin,
+            shiftDate,
+            startHm,
+            endHm,
+            status: 'active',
+          })
+          .run();
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'تخصیص شد' });
+        await api.sendMessage({
+          chat_id: userId,
+          text:
+            '✅ شیفت ' +
+            startHm +
+            '–' +
+            endHm +
+            ' برای ادمین ' +
+            targetAdmin +
+            ' (' +
+            (mode === 'perm' ? 'دائمی' : 'روزانه') +
+            ') ثبت شد.',
+        });
+        try {
+          await api.sendMessage({
+            chat_id: targetAdmin,
+            text:
+              '📌 شیفت جدید برای شما ثبت شد:\n' +
+              (DEFAULT_CHANNELS[channelKey]?.title || channelKey) +
+              ' ' +
+              startHm +
+              '–' +
+              endHm +
+              (mode === 'perm' ? ' (دائمی)' : ''),
+          });
+        } catch (_) {}
+        return;
+      }
+
 
       const mine =
         (await db
           .select()
           .from(shifts)
-          .where(
-            and(
-              eq(shifts.adminId, userId),
-              eq(shifts.shiftDate, date),
-              eq(shifts.status, 'active')
-            )
-          )
+          .where(and(eq(shifts.adminId, userId), eq(shifts.status, 'active')))
           .all()) || [];
-      if (mine.length >= 2) {
+      const minePeriod = mine.filter((s) => s.shiftDate === pdate || s.shiftDate === 'perm');
+      if (minePeriod.length >= 2) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: 'حداکثر ۲ شیفت',
+          text: 'حداکثر ۲ شیفت در هر دوره',
           show_alert: true,
         });
         return;
@@ -586,19 +632,22 @@ if (data.startsWith('shift_pick:')) {
           .where(
             and(
               eq(shifts.channelKey, channelKey),
-              eq(shifts.shiftDate, date),
-              eq(shifts.startHm, startHm),
               eq(shifts.status, 'active')
             )
           )
           .all()) || [];
-      if (taken.length) {
+      const conflict = taken.filter(
+        (s) =>
+          s.startHm === startHm &&
+          (s.shiftDate === pdate || s.shiftDate === 'perm')
+      );
+      if (conflict.length) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
           text: 'پر شده',
           show_alert: true,
         });
-        await refreshAllShiftBoards(channelKey, date);
+        await refreshAllShiftBoards(channelKey, pdate);
         return;
       }
 
@@ -607,30 +656,59 @@ if (data.startsWith('shift_pick:')) {
         .values({
           channelKey,
           adminId: userId,
-          shiftDate: date,
+          shiftDate: pdate,
           startHm,
           endHm,
           status: 'active',
         })
         .run();
 
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت شد' });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت شد ✅' });
       try {
-        await refreshAllShiftBoards(channelKey, date);
+        await refreshAllShiftBoards(channelKey, pdate);
       } catch (e) {
-        console.error('refresh boards', e);
+        console.error('refresh', e);
       }
-      // اگر الان داخل شیفت است، صف را تحویل بده
+      try {
+        // also edit THIS message keyboard immediately
+        const dayShifts =
+          (await db
+            .select()
+            .from(shifts)
+            .where(
+              and(
+                eq(shifts.channelKey, channelKey),
+                eq(shifts.shiftDate, pdate),
+                eq(shifts.status, 'active')
+              )
+            )
+            .all()) || [];
+        const takenMap = {};
+        for (const s of dayShifts) takenMap[s.startHm] = s.adminId;
+        const myStarts = new Set(
+          dayShifts.filter((s) => s.adminId === userId).map((s) => s.startHm)
+        );
+        // include current pick even if startHm partial
+        myStarts.add(startHm);
+        takenMap[startHm] = userId;
+        await api.editMessageReplyMarkup({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          reply_markup: shiftSlotsInline(channelKey, takenMap, myStarts),
+        });
+      } catch (e) {
+        console.error('edit self board', e);
+      }
       try {
         const n = await deliverPendingForAdmin(userId);
         if (n > 0) {
           await api.sendMessage({
             chat_id: userId,
-            text: '📥 ' + n + ' پیام صف برای شیفت فعلی ارسال شد.',
+            text: '📥 ' + n + ' پیام صف ارسال شد.',
           });
         }
       } catch (e) {
-        console.error('deliver after pick', e);
+        console.error('deliver', e);
       }
       await api.sendMessage({
         chat_id: userId,
@@ -641,10 +719,13 @@ if (data.startsWith('shift_pick:')) {
           startHm +
           '–' +
           endHm +
-          ' ثبت شد.\nوقتی ساعت شروع برسد پیام‌های صف خودکار می‌آید.',
+          ' ثبت شد (دوره ' +
+          pdate +
+          ').',
       });
       return;
     }
+
   } catch (e) {
     console.error('cb', e);
     try {
