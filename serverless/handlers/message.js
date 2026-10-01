@@ -458,7 +458,7 @@ export default async function (message) {
             text:
               '⏰ الان داخل بازه شیفت فعال نیستید.\n' +
               (upcoming ? 'شیفت‌های دوره شما:\n' + upcoming : 'شیفتی برای این دوره ثبت نشده.') +
-              '\n\nدوره: ۳ عصر تا ۳ صبح\nوقتی ساعت شیفت برسد صف خودکار می‌آید.',
+              '\n\nدوره: ۱۲ ظهر تا ۳ صبح\nوقتی ساعت شیفت برسد صف خودکار می‌آید.',
             reply_markup: await roleKb(userId),
           });
           return;
@@ -582,7 +582,7 @@ export default async function (message) {
         entry.title +
         '»\n📅 دوره ' +
         date +
-        '\n۱۵:۰۰ تا ۰۳:۰۰ · حداکثر ۲ شیفت\n🟢 خالی · 🔴 پر/شما\n\n';
+        '\n۱۲:۰۰ تا ۰۳:۰۰\n🟢 خالی · 🔴 پر/شما\n\n';
       if (today.length) {
         head +=
           'شیفت‌های ثبت‌شده امروز:\n' +
@@ -660,7 +660,7 @@ export default async function (message) {
               s.shiftDate === now.date)
           );
         });
-        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۱۵:۰۰–۰۳:۰۰)\n\n';
+        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۱۲:۰۰–۰۳:۰۰)\n\n';
         if (!today.length) {
           t += 'هنوز شیفتی ثبت نشده.\n';
         } else {
