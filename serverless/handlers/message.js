@@ -1,6 +1,6 @@
 import { api, db } from 'sdk';
 import { eq, desc, and } from 'sdk/db';
-import { messages, feedback, shifts, users } from 'schema';
+import { messages, feedback, shifts, users, channelAdmins } from 'schema';
 import {
   WELCOME_TEXT,
   RULES_TEXT,
@@ -848,9 +848,8 @@ export default async function (message) {
         try { us = (await db.select().from(users).all()) || []; } catch (e) {}
         let ads = [];
         try {
-          const { channelAdmins } = await import('schema');
           ads = (await db.select().from(channelAdmins).all()) || [];
-        } catch (_) {}
+        } catch (_e) {}
         const adminIds = new Set(ads.map((a) => a.userId || a.user_id));
         let shToday = 0;
         try {
