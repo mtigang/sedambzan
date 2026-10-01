@@ -78,13 +78,14 @@ export default async function (cq) {
     if (!userId) return;
 
     // ادمین فقط در شیفت بتواند تأیید/رد کند (مالک همیشه)
-    async function assertCanReview() {
+    async function assertCanReview(channelKey) {
       if (isOwner(userId)) return true;
       const now = tehranNow();
       const period = periodDateStr(now);
       const mySh = (await db.select().from(shifts).where(eq(shifts.adminId, userId)).all()) || [];
       return mySh.some((s) => {
         if (s.status !== 'active') return false;
+        if (channelKey && s.channelKey !== channelKey) return false;
         if (s.shiftDate === 'permanent' || s.shiftDate === 'perm') {
           return inRange(now.hm, s.startHm, s.endHm);
         }
@@ -117,14 +118,6 @@ export default async function (cq) {
     }
 
     if (data.startsWith('approve:')) {
-      if (!(await assertCanReview())) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط در زمان شیفت خودتان',
-          show_alert: true,
-        });
-        return;
-      }
       const id = Number(data.split(':')[1]);
       const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
       const row = rows?.[0];
@@ -132,6 +125,14 @@ export default async function (cq) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
           text: 'قبلاً بررسی شده',
+          show_alert: true,
+        });
+        return;
+      }
+      if (!(await assertCanReview(row.channelKey))) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'فقط در شیفت همین کانال',
           show_alert: true,
         });
         return;
@@ -184,15 +185,17 @@ export default async function (cq) {
     }
 
     if (data.startsWith('reject_menu:')) {
-      if (!(await assertCanReview())) {
+      const id = Number(data.split(':')[1]);
+      const _rmRows = await db.select().from(messages).where(eq(messages.id, id)).all();
+      const _rmRow = _rmRows?.[0];
+      if (!(await assertCanReview(_rmRow?.channelKey))) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: 'فقط در زمان شیفت خودتان',
+          text: 'فقط در شیفت همین کانال',
           show_alert: true,
         });
         return;
       }
-      const id = Number(data.split(':')[1]);
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       try {
         await api.editMessageReplyMarkup({
@@ -219,11 +222,12 @@ export default async function (cq) {
 
     
     if (data.startsWith('reject_other:')) {
-      if (!(await assertCanReview())) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط در شیفت', show_alert: true });
+      const id = Number(data.split(':')[1]);
+      const _roRows = await db.select().from(messages).where(eq(messages.id, id)).all();
+      if (!(await assertCanReview(_roRows?.[0]?.channelKey))) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط در شیفت همین کانال', show_alert: true });
         return;
       }
-      const id = Number(data.split(':')[1]);
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       await setState(userId, 'reject_custom', { msgId: id });
       await api.sendMessage({
@@ -233,14 +237,6 @@ export default async function (cq) {
       return;
     }
 if (data.startsWith('reject:')) {
-      if (!(await assertCanReview())) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'فقط در زمان شیفت خودتان',
-          show_alert: true,
-        });
-        return;
-      }
       const parts = data.split(':');
       const id = Number(parts[1]);
       const reason = parts.slice(2).join(':') || 'نامناسب';
@@ -250,6 +246,14 @@ if (data.startsWith('reject:')) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
           text: 'قبلاً بررسی شده',
+          show_alert: true,
+        });
+        return;
+      }
+      if (!(await assertCanReview(row.channelKey))) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'فقط در شیفت همین کانال',
           show_alert: true,
         });
         return;
@@ -889,21 +893,6 @@ if (data === 'ann_cancel') {
       }
 
 
-      const mine =
-        (await db
-          .select()
-          .from(shifts)
-          .where(and(eq(shifts.adminId, userId), eq(shifts.status, 'active')))
-          .all()) || [];
-      const minePeriod = mine.filter((s) => s.shiftDate === pdate || s.shiftDate === 'perm');
-      if (minePeriod.length >= 2) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'حداکثر ۲ شیفت در هر دوره',
-          show_alert: true,
-        });
-        return;
-      }
       const taken =
         (await db
           .select()
@@ -947,6 +936,17 @@ if (data === 'ann_cancel') {
         await refreshAllShiftBoards(channelKey, pdate);
       } catch (e) {
         console.error('refresh', e);
+      }
+      try {
+        const n = await deliverPendingForAdmin(userId);
+        if (n > 0) {
+          await api.sendMessage({
+            chat_id: userId,
+            text: '📥 ' + n + ' پیام در انتظار برای شیفت شما ارسال شد.',
+          });
+        }
+      } catch (e) {
+        console.error('deliver after shift_pick', e);
       }
       try {
         // also edit THIS message keyboard immediately
