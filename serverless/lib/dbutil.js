@@ -324,8 +324,10 @@ export async function activeShiftAdmins(channelKey) {
         .all()) || [];
     return rows
       .filter((s) => {
-        if (s.shiftDate === 'perm') return inRange(now.hm, s.startHm, s.endHm);
-        if (s.shiftDate !== pdate) return false;
+        if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
+          return inRange(now.hm, s.startHm, s.endHm);
+        }
+        if (s.shiftDate !== pdate && s.shiftDate !== now.date) return false;
         return inRange(now.hm, s.startHm, s.endHm);
       })
       .map((s) => s.adminId);
