@@ -577,11 +577,11 @@ export default async function (message) {
             }
           }
           shiftLines.push(
-            '• ' +
+            '────────────\n' +
               String(s.startHm).slice(0, 5) +
-              '–' +
+              ' تا ' +
               String(s.endHm).slice(0, 5) +
-              ' ← ' +
+              '\n👤 ' +
               who
           );
         }
@@ -751,8 +751,17 @@ export default async function (message) {
     if (owner && text === '👥 ادمین‌ها') {
       await api.sendMessage({
         chat_id: chatId,
-        text: 'کانال را انتخاب کنید:',
-        reply_markup: channelAdminPickKeyboard(),
+        text: 'کانال ادمین‌ها را انتخاب کنید:',
+        reply_markup: {
+          keyboard: [
+            [{ text: 'ادمین‌های صدام بزن' }],
+            [{ text: 'ادمین‌های این کاربر' }],
+            [{ text: 'ادمین‌های تو زندگی بعدی' }],
+            [{ text: '🔄 همگام‌سازی ادمین‌ها' }],
+            [{ text: '◀️ بازگشت' }],
+          ],
+          resize_keyboard: true,
+        },
       });
       return;
     }
@@ -1251,20 +1260,13 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: '🔄 همگام‌سازی انجام شد.\n' + JSON.stringify(res.results || {}, null, 0).slice(0, 500),
-        reply_markup: settingsKeyboard(await isBotOn()),
+        reply_markup: ownerKeyboard(),
       });
       return;
     }
 
 
-    if (owner && text === '📦 بازیابی بکاپ') {
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '📦 بازیابی از داخل ربات خاموش شد.\nروی سرور این دستور را بزن:\nnpx tgcloud run lib/run_seed_import',
-        reply_markup: settingsKeyboard(await isBotOn()),
-      });
-      return;
-    }
+    // بازیابی بکاپ حذف شد
 
     if (owner && text === '🧹 پاک‌سازی صف') {
       await setState(userId, 'clear_q');
