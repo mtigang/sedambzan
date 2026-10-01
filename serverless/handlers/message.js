@@ -21,6 +21,7 @@ import {
   shiftChannelPickKeyboard,
   postChannelInline,
   reviewInline,
+  ownerReviewInline,
   feedbackInline,
   userOpenInline,
   shiftSlotsInline,
@@ -366,23 +367,7 @@ export default async function (message) {
           reply_markup: backKeyboard(),
         });
 
-        if (msgId != null) {
-          // فقط ادمین‌هایی که همین لحظه شیفت فعال همین کانال را دارند.
-          // Pending در دیتابیس باقی می‌ماند و از طریق Batch برای شیفت بعدی قابل بررسی است.
-          await notifyShiftAdmins(
-            v.channelKey,
-            '📨 #' +
-              msgId +
-              ' | ' +
-              (ch.title || v.channelKey) +
-              '\nاز: ' +
-              displayName(u, userId) +
-              '\n\n' +
-              v.content,
-            reviewInline(msgId),
-            msgId
-          );
-        }
+        // batch only
         return;
       } catch (e) {
         console.error('user_send', e);
@@ -1094,7 +1079,7 @@ export default async function (message) {
           '\n\n' +
           row.content +
           '\n\n🔎 آیدی یا لینک بعدی را بفرستید (یا ◀️ بازگشت):',
-        reply_markup: row.status === 'pending' ? reviewInline(row.id) : backKeyboard(),
+        reply_markup: row.status === 'pending' ? ownerReviewInline(row.id) : backKeyboard(),
       });
       return;
     }
