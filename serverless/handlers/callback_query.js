@@ -800,24 +800,30 @@ export default async function (cq) {
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       const daysAgo = Number(data.split(':')[1]) || 0;
       const now = tehranNow();
-      // تاریخ هدف: daysAgo روز قبل (میلادی ساده)
       const parts = now.date.split('-').map(Number);
       const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
       dt.setUTCDate(dt.getUTCDate() - daysAgo);
-      const y = dt.getUTCFullYear();
-      const mo = String(dt.getUTCMonth() + 1).padStart(2, '0');
-      const da = String(dt.getUTCDate()).padStart(2, '0');
-      const day = y + '-' + mo + '-' + da;
+      const day =
+        dt.getUTCFullYear() +
+        '-' +
+        String(dt.getUTCMonth() + 1).padStart(2, '0') +
+        '-' +
+        String(dt.getUTCDate()).padStart(2, '0');
       const allMsg = (await db.select().from(messages).all()) || [];
       const allSh = (await db.select().from(shifts).all()) || [];
-      let body = '👮 آمار ادمین‌ها\\n📅 ' + day + (daysAgo ? ' (' + daysAgo + ' روز پیش)' : ' (امروز)') + '\\n\\n';
+      let body =
+        '👮 آمار ادمین‌ها\n📅 ' +
+        day +
+        (daysAgo ? ' (' + daysAgo + ' روز پیش)' : ' (امروز)') +
+        '\n';
       for (const conf of Object.values(DEFAULT_CHANNELS)) {
-        body += '—— «' + conf.title + '» ——\\n';
+        body += '\n━━━━━━━━━━━━\n📢 «' + conf.title + '»\n━━━━━━━━━━━━\n';
         const dayShifts = allSh.filter(function (s) {
           return (
             s.channelKey === conf.key &&
             s.status === 'active' &&
-            (s.shiftDate === day || s.shiftDate === 'perm' || s.shiftDate === 'permanent')
+            (s.shiftDate === day || s.shiftDate === 'perm' || s.shiftDate === 'permanent') &&
+            String(s.startHm) !== String(s.endHm)
           );
         });
         const adminIds = [];
@@ -829,11 +835,8 @@ export default async function (cq) {
             adminIds.push(aid);
           }
         }
-        // همچنین ادمین‌هایی که همان روز review کرده‌اند
         for (const msg of allMsg) {
           if (msg.channelKey !== conf.key || !msg.reviewedBy) continue;
-          // تاریخ review تقریبی از reviewedAt
-          let okDay = false;
           const aid = Number(msg.reviewedBy);
           if (aid && !seenA[aid]) {
             seenA[aid] = true;
@@ -841,7 +844,7 @@ export default async function (cq) {
           }
         }
         if (!adminIds.length) {
-          body += 'بدون فعالیت\\n\\n';
+          body += 'بدون فعالیت\n';
           continue;
         }
         for (const aid of adminIds) {
@@ -852,103 +855,43 @@ export default async function (cq) {
           const reviewed = allMsg.filter(function (msg) {
             return msg.channelKey === conf.key && Number(msg.reviewedBy) === aid;
           });
-          const ap = reviewed.filter(function (x) { return x.status === 'approved'; }).length;
-          const rj = reviewed.filter(function (x) { return x.status === 'rejected'; }).length;
+          const ap = reviewed.filter(function (x) {
+            return x.status === 'approved';
+          }).length;
+          const rj = reviewed.filter(function (x) {
+            return x.status === 'rejected';
+          }).length;
           const shList = dayShifts
-            .filter(function (s) { return Number(s.adminId) === aid; })
-            .map(function (s) {
-              return String(s.startHm).slice(0, 5) + '–' + String(s.endHm).slice(0, 5);
+            .filter(function (s) {
+              return Number(s.adminId) === aid;
             })
-            .join(', ');
+            .map(function (s) {
+              return String(s.startHm).slice(0, 5) + ' تا ' + String(s.endHm).slice(0, 5);
+            })
+            .join(' | ');
           body +=
-            '• ' +
+            '\n👤 ' +
             name +
-            '\\n  شیفت: ' +
-            (shList || '—') +
-            '\\n  🟢' +
+            '\n⏰ ' +
+            (shList || 'بدون شیفت') +
+            '\n✅ تأیید ' +
             ap +
-            ' 🔴' +
+            ' | ❌ رد ' +
             rj +
-            ' (کل بررسی: ' +
+            ' | جمع ' +
             reviewed.length +
-            ')\\n';
+            '\n';
         }
-        body += '\\n';
       }
-      // split if long
-      const chunks = [];
       let cur = body;
       while (cur.length > 3500) {
-        chunks.push(cur.slice(0, 3500));
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: cur.slice(0, 3500) });
         cur = cur.slice(3500);
       }
-      chunks.push(cur);
-      for (const c of chunks) {
-        await api.sendMessage({ chat_id: cq.message.chat.id, text: c });
-      }
+      await api.sendMessage({ chat_id: cq.message.chat.id, text: cur });
       return;
     }
 
-if (data === 'ann_cancel') {
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
-      await clearState(userId);
-      return;
-    }
-
-    if (data.startsWith('ann_target:')) {
-      await api.answerCallbackQuery({ callback_query_id: cq.id });
-      const target = data.split(':')[1];
-      const st = await getState(userId);
-      const annText = st && st.annText;
-      await clearState(userId);
-      if (!annText) {
-        await api.sendMessage({
-          chat_id: cq.message.chat.id,
-          text: 'متن پیدا نشد. دوباره 📣 اطلاعیه را بزنید.',
-        });
-        return;
-      }
-      let ids = [];
-      const seen = {};
-      if (target === 'admins') {
-        const ads = (await db.select().from(channelAdmins).all()) || [];
-        for (const a of ads) {
-          const id = a.userId || a.user_id;
-          if (id && !seen[id] && id !== userId) {
-            seen[id] = true;
-            ids.push(id);
-          }
-        }
-      } else {
-        const all = (await db.select().from(users).all()) || [];
-        for (const u of all) {
-          const id = u.userId || u.user_id;
-          if (id && !seen[id] && id !== userId) {
-            seen[id] = true;
-            ids.push(id);
-          }
-        }
-      }
-      const job = {
-        status: 'running',
-        text: annText,
-        ids: ids,
-        cursor: 0,
-        ok: 0,
-        fail: 0,
-        target: target,
-        ownerId: userId,
-      };
-      await saveAnnounceJob(job);
-      const progress = await api.sendMessage({
-        chat_id: cq.message.chat.id,
-        text: '📣 صف ارسال آماده شد: ' + ids.length + ' نفر\nاولین دسته در حال ارسال...',
-        reply_markup: announceProgressInline(false),
-      });
-      const mid = progress && progress.message_id;
-      await runAnnounceBatch(cq.message.chat.id, mid);
-      return;
-    }
 
     if (data === 'ann_continue') {
       if (!isOwner(userId)) {
@@ -1108,6 +1051,29 @@ if (data === 'ann_cancel') {
         return;
       }
 
+      const mineCount = taken.filter((s) => {
+        const same =
+          s.shiftDate === pdate ||
+          s.shiftDate === 'perm' ||
+          s.shiftDate === 'permanent';
+        return same && Number(s.adminId) === Number(userId);
+      }).length;
+      if (mineCount >= 3) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'حداکثر ۳ شیفت در هر دوره',
+          show_alert: true,
+        });
+        return;
+      }
+      if (String(startHm) === String(endHm)) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'بازه نامعتبر',
+          show_alert: true,
+        });
+        return;
+      }
       await db
         .insert(shifts)
         .values({
