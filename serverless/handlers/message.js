@@ -447,7 +447,7 @@ export default async function (message) {
       if (res.status === 'no_shift') {
         await api.sendMessage({
           chat_id: chatId,
-          text: '⏰ در حال حاضر شیفت فعال ندارید.',
+          text: '⏰ الان داخل بازهٔ شیفت ثبت‌شده نیستید.\n\nاگر تازه شیفت برداشتید، فقط وقتی ساعت شیفت‌تان شروع شود می‌توانید پیام‌های در انتظار را بگیرید.\nاز «⏰ شیفت من» ساعت ثبت‌شده را چک کنید.',
           reply_markup: await roleKb(userId),
         });
         return;
