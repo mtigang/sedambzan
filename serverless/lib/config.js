@@ -4,7 +4,7 @@ export const OWNER_IDS = [6666610646, 8302194171, 8434360251];
 
 export const CHANNEL_USERNAMES = {
   sadambazan: 'callMeAraIl',
-  inkarbar: null,
+  inkarbar: 'inKarbariral',
   zendegi: null,
 };
 
