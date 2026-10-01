@@ -267,8 +267,35 @@ export function ownerShiftMenuInline() {
     inline_keyboard: [
       [{ text: '📅 تخصیص شیفت روزانه', callback_data: 'own_shift:daily', style: 'success' }],
       [{ text: '♾️ تخصیص شیفت دائمی', callback_data: 'own_shift:perm', style: 'primary' }],
+      [{ text: '📋 لیست و لغو شیفت‌ها', callback_data: 'own_shift_list', style: 'primary' }],
+      [{ text: '🗑 لغو همه شیفت‌های دوره', callback_data: 'own_cancel_all', style: 'danger' }],
     ],
   };
+}
+
+/** دکمه‌های لغو برای لیست شیفت مالک — هر شیفت یک دکمه */
+export function ownerCancelShiftsInline(shiftRows) {
+  const rows = [];
+  const list = (shiftRows || []).slice(0, 40);
+  for (const s of list) {
+    const title =
+      (s.channelTitle || s.channelKey || '').toString().slice(0, 12);
+    const who = (s.name || String(s.adminId || '')).toString().slice(0, 18);
+    const tm =
+      String(s.startHm || '').slice(0, 5) + '–' + String(s.endHm || '').slice(0, 5);
+    rows.push([
+      {
+        text: '❌ ' + title + ' | ' + tm + ' | ' + who,
+        callback_data: 'own_sc:' + s.id,
+        style: 'danger',
+      },
+    ]);
+  }
+  rows.push([
+    { text: '🗑 لغو همه', callback_data: 'own_cancel_all', style: 'danger' },
+    { text: 'بستن', callback_data: 'shift_close', style: 'primary' },
+  ]);
+  return { inline_keyboard: rows };
 }
 
 export function announceProgressInline(done) {
