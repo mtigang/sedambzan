@@ -3,24 +3,60 @@ export function btnText(v, fallback) {
   let s = v == null ? '' : String(v);
   s = s.trim();
   if (!s) s = fallback != null ? String(fallback) : '•';
-  // محدودیت تلگرام: حداکثر ۶۴ کاراکتر برای inline
   if (s.length > 64) s = s.slice(0, 61) + '…';
   return s;
 }
 
+/** فیلدهای مجاز دکمه اینلاین تلگرام (style رسمی نیست — حذف می‌شود) */
+const INLINE_OK = {
+  text: 1,
+  url: 1,
+  callback_data: 1,
+  web_app: 1,
+  login_url: 1,
+  switch_inline_query: 1,
+  switch_inline_query_current_chat: 1,
+  switch_inline_query_chosen_chat: 1,
+  callback_game: 1,
+  pay: 1,
+  copy_text: 1,
+  icon_custom_emoji_id: 1,
+};
+
 export function sanitizeMarkup(markup) {
   if (!markup || typeof markup !== 'object') return markup;
-  const out = Object.assign({}, markup);
-  if (Array.isArray(out.inline_keyboard)) {
-    out.inline_keyboard = out.inline_keyboard
+  const out = {};
+  if (markup.resize_keyboard != null) out.resize_keyboard = !!markup.resize_keyboard;
+  if (markup.one_time_keyboard != null) out.one_time_keyboard = !!markup.one_time_keyboard;
+  if (markup.selective != null) out.selective = !!markup.selective;
+  if (markup.is_persistent != null) out.is_persistent = !!markup.is_persistent;
+  if (markup.input_field_placeholder != null) {
+    out.input_field_placeholder = String(markup.input_field_placeholder);
+  }
+  if (markup.remove_keyboard) {
+    out.remove_keyboard = true;
+    return out;
+  }
+
+  if (Array.isArray(markup.inline_keyboard)) {
+    out.inline_keyboard = markup.inline_keyboard
       .map(function (row) {
         if (!Array.isArray(row)) return null;
         return row
           .map(function (b) {
             if (!b || typeof b !== 'object') return null;
-            const nb = Object.assign({}, b);
-            nb.text = btnText(nb.text, '•');
-            if (nb.callback_data != null) nb.callback_data = String(nb.callback_data);
+            const nb = {};
+            nb.text = btnText(b.text, '•');
+            for (const k of Object.keys(b)) {
+              if (k === 'text' || k === 'style') continue;
+              if (!INLINE_OK[k]) continue;
+              const v = b[k];
+              if (v == null) continue;
+              if (typeof v === 'object') nb[k] = v;
+              else nb[k] = String(v);
+            }
+            // حداقل text لازم است
+            if (!nb.text) nb.text = '•';
             return nb;
           })
           .filter(Boolean);
@@ -29,15 +65,20 @@ export function sanitizeMarkup(markup) {
         return row && row.length;
       });
   }
-  if (Array.isArray(out.keyboard)) {
-    out.keyboard = out.keyboard
+
+  if (Array.isArray(markup.keyboard)) {
+    out.keyboard = markup.keyboard
       .map(function (row) {
         if (!Array.isArray(row)) return null;
         return row
           .map(function (b) {
+            if (typeof b === 'string' || typeof b === 'number') {
+              return { text: btnText(b, '•') };
+            }
             if (!b || typeof b !== 'object') return null;
-            const nb = Object.assign({}, b);
-            nb.text = btnText(nb.text, '•');
+            const nb = { text: btnText(b.text, '•') };
+            if (b.request_contact) nb.request_contact = true;
+            if (b.request_location) nb.request_location = true;
             return nb;
           })
           .filter(Boolean);
@@ -46,33 +87,35 @@ export function sanitizeMarkup(markup) {
         return row && row.length;
       });
   }
+
   return out;
 }
+
 
 import { DEFAULT_CHANNELS, buildShiftSlots } from 'lib/config';
 
 export function userKeyboard() {
-  return {
+  return sanitizeMarkup({
     keyboard: [
       [{ text: '📝 ارسال پیام' }, { text: '📊 وضعیت پیام من' }],
       [{ text: '💬 انتقادات، پیشنهادات، گزارش مشکل' }],
     ],
     resize_keyboard: true,
-  };
+  });
 }
 
 export function adminKeyboard() {
-  return {
+  return sanitizeMarkup({
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '⏰ شیفت من' }],
       [{ text: '📊 عملکرد من' }],
     ],
     resize_keyboard: true,
-  };
+  });
 }
 
 export function ownerKeyboard() {
-  return {
+  return sanitizeMarkup({
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌ها' }],
       [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
@@ -80,11 +123,11 @@ export function ownerKeyboard() {
       [{ text: '🛡️ ساب‌لیدرها' }, { text: '⚙️ تنظیمات' }],
     ],
     resize_keyboard: true,
-  };
+  });
 }
 
 export function subLeaderKeyboard() {
-  return {
+  return sanitizeMarkup({
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌های من' }],
       [{ text: '⏰ مدیریت شیفت‌ها' }, { text: '📊 آمار کانال' }],
@@ -92,18 +135,18 @@ export function subLeaderKeyboard() {
       [{ text: 'ℹ️ اطلاعات کانال' }],
     ],
     resize_keyboard: true,
-  };
+  });
 }
 
 export function ownerSubLeaderMenuKeyboard() {
-  return {
+  return sanitizeMarkup({
     keyboard: [
       [{ text: '➕ افزودن ساب‌لیدر' }],
       [{ text: '👥 لیست ساب‌لیدرها' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
-  };
+  });
 }
 
 export function backKeyboard() {
@@ -111,7 +154,7 @@ export function backKeyboard() {
 }
 
 export function settingsKeyboard(botOn) {
-  return {
+  return sanitizeMarkup({
     keyboard: [
       [{ text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
       [{ text: '📣 ارسال به کانال' }, { text: '📣 اطلاعیه' }],
@@ -122,17 +165,17 @@ export function settingsKeyboard(botOn) {
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
-  };
+  });
 }
 
 export function searchKeyboard() {
-  return {
+  return sanitizeMarkup({
     keyboard: [
       [{ text: '🔎 جستجوی پیام' }, { text: '🔎 جستجوی کاربر' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
-  };
+  });
 }
 
 export function channelAdminPickKeyboard() {
@@ -150,36 +193,36 @@ export function shiftChannelPickKeyboard(channelList) {
 }
 
 export function postChannelInline() {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [{ text: 'صدام بزن', callback_data: 'postch:sadambazan', style: 'success' }],
       [{ text: 'این کاربر', callback_data: 'postch:inkarbar', style: 'primary' }],
       [{ text: 'تو زندگی بعدی', callback_data: 'postch:zendegi', style: 'primary' }],
       [{ text: 'لغو', callback_data: 'postch_cancel', style: 'danger' }],
     ],
-  };
+  });
 }
 
 export function confirmPostInline() {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [
         { text: 'تأیید ارسال', callback_data: 'post_yes', style: 'success' },
         { text: 'انصراف', callback_data: 'post_no', style: 'danger' },
       ],
     ],
-  };
+  });
 }
 
 export function ownerReviewInline(id) {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [
         { text: '✅ تأیید', callback_data: 'approve:' + id, style: 'success' },
         { text: '❌ رد', callback_data: 'reject_direct:' + id, style: 'danger' },
       ],
     ],
-  };
+  });
 }
 
 export function reviewInline(id, showNext, batchNumber) {
@@ -198,11 +241,11 @@ export function reviewInline(id, showNext, batchNumber) {
       },
     ]);
   }
-  return { inline_keyboard: rows };
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function reviewNextInline(batchNumber) {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [
         {
@@ -212,24 +255,24 @@ export function reviewNextInline(batchNumber) {
         },
       ],
     ],
-  };
+  });
 }
 
 export function reviewDoneInline() {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [[{ text: '✅ صف خالی شد', callback_data: 'review_done', style: 'primary' }]],
-  };
+  });
 }
 
 export function reviewTakenInline() {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [[{ text: '📥 ارسال شد', callback_data: 'review_taken', style: 'primary' }]],
-  };
+  });
 }
 
 export function rejectReasonsInline(id) {
   const reasons = ['نامناسب', 'هیت یا بی احترامی', 'تکراری', 'سیاسی', 'نامفهوم'];
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       ...reasons.map((r) => [
         { text: btnText(r, 'دلیل'), callback_data: 'reject:' + id + ':' + r, style: 'danger' },
@@ -237,11 +280,11 @@ export function rejectReasonsInline(id) {
       [{ text: 'سایر (تایپ دلیل)', callback_data: 'reject_other:' + id, style: 'primary' }],
       [{ text: 'انصراف', callback_data: 'reject_cancel:' + id, style: 'primary' }],
     ],
-  };
+  });
 }
 
 export function feedbackInline(id, userId) {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [
         { text: 'پاسخ', callback_data: 'fb_reply:' + id, style: 'primary' },
@@ -249,15 +292,15 @@ export function feedbackInline(id, userId) {
       ],
       [{ text: 'مشاهده کاربر', callback_data: 'fb_user:' + userId, style: 'primary' }],
     ],
-  };
+  });
 }
 
 export function userOpenInline(userId) {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [{ text: 'مشاهده کاربر', callback_data: 'uv:' + userId, style: 'primary' }],
     ],
-  };
+  });
 }
 
 /** takenMap: startHm -> adminId ; myStarts: Set ; ownerMode: مالک بتواند شیفت دیگران را لغو کند */
@@ -329,7 +372,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
     ]);
   }
   rows.push([{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }]);
-  return { inline_keyboard: rows };
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function adminListInline(admins, channelKey) {
@@ -355,29 +398,29 @@ export function adminListInline(admins, channelKey) {
       style: 'primary',
     },
   ]);
-  return { inline_keyboard: rows };
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 
 export function announceTargetInline() {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [{ text: '👮 فقط ادمین‌ها', callback_data: 'ann_target:admins', style: 'primary' }],
       [{ text: '👥 همه کاربران', callback_data: 'ann_target:all', style: 'success' }],
       [{ text: 'لغو', callback_data: 'ann_cancel', style: 'danger' }],
     ],
-  };
+  });
 }
 
 export function ownerShiftMenuInline() {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [{ text: '📅 تخصیص شیفت روزانه', callback_data: 'own_shift:daily', style: 'success' }],
       [{ text: '♾️ تخصیص شیفت دائمی', callback_data: 'own_shift:perm', style: 'primary' }],
       [{ text: '📋 لیست و لغو شیفت‌ها', callback_data: 'own_shift_list', style: 'primary' }],
       [{ text: '🗑 لغو همه شیفت‌های دوره', callback_data: 'own_cancel_all', style: 'danger' }],
     ],
-  };
+  });
 }
 
 /** دکمه‌های لغو برای لیست شیفت مالک — هر شیفت یک دکمه */
@@ -402,19 +445,19 @@ export function ownerCancelShiftsInline(shiftRows) {
     { text: '🗑 لغو همه', callback_data: 'own_cancel_all', style: 'danger' },
     { text: 'بستن', callback_data: 'shift_close', style: 'primary' },
   ]);
-  return { inline_keyboard: rows };
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function announceProgressInline(done) {
   if (done) {
     return { inline_keyboard: [[{ text: '✅ تمام شد', callback_data: 'ann_noop', style: 'success' }]] };
   }
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [{ text: '▶️ ادامه ارسال', callback_data: 'ann_continue', style: 'success' }],
       [{ text: '⏹ توقف', callback_data: 'ann_stop', style: 'danger' }],
     ],
-  };
+  });
 }
 
 export function subLeaderPickChannelInline() {
@@ -423,7 +466,7 @@ export function subLeaderPickChannelInline() {
     rows.push([{ text: '📢 ' + c.title, callback_data: 'sl_setch:' + c.key, style: 'primary' }]);
   }
   rows.push([{ text: 'لغو', callback_data: 'sl_cancel', style: 'danger' }]);
-  return { inline_keyboard: rows };
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function subLeaderListInline(items) {
@@ -443,29 +486,29 @@ export function subLeaderListInline(items) {
   if (!rows.length) {
     rows.push([{ text: 'لیست خالی', callback_data: 'sl_noop', style: 'primary' }]);
   }
-  return { inline_keyboard: rows };
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function subLeaderManageInline(userId) {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [
         { text: '🔄 تغییر کانال', callback_data: 'sl_ch:' + userId, style: 'primary' },
         { text: '🚫 غیرفعال', callback_data: 'sl_off:' + userId, style: 'danger' },
       ],
     ],
-  };
+  });
 }
 
 export function subLeaderAnnounceConfirmInline() {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [
         { text: '✅ ارسال', callback_data: 'sl_ann_yes', style: 'success' },
         { text: '❌ لغو', callback_data: 'sl_ann_no', style: 'danger' },
       ],
     ],
-  };
+  });
 }
 
 /** لیست ادمین ساب‌لیدر با دکمه حذف */
@@ -485,7 +528,7 @@ export function subLeaderAdminsInline(admins, channelKey) {
   if (!rows.length) {
     rows.push([{ text: 'ادمینی نیست', callback_data: 'sl_noop', style: 'primary' }]);
   }
-  return { inline_keyboard: rows };
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function flushChannelPickInline() {
@@ -500,7 +543,7 @@ export function flushChannelPickInline() {
     ]);
   }
   rows.push([{ text: 'لغو', callback_data: 'flush_cancel', style: 'danger' }]);
-  return { inline_keyboard: rows };
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function flushProgressInline(finished, hasSkipped) {
@@ -522,11 +565,11 @@ export function flushProgressInline(finished, hasSkipped) {
       },
     ]);
   }
-  return { inline_keyboard: rows };
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function flushConfirmInline(channelKey) {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [
         {
@@ -537,11 +580,11 @@ export function flushConfirmInline(channelKey) {
         { text: 'لغو', callback_data: 'flush_cancel', style: 'danger' },
       ],
     ],
-  };
+  });
 }
 
 export function purgeUserConfirmInline(targetId, count) {
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [
         {
@@ -552,16 +595,16 @@ export function purgeUserConfirmInline(targetId, count) {
       ],
       [{ text: 'لغو', callback_data: 'purge_user_cancel', style: 'primary' }],
     ],
-  };
+  });
 }
 
 export function purgeUserProgressInline(targetId, finished) {
   if (finished) {
-    return {
+    return sanitizeMarkup({
       inline_keyboard: [[{ text: '✅ تمام', callback_data: 'purge_user_cancel', style: 'success' }]],
-    };
+    });
   }
-  return {
+  return sanitizeMarkup({
     inline_keyboard: [
       [
         {
@@ -572,5 +615,5 @@ export function purgeUserProgressInline(targetId, finished) {
         { text: '⏹ توقف', callback_data: 'purge_user_cancel', style: 'primary' },
       ],
     ],
-  };
+  });
 }
