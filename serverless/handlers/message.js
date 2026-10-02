@@ -49,7 +49,7 @@ import { validateAndFix, normalizeBody, exactBodyKey } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm } from 'lib/time';
 // normHm via time
-import { resolveUserId } from 'lib/resolve';
+import { resolveUserId, channelMessageLink, channelPublicBase } from 'lib/resolve';
 import {
   getSubLeaderChannel,
   upsertSubLeader,
@@ -387,22 +387,33 @@ export default async function (message) {
           }
         } catch (_) {}
 
-        // —— ضدتکرار بدنه دقیق (بین پیشوند و نقطه پایانی)
+        // —— ضدتکرار بدنه دقیق (بین پیشوند و نقطه پایانی) — حداکثر ۲۰۰ پیام اخیر
         const bodyKey = exactBodyKey(v.content);
         if (bodyKey) {
           let dup = null;
+          let dupIsPending = false;
+          let queuePos = 0;
           try {
             const sameCh =
               (await db
                 .select()
                 .from(messages)
                 .where(eq(messages.channelKey, v.channelKey))
+                .orderBy(desc(messages.id))
                 .all()) || [];
-            for (const row of sameCh) {
+            // فقط ۲۰۰ پیام اخیر کانال
+            const recent = sameCh.slice(0, 200);
+            const pendingAll = sameCh.filter((r) => r.status === 'pending').sort((a, b) => a.id - b.id);
+            for (const row of recent) {
               if (row.status !== 'pending' && row.status !== 'approved') continue;
               const other = exactBodyKey(row.content);
               if (other && other === bodyKey) {
                 dup = row;
+                dupIsPending = row.status === 'pending';
+                if (dupIsPending) {
+                  const idx = pendingAll.findIndex((x) => x.id === row.id);
+                  queuePos = idx >= 0 ? idx : 0; // تعداد قبل از آن
+                }
                 break;
               }
             }
@@ -410,13 +421,28 @@ export default async function (message) {
             console.error('dup check', e);
           }
           if (dup) {
+            let msgText = '';
+            if (dupIsPending) {
+              msgText =
+                '⚠️ این پیام قبلاً ارسال شده و اکنون در صف تأیید است.\n' +
+                'تعداد پیام‌های قبل از آن: ' + queuePos + '\n' +
+                'شناسه: #' + dup.id;
+            } else {
+              msgText =
+                '⚠️ این پیام قبلاً ارسال شده و تکراری است.\n' +
+                'شناسه: #' + dup.id;
+              try {
+                // تلاش برای ساخت لینک از settings یا کانال
+                const conf = DEFAULT_CHANNELS[v.channelKey];
+                // message_id کانال ممکن است در settings ذخیره شده باشد (chmsg:key:mid -> id)
+                // فعلاً لینک پایه کانال را بفرست
+                const base = channelPublicBase(v.channelKey);
+                if (base) msgText += '\nلینک کانال: ' + base;
+              } catch (_) {}
+            }
             await api.sendMessage({
               chat_id: chatId,
-              text:
-                '⚠️ این پیام تکراری است و ثبت نشد.\n\n' +
-                'متن بعد از پیشوند کانال قبلاً در صف یا منتشر شده (#' +
-                dup.id +
-                ').\nپیام دیگری بفرستید یا ◀️ بازگشت.',
+              text: msgText + '\n\nپیام دیگری بفرستید یا ◀️ بازگشت.',
               reply_markup: sanitizeMarkup(backKeyboard()),
             });
             return;

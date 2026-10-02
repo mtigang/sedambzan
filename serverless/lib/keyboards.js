@@ -7,7 +7,7 @@ export function btnText(v, fallback) {
   return s;
 }
 
-/** فیلدهای مجاز دکمه اینلاین تلگرام (style رسمی نیست — حذف می‌شود) */
+/** فیلدهای مجاز دکمه اینلاین تلگرام — style رسمی Bot API 9.4+ (primary/success/danger) */
 const INLINE_OK = {
   text: 1,
   url: 1,
@@ -21,7 +21,10 @@ const INLINE_OK = {
   pay: 1,
   copy_text: 1,
   icon_custom_emoji_id: 1,
+  style: 1,
 };
+
+const STYLE_OK = { primary: 1, success: 1, danger: 1 };
 
 export function sanitizeMarkup(markup) {
   if (!markup || typeof markup !== 'object') return markup;
@@ -48,10 +51,15 @@ export function sanitizeMarkup(markup) {
             const nb = {};
             nb.text = btnText(b.text, '•');
             for (const k of Object.keys(b)) {
-              if (k === 'text' || k === 'style') continue;
+              if (k === 'text') continue;
               if (!INLINE_OK[k]) continue;
               const v = b[k];
               if (v == null) continue;
+              if (k === 'style') {
+                const st = String(v).toLowerCase();
+                if (STYLE_OK[st]) nb.style = st;
+                continue;
+              }
               if (typeof v === 'object') nb[k] = v;
               else nb[k] = String(v);
             }
@@ -79,6 +87,10 @@ export function sanitizeMarkup(markup) {
             const nb = { text: btnText(b.text, '•') };
             if (b.request_contact) nb.request_contact = true;
             if (b.request_location) nb.request_location = true;
+            if (b.style != null) {
+              const st = String(b.style).toLowerCase();
+              if (STYLE_OK[st]) nb.style = st;
+            }
             return nb;
           })
           .filter(Boolean);
@@ -287,8 +299,8 @@ export function feedbackInline(id, userId) {
   return sanitizeMarkup({
     inline_keyboard: [
       [
-        { text: 'پاسخ', callback_data: 'fb_reply:' + id, style: 'primary' },
-        { text: 'بستن', callback_data: 'fb_close:' + id, style: 'success' },
+        { text: 'پاسخ', callback_data: 'fb_reply:' + id, style: 'success' },
+        { text: 'بستن', callback_data: 'fb_close:' + id, style: 'danger' },
       ],
       [{ text: 'مشاهده کاربر', callback_data: 'fb_user:' + userId, style: 'primary' }],
     ],

@@ -38,6 +38,7 @@ import {
   notifySubLeaderChannelChange,
   notifySubLeaderRemoved,
   subLeaderAdmins,
+  listActiveSubLeaders,
 } from 'lib/subleader';
 import { tehranNow, inRange, periodDateStr, formatTsJalali } from 'lib/time';
 import { DEFAULT_CHANNELS } from 'lib/config';
@@ -60,6 +61,7 @@ import {
   flushProgressInline,
   flushChannelPickInline,
   subLeaderAdminsInline,
+  subLeaderListInline,
   ownerCancelShiftsInline,
   reviewNextInline,
   reviewDoneInline,
@@ -610,10 +612,74 @@ if (data.startsWith('reject_menu:')) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
-      const [, channelKey, tid] = data.split(':');
+      const parts = data.split(':');
+      const channelKey = parts[1];
+      const tid = parts[2];
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      let adminName = String(tid);
+      try {
+        const u = await getUser(Number(tid));
+        adminName = displayName(u, tid);
+      } catch (_) {}
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'آیا از حذف ادمین «' + adminName + '» مطمئن هستید؟',
+        reply_markup: sanitizeMarkup({
+          inline_keyboard: [
+            [
+              { text: 'تأیید حذف', callback_data: 'adel_yes:' + channelKey + ':' + tid, style: 'danger' },
+              { text: 'انصراف', callback_data: 'adel_no:' + channelKey, style: 'primary' },
+            ],
+          ],
+        }),
+      });
+      return;
+    }
+
+    if (data.startsWith('adel_yes:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const parts = data.split(':');
+      const channelKey = parts[1];
+      const tid = parts[2];
       await removeChannelAdmin(Number(tid), channelKey);
       const ads = await listAdminsByChannel(channelKey);
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'حذف شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text:
+            '👮 ادمین‌های «' +
+            (DEFAULT_CHANNELS[channelKey]?.title || channelKey) +
+            '»\nتعداد: ' +
+            ads.length,
+          reply_markup: sanitizeMarkup(adminListInline(ads, channelKey)),
+        });
+      } catch (_) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text:
+            '👮 ادمین‌های «' +
+            (DEFAULT_CHANNELS[channelKey]?.title || channelKey) +
+            '»\nتعداد: ' +
+            ads.length,
+          reply_markup: sanitizeMarkup(adminListInline(ads, channelKey)),
+        });
+      }
+      return;
+    }
+
+    if (data.startsWith('adel_no:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const channelKey = data.split(':')[1];
+      const ads = await listAdminsByChannel(channelKey);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو شد' });
       try {
         await api.editMessageText({
           chat_id: cq.message.chat.id,
@@ -2120,10 +2186,26 @@ if (data.startsWith('sl_setch:')) {
       await deactivateSubLeader(tid);
       await notifySubLeaderRemoved(tid);
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'غیرفعال شد' });
+      // لیست فعال‌ها را از DB بخوان و UI را رفرش کن
+      let items = [];
+      try {
+        const rows = await listActiveSubLeaders();
+        for (const r of rows || []) {
+          const u = await getUser(r.userId);
+          items.push({
+            userId: r.userId,
+            channelKey: r.channelKey,
+            status: r.status,
+            display: displayName(u, r.userId),
+          });
+        }
+      } catch (e) {
+        console.error('sl list after off', e);
+      }
       await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: '🚫 ساب‌لیدر ' + tid + ' غیرفعال شد.',
-        reply_markup: sanitizeMarkup(ownerSubLeaderMenuKeyboard()),
+        text: '🚫 ساب‌لیدر ' + tid + ' غیرفعال شد.\nلیست به‌روز:',
+        reply_markup: sanitizeMarkup(subLeaderListInline(items)),
       });
       return;
     }
