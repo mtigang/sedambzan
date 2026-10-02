@@ -1,4 +1,4 @@
-import { normalizeBody } from 'lib/validation';
+import { normalizeBody, exactBodyKey } from 'lib/validation';
 import { api, db } from 'sdk';
 import { eq, and } from 'sdk/db';
 import { messages, feedback, shifts, settings, users, channelAdmins } from 'schema';
@@ -1116,7 +1116,7 @@ if (data.startsWith('own_shift:')) {
       const seenBody = {};
       for (const a of approved) {
         try {
-          const b = normalizeBody(a.content);
+          const b = exactBodyKey(a.content);
           if (b) seenBody[b] = true;
         } catch (_e) {}
       }
@@ -1169,7 +1169,7 @@ if (data.startsWith('own_shift:')) {
         try {
           let bodyKey = '';
           try {
-            bodyKey = normalizeBody(row.content) || String(row.content || '').trim();
+            bodyKey = exactBodyKey(row.content) || String(row.content || '').trim();
           } catch (_e) {
             bodyKey = String(row.content || '').trim();
           }
