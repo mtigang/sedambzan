@@ -29,12 +29,31 @@ import {
   announceTargetInline,
   ownerShiftMenuInline,
   reviewNextInline,
+  subLeaderKeyboard,
+  ownerSubLeaderMenuKeyboard,
+  subLeaderPickChannelInline,
+  subLeaderListInline,
+  subLeaderManageInline,
+  subLeaderAnnounceConfirmInline,
 } from 'lib/keyboards';
 import { validateAndFix, normalizeBody } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm } from 'lib/time';
 // normHm via time
 import { resolveUserId } from 'lib/resolve';
+import {
+  getSubLeaderChannel,
+  upsertSubLeader,
+  deactivateSubLeader,
+  listAllSubLeaders,
+  listActiveSubLeaders,
+  notifySubLeaderAppointed,
+  notifySubLeaderChannelChange,
+  notifySubLeaderRemoved,
+  subLeaderAdmins,
+  channelStatsFor,
+  assertSubLeaderChannel,
+} from 'lib/subleader';
 import {
   ensureChannelsSeeded,
   getChannels,
@@ -76,6 +95,7 @@ async function checkRateLimit(uid) {
 async function roleKb(uid) {
   const r = await getRole(uid);
   if (r === 'owner') return ownerKeyboard();
+  if (r === 'subleader') return subLeaderKeyboard();
   if (r === 'admin') return adminKeyboard();
   return userKeyboard();
 }
@@ -426,7 +446,7 @@ export default async function (message) {
       return;
     }
 
-    if ((role === 'admin' || owner) && text === '📥 پیام‌های در انتظار') {
+    if ((role === 'admin' || role === 'subleader' || owner) && text === '📥 پیام‌های در انتظار') {
       // تنها مسیر دریافت Pending: ساخت/بازیابی Batch ده‌تایی (شیفت داخل createReviewBatch چک می‌شود)
       const res = await createReviewBatch(userId);
       if (res.status === 'no_shift') {
@@ -860,6 +880,197 @@ export default async function (message) {
     }
 
     // ========== OWNER: stats / feedback / search / announce / settings ==========
+
+    // ========== OWNER: Sub-Leaders ==========
+    if (owner && text === '🛡️ ساب‌لیدرها') {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '🛡️ مدیریت ساب‌لیدرها',
+        reply_markup: ownerSubLeaderMenuKeyboard(),
+      });
+      return;
+    }
+    if (owner && text === '➕ افزودن ساب‌لیدر') {
+      await setState(userId, 'sl_add_id');
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'آیدی عددی یا @username کاربر را بفرستید:',
+        reply_markup: backKeyboard(),
+      });
+      return;
+    }
+    if (owner && state?.kind === 'sl_add_id' && text) {
+      const tid = await resolveUserId(text);
+      if (!tid) {
+        await api.sendMessage({ chat_id: chatId, text: '❌ کاربر پیدا نشد.', reply_markup: backKeyboard() });
+        return;
+      }
+      if (isOwner(tid)) {
+        await api.sendMessage({ chat_id: chatId, text: '❌ مالک را نمی‌توان ساب‌لیدر کرد.', reply_markup: backKeyboard() });
+        return;
+      }
+      const tu = await getUser(tid);
+      if (tu && Number(tu.blocked) === 1) {
+        await api.sendMessage({ chat_id: chatId, text: '❌ این کاربر بلاک است.', reply_markup: backKeyboard() });
+        return;
+      }
+      await setState(userId, 'sl_add_ch', { targetId: tid });
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'کانال تحت مدیریت را انتخاب کنید:',
+        reply_markup: subLeaderPickChannelInline(),
+      });
+      return;
+    }
+    if (owner && text === '👥 لیست ساب‌لیدرها') {
+      const all = await listAllSubLeaders();
+      if (!all.length) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'ℹ️ ساب‌لیدری ثبت نشده.',
+          reply_markup: ownerSubLeaderMenuKeyboard(),
+        });
+        return;
+      }
+      const items = [];
+      for (const r of all) {
+        let display = String(r.userId);
+        try {
+          display = displayName(await getUser(r.userId), r.userId);
+        } catch (_e) {}
+        items.push({ userId: r.userId, channelKey: r.channelKey, status: r.status, display });
+      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '👥 لیست ساب‌لیدرها\nروی مورد بزنید:',
+        reply_markup: subLeaderListInline(items),
+      });
+      return;
+    }
+
+    // ========== SUB-LEADER panel ==========
+    if (role === 'subleader') {
+      const myCh = await getSubLeaderChannel(userId);
+      if (!myCh) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '⛔ دسترسی ساب‌لیدری فعال نیست.',
+          reply_markup: userKeyboard(),
+        });
+        return;
+      }
+      const chTitle = (DEFAULT_CHANNELS[myCh] && DEFAULT_CHANNELS[myCh].title) || myCh;
+
+      if (text === '👥 ادمین‌های من') {
+        const { admins } = await subLeaderAdmins(userId);
+        if (!admins.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'ℹ️ در حال حاضر ادمینی تحت مدیریت شما وجود ندارد.',
+            reply_markup: subLeaderKeyboard(),
+          });
+          return;
+        }
+        let body = '👥 ادمین‌های «' + chTitle + '»\nتعداد: ' + admins.length + '\n\n';
+        for (const a of admins) {
+          body += '• ' + (a.display || a.userId) + ' (`' + a.userId + '`)\n';
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text: body,
+          parse_mode: 'Markdown',
+          reply_markup: subLeaderKeyboard(),
+        });
+        return;
+      }
+
+      if (text === '⏰ مدیریت شیفت‌ها') {
+        await setState(userId, 'pick_shift_ch');
+        // فقط کانال خودش
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'شیفت کانال «' + chTitle + '»',
+          reply_markup: {
+            keyboard: [[{ text: 'شیفت: ' + chTitle }], [{ text: '◀️ بازگشت' }]],
+            resize_keyboard: true,
+          },
+        });
+        return;
+      }
+
+      if (text === '📊 آمار کانال') {
+        const st = await channelStatsFor(myCh);
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '📊 آمار «' +
+            st.title +
+            '»\n\n' +
+            'کل: ' +
+            st.total +
+            '\n🟡' +
+            st.pe +
+            ' 🟢' +
+            st.ap +
+            ' 🔴' +
+            st.rj,
+          reply_markup: subLeaderKeyboard(),
+        });
+        return;
+      }
+
+      if (text === 'ℹ️ اطلاعات کانال') {
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            'ℹ️ کانال تحت مدیریت شما:\n«' +
+            chTitle +
+            '»\nکلید: `' +
+            myCh +
+            '`\n\nدسترسی فقط به همین کانال محدود است.',
+          parse_mode: 'Markdown',
+          reply_markup: subLeaderKeyboard(),
+        });
+        return;
+      }
+
+      if (text === '📢 اطلاعیه برای ادمین‌ها') {
+        await setState(userId, 'sl_ann_text');
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '📢 متن اطلاعیه را برای ادمین‌های «' + chTitle + '» بفرستید:',
+          reply_markup: backKeyboard(),
+        });
+        return;
+      }
+
+      if (state?.kind === 'sl_ann_text' && text && text !== '◀️ بازگشت') {
+        const { admins } = await subLeaderAdmins(userId);
+        if (!admins.length) {
+          await clearState(userId);
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'ℹ️ ادمین فعالی برای ارسال نیست.',
+            reply_markup: subLeaderKeyboard(),
+          });
+          return;
+        }
+        await setState(userId, 'sl_ann_confirm', { annText: text, channelKey: myCh });
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '📢 پیش‌نمایش اطلاعیه\n\n' +
+            text +
+            '\n\nارسال برای ' +
+            admins.length +
+            ' ادمین؟',
+          reply_markup: subLeaderAnnounceConfirmInline(),
+        });
+        return;
+      }
+    }
+
+
     if (owner && text === '📊 آمار') {
       try {
         let all = [];
