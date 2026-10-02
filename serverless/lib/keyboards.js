@@ -1,3 +1,54 @@
+/** تضمین می‌کند همه text دکمه‌ها String و غیرخالی باشند */
+export function btnText(v, fallback) {
+  let s = v == null ? '' : String(v);
+  s = s.trim();
+  if (!s) s = fallback != null ? String(fallback) : '•';
+  // محدودیت تلگرام: حداکثر ۶۴ کاراکتر برای inline
+  if (s.length > 64) s = s.slice(0, 61) + '…';
+  return s;
+}
+
+export function sanitizeMarkup(markup) {
+  if (!markup || typeof markup !== 'object') return markup;
+  const out = Object.assign({}, markup);
+  if (Array.isArray(out.inline_keyboard)) {
+    out.inline_keyboard = out.inline_keyboard
+      .map(function (row) {
+        if (!Array.isArray(row)) return null;
+        return row
+          .map(function (b) {
+            if (!b || typeof b !== 'object') return null;
+            const nb = Object.assign({}, b);
+            nb.text = btnText(nb.text, '•');
+            if (nb.callback_data != null) nb.callback_data = String(nb.callback_data);
+            return nb;
+          })
+          .filter(Boolean);
+      })
+      .filter(function (row) {
+        return row && row.length;
+      });
+  }
+  if (Array.isArray(out.keyboard)) {
+    out.keyboard = out.keyboard
+      .map(function (row) {
+        if (!Array.isArray(row)) return null;
+        return row
+          .map(function (b) {
+            if (!b || typeof b !== 'object') return null;
+            const nb = Object.assign({}, b);
+            nb.text = btnText(nb.text, '•');
+            return nb;
+          })
+          .filter(Boolean);
+      })
+      .filter(function (row) {
+        return row && row.length;
+      });
+  }
+  return out;
+}
+
 import { DEFAULT_CHANNELS, buildShiftSlots } from 'lib/config';
 
 export function userKeyboard() {
@@ -86,14 +137,14 @@ export function searchKeyboard() {
 
 export function channelAdminPickKeyboard() {
   const rows = Object.values(DEFAULT_CHANNELS).map((c) => [
-    { text: 'ادمین‌های ' + c.title },
+    { text: btnText('ادمین‌های ' + (c.title || c.key || ''), 'ادمین‌ها') },
   ]);
   rows.push([{ text: '◀️ بازگشت' }]);
   return { keyboard: rows, resize_keyboard: true };
 }
 
 export function shiftChannelPickKeyboard(channelList) {
-  const rows = channelList.map((c) => [{ text: 'شیفت: ' + c.title }]);
+  const rows = channelList.map((c) => [{ text: btnText('شیفت: ' + (c.title || c.key || ''), 'شیفت') }]);
   rows.push([{ text: '◀️ بازگشت' }]);
   return { keyboard: rows, resize_keyboard: true };
 }
@@ -181,7 +232,7 @@ export function rejectReasonsInline(id) {
   return {
     inline_keyboard: [
       ...reasons.map((r) => [
-        { text: r, callback_data: 'reject:' + id + ':' + r, style: 'danger' },
+        { text: btnText(r, 'دلیل'), callback_data: 'reject:' + id + ':' + r, style: 'danger' },
       ]),
       [{ text: 'سایر (تایپ دلیل)', callback_data: 'reject_other:' + id, style: 'primary' }],
       [{ text: 'انصراف', callback_data: 'reject_cancel:' + id, style: 'primary' }],
@@ -286,7 +337,7 @@ export function adminListInline(admins, channelKey) {
   for (const a of admins) {
     const name = String(a.display || a.userId || 'کاربر').slice(0, 40);
     rows.push([
-      { text: name, callback_data: 'uv:' + a.userId, style: 'primary' },
+      { text: btnText(name, 'کاربر'), callback_data: 'uv:' + a.userId, style: 'primary' },
       {
         text: 'حذف',
         callback_data: 'adel:' + channelKey + ':' + a.userId,
@@ -383,7 +434,7 @@ export function subLeaderListInline(items) {
     const st = it.status === 'active' ? '🟢' : '🔴';
     rows.push([
       {
-        text: st + ' ' + (it.display || it.userId) + ' | ' + title,
+        text: btnText(st + ' ' + (it.display != null && it.display !== '' ? it.display : it.userId) + ' | ' + title, 'ساب‌لیدر'),
         callback_data: 'sl_view:' + it.userId,
         style: 'primary',
       },
@@ -423,7 +474,7 @@ export function subLeaderAdminsInline(admins, channelKey) {
   for (const a of admins || []) {
     const name = String(a.display || a.userId || 'کاربر').slice(0, 28);
     rows.push([
-      { text: name, callback_data: 'sl_ainfo:' + a.userId, style: 'primary' },
+      { text: btnText(name, 'کاربر'), callback_data: 'sl_ainfo:' + a.userId, style: 'primary' },
       {
         text: 'حذف',
         callback_data: 'sl_adel:' + channelKey + ':' + a.userId,
