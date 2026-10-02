@@ -37,6 +37,8 @@ import {
   subLeaderAnnounceConfirmInline,
   subLeaderAdminsInline,
   flushChannelPickInline,
+  purgeUserConfirmInline,
+  purgeUserProgressInline,
   flushProgressInline,
   flushConfirmInline,
 } from 'lib/keyboards';
@@ -1572,6 +1574,73 @@ export default async function (message) {
     // بازیابی بکاپ حذف شد
 
     
+    
+    if (owner && text === '🗑 پاک‌سازی pending کاربر') {
+      await setState(userId, 'purge_user_wait_id');
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'آیدی عددی کاربری که pendingهایش پاک شود را بفرستید:',
+        reply_markup: backKeyboard(),
+      });
+      return;
+    }
+
+    if (owner && state?.kind === 'purge_user_wait_id' && text) {
+      const tid = Number(String(text).replace(/\D/g, ''));
+      if (!tid) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'آیدی عددی نامعتبر است.',
+          reply_markup: backKeyboard(),
+        });
+        return;
+      }
+      const pending =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.userId, tid), eq(messages.status, 'pending')))
+          .all()) || [];
+      pending.sort(function (a, b) {
+        return a.id - b.id;
+      });
+      await clearState(userId);
+      if (!pending.length) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'ℹ️ این کاربر پیام pending ندارد.',
+          reply_markup: settingsKeyboard(await isBotOn()),
+        });
+        return;
+      }
+      let preview = '';
+      for (const row of pending.slice(0, 5)) {
+        preview +=
+          '#' +
+          row.id +
+          ' | ' +
+          row.channelKey +
+          '\n' +
+          String(row.content || '').slice(0, 80) +
+          '\n────────────\n';
+      }
+      if (pending.length > 5) preview += '… و ' + (pending.length - 5) + ' مورد دیگر\n';
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '🗑 پاک‌سازی pending کاربر\n\n' +
+          'کاربر: ' +
+          tid +
+          '\nتعداد pending: ' +
+          pending.length +
+          '\n\nنمونه:\n' +
+          preview +
+          '\nهر بار ۱۵ پیام (از قدیمی‌ترین) رد/پاک می‌شود.',
+        reply_markup: purgeUserConfirmInline(tid, pending.length),
+      });
+      return;
+    }
+
     if (owner && text === '📤 انتشار مستقیم صف') {
       await api.sendMessage({
         chat_id: chatId,
