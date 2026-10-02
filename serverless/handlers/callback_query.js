@@ -417,16 +417,21 @@ if (data.startsWith('reject_menu:')) {
     if (data.startsWith('reject_cancel:')) {
       const id = Number(data.split(':')[1]);
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
+      let showNext = false;
       let bn = null;
       try {
         const b = await getReviewBatch(userId);
-        if (b) bn = b.batchNumber;
+        if (b && b.ids && b.ids.length) {
+          bn = b.batchNumber;
+          // فقط اگر این پیام آخرین آیتم Batch است
+          if (Number(b.ids[b.ids.length - 1]) === Number(id)) showNext = true;
+        }
       } catch (_) {}
       try {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: sanitizeMarkup(reviewInline(id, true, bn)),
+          reply_markup: sanitizeMarkup(reviewInline(id, showNext, bn)),
         });
       } catch (_) {}
       return;

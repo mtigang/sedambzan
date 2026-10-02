@@ -782,8 +782,8 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
           displayName(sender, row.userId) +
           '\n\n' +
           String(row.content || '').slice(0, 3800),
-        // همیشه دکمه Batch بعدی را نشان بده؛ اگر Batch ناقص باشد review_next جلوی ادامه را می‌گیرد
-        reply_markup: sanitizeMarkup(reviewInline(row.id, true, batch.batchNumber)),
+        // فقط زیر آخرین پیام Batch دکمه «Batch بعدی» باشد
+        reply_markup: sanitizeMarkup(reviewInline(row.id, Number(row.id) === lastId, batch.batchNumber)),
       });
     } catch (e) {
       console.error('sendReviewBatch', row.id, e);
