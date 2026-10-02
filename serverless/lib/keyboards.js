@@ -342,7 +342,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
       if (ownerMode) {
         rows.push([
           {
-            text: String(s.label || s.hourKey || '') + ' (پر — لغو مالک)',
+            text: btnText((s.label || s.hourKey || 'شیفت') + ' (پر — لغو مالک)', 'پر'),
             callback_data: 'shift_ocancel|' + channelKey + '|' + key,
             style: 'danger',
           },
@@ -350,7 +350,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
       } else {
         rows.push([
           {
-            text: String(s.label || s.hourKey || '') + ' (پر)',
+            text: btnText((s.label || s.hourKey || 'شیفت') + ' (پر)', 'پر'),
             callback_data: 'shift_full|' + channelKey + '|' + key,
             style: 'danger',
           },
@@ -359,7 +359,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
     } else if (isMine) {
       rows.push([
         {
-          text: String(s.label || s.hourKey || '') + ' (شما — لغو)',
+          text: btnText((s.label || s.hourKey || 'شیفت') + ' (شما — لغو)', 'لغو'),
           callback_data: 'shift_cancel|' + channelKey + '|' + key,
           style: 'danger',
         },
@@ -367,8 +367,8 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
     } else {
       rows.push([
         {
-          text: String(s.label || s.hourKey || 'شیفت'),
-          callback_data: 'shift_pick|' + channelKey + '|' + s.start + '|' + s.end,
+          text: btnText(s.label || s.hourKey || 'شیفت', 'شیفت'),
+          callback_data: 'shift_pick|' + channelKey + '|' + String(s.start || '') + '|' + String(s.end || ''),
           style: 'success',
         },
       ]);
@@ -427,7 +427,7 @@ export function announceTargetInline() {
 export function ownerShiftMenuInline() {
   return sanitizeMarkup({
     inline_keyboard: [
-      [{ text: '📅 تخصیص شیفت روزانه', callback_data: 'own_shift:daily', style: 'success' }],
+      [{ text: '📅 تخصیص شیفت روزانه', callback_data: 'own_shift:daily', style: 'primary' }],
       [{ text: '♾️ تخصیص شیفت دائمی', callback_data: 'own_shift:perm', style: 'primary' }],
       [{ text: '📋 لیست و لغو شیفت‌ها', callback_data: 'own_shift_list', style: 'primary' }],
       [{ text: '🗑 لغو همه شیفت‌های دوره', callback_data: 'own_cancel_all', style: 'danger' }],

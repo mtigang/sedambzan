@@ -632,7 +632,13 @@ async function selectReviewablePending(adminId) {
   const pending = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
   // publishing عمداً نیست — رزرو شده
   pending.sort((a, b) => a.id - b.id);
-  if (isOwner(adminId)) return pending;
+  if (isOwner(adminId)) {
+    try {
+      const ch = await settingGet('owner_pend_ch:' + adminId, '');
+      if (ch) return pending.filter((m) => m.channelKey === ch);
+    } catch (_e) {}
+    return pending;
+  }
   // ساب‌لیدر: فقط کانال Scope — بدون نیاز به شیفت
   const slCh = await getActiveSubLeaderChannel(adminId);
   if (slCh) return pending.filter((m) => m.channelKey === slCh);

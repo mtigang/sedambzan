@@ -575,7 +575,24 @@ export default async function (message) {
     }
 
     if ((role === 'admin' || role === 'subleader' || owner) && text === '📥 پیام‌های در انتظار') {
-      // تنها مسیر دریافت Pending: ساخت/بازیابی Batch ده‌تایی (شیفت داخل createReviewBatch چک می‌شود)
+      // مالک: ابتدا کانال را انتخاب کند
+      if (owner) {
+        const rows = Object.values(DEFAULT_CHANNELS).map(function (c) {
+          return [{
+            text: String(c.title || c.key || 'کانال'),
+            callback_data: 'own_pend:' + c.key,
+            style: 'primary',
+          }];
+        });
+        rows.push([{ text: 'همه کانال‌ها', callback_data: 'own_pend:all', style: 'success' }]);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'پیام‌های در انتظار کدام کانال را می‌خواهید ببینید؟',
+          reply_markup: sanitizeMarkup({ inline_keyboard: rows }),
+        });
+        return;
+      }
+      // ادمین/ساب‌لیدر: ساخت/بازیابی Batch ده‌تایی
       const res = await createReviewBatch(userId);
       if (res.status === 'no_shift') {
         await api.sendMessage({
@@ -1398,6 +1415,15 @@ export default async function (message) {
       const row = rows[0];
       const uu = await getUser(row.userId);
       const map = { pending: '🟡', approved: '🟢', rejected: '🔴' };
+      let reviewerLabel = '';
+      if (row.reviewedBy) {
+        try {
+          const ru = await getUser(row.reviewedBy);
+          reviewerLabel = displayName(ru, row.reviewedBy) + ' | ' + row.reviewedBy;
+        } catch (_e) {
+          reviewerLabel = String(row.reviewedBy);
+        }
+      }
       await api.sendMessage({
         chat_id: chatId,
         text:
@@ -1411,7 +1437,7 @@ export default async function (message) {
           '\nuser: ' +
           row.userId +
           (uu ? ' (' + displayName(uu, row.userId) + ')' : '') +
-          (row.reviewedBy ? '\nبررسی‌کننده: ' + row.reviewedBy : '') +
+          (reviewerLabel ? '\nبررسی‌کننده: ' + reviewerLabel : '') +
           (row.rejectReason ? '\nدلیل رد: ' + row.rejectReason : '') +
           '\n🕐 ارسال: ' +
           formatTsJalali(row.submittedAt) +

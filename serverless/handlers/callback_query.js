@@ -168,16 +168,57 @@ export default async function (cq) {
         : String(uid);
       const un = u?.username ? '@' + u.username : '—';
       await api.answerCallbackQuery({ callback_query_id: cq.id });
-      await api.sendMessage({
-        chat_id: cq.message.chat.id,
-        text:
-          '👤 ' +
-          name +
-          '\nیوزرنیم: ' +
-          un +
-          '\nآیدی: ' +
-          uid,
-      });
+
+      // عملکرد ۷ روز گذشته به تفکیک روز
+      let perfLines = [];
+      try {
+        const all =
+          (await db.select().from(messages).where(eq(messages.reviewedBy, uid)).all()) || [];
+        const now = Date.now();
+        const dayMs = 24 * 60 * 60 * 1000;
+        const labels = ['امروز', 'دیروز', '۲ روز پیش', '۳ روز پیش', '۴ روز پیش', '۵ روز پیش', '۶ روز پیش'];
+        for (let d = 0; d < 7; d++) {
+          const start = now - (d + 1) * dayMs;
+          const end = now - d * dayMs;
+          const dayRows = all.filter(function (m) {
+            if (!m.reviewedAt) return false;
+            const t = new Date(m.reviewedAt).getTime();
+            return t >= start && t < end;
+          });
+          const ap = dayRows.filter(function (m) { return m.status === 'approved'; }).length;
+          const rj = dayRows.filter(function (m) { return m.status === 'rejected'; }).length;
+          perfLines.push(labels[d] + ': ' + ap + ' تأیید، ' + rj + ' رد');
+        }
+      } catch (e) {
+        console.error('uv perf', e);
+      }
+      const caption =
+        '👤 ' + name +
+        '\nیوزرنیم: ' + un +
+        '\nآیدی: ' + uid +
+        (perfLines.length ? '\n\n📊 عملکرد ۷ روز گذشته:\n' + perfLines.join('\n') : '');
+
+      let sentPhoto = false;
+      try {
+        const photos = await api.getUserProfilePhotos({ user_id: uid, limit: 1 });
+        const fileId = photos && photos.photos && photos.photos[0] && photos.photos[0][0] && photos.photos[0][0].file_id;
+        if (fileId) {
+          await api.sendPhoto({
+            chat_id: cq.message.chat.id,
+            photo: fileId,
+            caption: caption.slice(0, 1024),
+          });
+          sentPhoto = true;
+        }
+      } catch (e) {
+        console.error('uv photo', e);
+      }
+      if (!sentPhoto) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: caption,
+        });
+      }
       return;
     }
 
@@ -470,6 +511,43 @@ if (data.startsWith('reject_menu:')) {
     }
 
     // دریافت Batch بعدی — همه‌ی شرط‌ها دوباره از DB بررسی می‌شود
+    if (data.startsWith('own_pend:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const chKey = data.split(':')[1];
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        if (chKey && chKey !== 'all') {
+          await settingSet('owner_pend_ch:' + userId, chKey);
+        } else {
+          await settingSet('owner_pend_ch:' + userId, '');
+        }
+      } catch (_e) {}
+      const res = await createReviewBatch(userId);
+      if (res.status === 'empty') {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '📭 پیام pending' + (chKey && chKey !== 'all' ? ' برای این کانال' : '') + ' وجود ندارد.',
+        });
+        return;
+      }
+      if (res.status === 'busy') {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '⏳ درخواست قبلی در حال پردازش است. چند ثانیه بعد دوباره تلاش کنید.',
+        });
+        return;
+      }
+      if (res.status === 'incomplete') {
+        await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: true });
+        return;
+      }
+      await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: false });
+      return;
+    }
+
     if (data === 'review_next' || data.startsWith('review_next:')) {
       const want = data.indexOf(':') >= 0 ? Number(data.split(':')[1]) : null;
       const role = await getRole(userId);
