@@ -236,7 +236,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
       if (ownerMode) {
         rows.push([
           {
-            text: s.label + ' (پر — لغو مالک)',
+            text: String(s.label || s.hourKey || '') + ' (پر — لغو مالک)',
             callback_data: 'shift_ocancel|' + channelKey + '|' + key,
             style: 'danger',
           },
@@ -244,7 +244,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
       } else {
         rows.push([
           {
-            text: s.label + ' (پر)',
+            text: String(s.label || s.hourKey || '') + ' (پر)',
             callback_data: 'shift_full|' + channelKey + '|' + key,
             style: 'danger',
           },
@@ -253,7 +253,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
     } else if (isMine) {
       rows.push([
         {
-          text: s.label + ' (شما — لغو)',
+          text: String(s.label || s.hourKey || '') + ' (شما — لغو)',
           callback_data: 'shift_cancel|' + channelKey + '|' + key,
           style: 'danger',
         },
@@ -261,7 +261,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
     } else {
       rows.push([
         {
-          text: s.label,
+          text: String(s.label || s.hourKey || 'شیفت'),
           callback_data: 'shift_pick|' + channelKey + '|' + s.start + '|' + s.end,
           style: 'success',
         },
@@ -284,7 +284,7 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
 export function adminListInline(admins, channelKey) {
   const rows = [];
   for (const a of admins) {
-    const name = (a.display || String(a.userId)).slice(0, 40);
+    const name = String(a.display || a.userId || 'کاربر').slice(0, 40);
     rows.push([
       { text: name, callback_data: 'uv:' + a.userId, style: 'primary' },
       {
@@ -421,7 +421,7 @@ export function subLeaderAnnounceConfirmInline() {
 export function subLeaderAdminsInline(admins, channelKey) {
   const rows = [];
   for (const a of admins || []) {
-    const name = String(a.display || a.userId).slice(0, 28);
+    const name = String(a.display || a.userId || 'کاربر').slice(0, 28);
     rows.push([
       { text: name, callback_data: 'sl_ainfo:' + a.userId, style: 'primary' },
       {
