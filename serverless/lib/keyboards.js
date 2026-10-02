@@ -142,6 +142,8 @@ export function subLeaderKeyboard() {
   return sanitizeMarkup({
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌های من' }],
+      [{ text: '➕ افزودن ادمین' }, { text: '⏰ شیفت من' }],
+      [{ text: '📋 شیفت‌های ۷ روز' }, { text: '🔎 جستجوی پیام' }],
       [{ text: '⏰ مدیریت شیفت‌ها' }, { text: '📊 آمار کانال' }],
       [{ text: '📢 اطلاعیه برای ادمین‌ها' }],
       [{ text: 'ℹ️ اطلاعات کانال' }],
@@ -403,13 +405,6 @@ export function adminListInline(admins, channelKey) {
   rows.push([
     { text: 'افزودن ادمین', callback_data: 'aadd:' + channelKey, style: 'success' },
   ]);
-  rows.push([
-    {
-      text: 'بروزرسانی از گروه',
-      callback_data: 'async:' + channelKey,
-      style: 'primary',
-    },
-  ]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
@@ -558,7 +553,14 @@ export function subLeaderAdminsInline(admins, channelKey) {
   if (!rows.length) {
     rows.push([{ text: btnText('ادمینی نیست', '—'), callback_data: 'sl_noop', style: 'primary' }]);
   }
-  return { markup: sanitizeMarkup({ inline_keyboard: rows }), skipped: skipped };
+    rows.push([
+    {
+      text: btnText('➕ افزودن ادمین', 'افزودن'),
+      callback_data: 'sl_aadd:' + String(ch || channelKey || ''),
+      style: 'success',
+    },
+  ]);
+return { markup: sanitizeMarkup({ inline_keyboard: rows }), skipped: skipped };
 }
 
 export function flushChannelPickInline() {
