@@ -540,6 +540,54 @@ export async function clearReviewBatch(adminId) {
   }
 }
 
+/** فقط IDهای هنوز pending را نگه می‌دارد */
+export async function pruneReviewBatchToPending(adminId) {
+  const old = await getReviewBatch(adminId);
+  if (!old || !old.ids || !old.ids.length) return { cleared: true, ids: [] };
+  const alive = [];
+  for (const id of old.ids) {
+    const row = await getMessageById(Number(id));
+    if (row && String(row.status) === 'pending') alive.push(Number(id));
+  }
+  if (!alive.length) {
+    await clearReviewBatch(adminId);
+    return { cleared: true, ids: [] };
+  }
+  if (alive.length !== old.ids.length) {
+    old.ids = alive;
+    await saveReviewBatch(adminId, old);
+  }
+  return { cleared: false, ids: alive, batch: old };
+}
+
+/** بعد از approve/reject/flush این id را از Batch همه ادمین‌ها بردار */
+export async function dropMessageFromAllReviewBatches(msgId) {
+  msgId = Number(msgId);
+  try {
+    const all = (await db.select().from(settings).all()) || [];
+    for (const row of all) {
+      if (!row.key || !String(row.key).startsWith('review_batch:')) continue;
+      let b;
+      try {
+        b = JSON.parse(row.value || '');
+      } catch (_e) {
+        continue;
+      }
+      if (!b || !Array.isArray(b.ids)) continue;
+      const next = b.ids.map(Number).filter((id) => id !== msgId);
+      if (next.length === b.ids.length) continue;
+      const adminId = String(row.key).replace('review_batch:', '');
+      if (!next.length) await clearReviewBatch(adminId);
+      else {
+        b.ids = next;
+        await saveReviewBatch(adminId, b);
+      }
+    }
+  } catch (e) {
+    console.error('dropMessageFromAllReviewBatches', e);
+  }
+}
+
 async function getMessageById(id) {
   const rows = await db.select().from(messages).where(eq(messages.id, Number(id))).all();
   return (rows && rows[0]) || null;
@@ -560,9 +608,12 @@ export async function getReviewBatchMessages(adminId) {
 /** Batch کامل است اگر هیچ‌کدام از IDها دیگر pending نباشد (بدون Batch = کامل) */
 export async function isReviewBatchComplete(adminId) {
   const b = await getReviewBatch(adminId);
-  if (!b) return true;
-  const rows = await getReviewBatchMessages(adminId);
-  return rows.every((r) => r.status !== 'pending');
+  if (!b || !b.ids || !b.ids.length) return true;
+  for (const id of b.ids) {
+    const row = await getMessageById(Number(id));
+    if (row && String(row.status) === 'pending') return false;
+  }
+  return true;
 }
 
 /** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول */
@@ -591,7 +642,13 @@ export async function finishReviewBatchIfComplete(adminId, messageId) {
     }
     const complete = await isReviewBatchComplete(adminId);
     let hasMore = false;
-    if (complete) hasMore = (await selectReviewablePending(adminId)).length > 0;
+    if (complete) {
+      hasMore = (await selectReviewablePending(adminId)).length > 0;
+      // آزاد کردن Batch تا گیر نکند
+      try {
+        await clearReviewBatch(adminId);
+      } catch (_e) {}
+    }
     return { inBatch: true, complete, hasMore, batch };
   } catch (e) {
     console.error('finishReviewBatchIfComplete', e);
@@ -609,73 +666,55 @@ export async function finishReviewBatchIfComplete(adminId, messageId) {
  *   created    → Batch جدید ساخته شد
  */
 export async function createReviewBatch(adminId) {
-  adminId = Number(adminId);
-  const owner = isOwner(adminId);
-  const slCh = owner ? null : await getActiveSubLeaderChannel(adminId);
-  let keys = null;
-  if (!owner) {
-    if (slCh) {
-      keys = [slCh];
-    } else {
-      keys = await activeShiftChannelKeys(adminId);
-      if (!keys.length) return { status: 'no_shift' };
-    }
-  }
-
-  const lockKey = 'review_lock:' + adminId;
+  const lockKey = 'review_batch_lock:' + adminId;
   const lock = await acquireLock(lockKey);
   if (!lock) return { status: 'busy' };
-
   try {
-    const old = await getReviewBatch(adminId);
-    if (old) {
-      const rows = await getReviewBatchMessages(adminId);
-      let pendingRows = rows.filter((r) => r.status === 'pending');
-      if (pendingRows.length && !owner) {
-        // سیاست شیفت بعدی: Batch ناقص ادامه می‌یابد، فقط برای کانال‌های شیفت فعلی.
-        // پیام‌های کانال‌های غیرفعال از Batch کنار گذاشته می‌شوند (در صف pending می‌مانند).
-        const stale = pendingRows.filter((r) => !keys.includes(r.channelKey));
-        if (stale.length) {
-          const drop = new Set(stale.map((r) => Number(r.id)));
-          pendingRows = pendingRows.filter((r) => !drop.has(Number(r.id)));
-          if (pendingRows.length) {
-            old.ids = old.ids.filter((id) => !drop.has(Number(id)));
-            await saveReviewBatch(adminId, old);
-          }
-        }
-      }
-      if (pendingRows.length) {
-        if (!owner) {
-          keys = await activeShiftChannelKeys(adminId);
-          if (!keys.length) {
-            await clearReviewBatch(adminId);
-            return { status: 'no_shift' };
-          }
-          pendingRows = pendingRows.filter((r) => keys.includes(r.channelKey));
-          if (!pendingRows.length) {
-            await clearReviewBatch(adminId);
-          } else {
-            old.ids = pendingRows.map((r) => r.id);
-            await saveReviewBatch(adminId, old);
-            return { status: 'incomplete', batch: old, messages: pendingRows };
-          }
-        } else {
-          return { status: 'incomplete', batch: old, messages: pendingRows };
-        }
+    const owner = isOwner(adminId);
+    if (!owner) {
+      const keys = await activeShiftChannelKeys(adminId);
+      if (!keys.length) {
+        await clearReviewBatch(adminId);
+        return { status: 'no_shift' };
       }
     }
 
-    const candidates = (await selectReviewablePending(adminId)).slice(0, REVIEW_BATCH_SIZE);
-    if (!candidates.length) return { status: 'empty' };
+    // Batch قبلی را به pending واقعی هرس کن
+    const pruned = await pruneReviewBatchToPending(adminId);
+    if (!pruned.cleared && pruned.ids && pruned.ids.length) {
+      let pendingRows = [];
+      for (const id of pruned.ids) {
+        const row = await getMessageById(id);
+        if (row && String(row.status) === 'pending') pendingRows.push(row);
+      }
+      if (!owner) {
+        const keys = await activeShiftChannelKeys(adminId);
+        pendingRows = pendingRows.filter((r) => keys.includes(r.channelKey));
+      }
+      if (pendingRows.length) {
+        const batch = pruned.batch || (await getReviewBatch(adminId));
+        batch.ids = pendingRows.map((r) => Number(r.id));
+        await saveReviewBatch(adminId, batch);
+        return { status: 'incomplete', batch, messages: pendingRows };
+      }
+      await clearReviewBatch(adminId);
+    }
 
+    const candidates = (await selectReviewablePending(adminId)).filter(
+      (m) => m && String(m.status) === 'pending'
+    );
+    const clean = candidates.slice(0, REVIEW_BATCH_SIZE);
+    if (!clean.length) return { status: 'empty' };
+
+    const old = await getReviewBatch(adminId);
     const batch = {
-      ids: candidates.map((m) => Number(m.id)),
+      ids: clean.map((m) => Number(m.id)),
       batchNumber: (old && Number(old.batchNumber) ? Number(old.batchNumber) : 0) + 1,
       createdAt: Date.now(),
       periodDate: periodDateStr(),
     };
     await saveReviewBatch(adminId, batch);
-    return { status: 'created', batch, messages: candidates };
+    return { status: 'created', batch, messages: clean };
   } finally {
     await releaseLock(lockKey, lock);
   }
@@ -684,16 +723,29 @@ export async function createReviewBatch(adminId) {
 /** ارسال پیام‌های Batch به ادمین (حداکثر ۱۰ + یک پیام سرتیتر) */
 export async function sendReviewBatch(chatId, batch, rows, opts) {
   const resumed = !!(opts && opts.resumed);
-  const lastId = Number(batch.ids[batch.ids.length - 1]);
+  const live = [];
+  for (const row of rows || []) {
+    if (!row) continue;
+    const fresh = await getMessageById(Number(row.id));
+    if (fresh && String(fresh.status) === 'pending') live.push(fresh);
+  }
+  if (!live.length) {
+    await api.sendMessage({
+      chat_id: chatId,
+      text: '📭 در این Batch پیام pending نمانده. دوباره «📥 پیام‌های در انتظار» را بزنید.',
+    });
+    return;
+  }
+  const lastId = Number(live[live.length - 1].id);
   const head = resumed
     ? '⏳ Batch فعلی هنوز کامل بررسی نشده است.\nBatch شماره ' +
       batch.batchNumber +
       ' — ' +
-      rows.length +
-      ' پیام باقی‌مانده دوباره ارسال شد.'
-    : '📥 Batch شماره ' + batch.batchNumber + '\n' + rows.length + ' پیام برای بررسی دریافت شد.';
+      live.length +
+      ' پیام pending باقی مانده.'
+    : '📥 Batch شماره ' + batch.batchNumber + '\n' + live.length + ' پیام برای بررسی دریافت شد.';
   await api.sendMessage({ chat_id: chatId, text: head });
-  for (const row of rows) {
+  for (const row of live) {
     try {
       const ch = await getChannel(row.channelKey);
       const sender = await getUser(row.userId);
@@ -779,6 +831,9 @@ export async function decideMessage(adminId, id, decision, reason) {
       .set(patch)
       .where(and(eq(messages.id, id), eq(messages.status, 'pending')))
       .run();
+    try {
+      await dropMessageFromAllReviewBatches(id);
+    } catch (_e) {}
     return { ok: true, row: fresh };
   } finally {
     await releaseLock(lockKey, lock);
