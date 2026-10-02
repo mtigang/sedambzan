@@ -35,6 +35,10 @@ import {
   subLeaderListInline,
   subLeaderManageInline,
   subLeaderAnnounceConfirmInline,
+  subLeaderAdminsInline,
+  flushChannelPickInline,
+  flushProgressInline,
+  flushConfirmInline,
 } from 'lib/keyboards';
 import { validateAndFix, normalizeBody } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
@@ -1474,6 +1478,19 @@ export default async function (message) {
 
 
     // بازیابی بکاپ حذف شد
+
+    
+    if (owner && text === '📤 انتشار مستقیم صف') {
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '📤 انتشار مستقیم صف\n\n' +
+          'قدیمی‌ترین پیام‌های در انتظار بدون بررسی ادمین، مستقیم در کانال منتشر می‌شوند.\n' +
+          'کانال را انتخاب کنید:',
+        reply_markup: flushChannelPickInline(),
+      });
+      return;
+    }
 
     if (owner && text === '🧹 پاک‌سازی صف') {
       await setState(userId, 'clear_q');
