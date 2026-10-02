@@ -39,9 +39,12 @@ import {
   flushChannelPickInline,
   purgeUserConfirmInline,
   purgeUserProgressInline,
+  sanitizeMarkup,
+  btnText,
   flushProgressInline,
   flushConfirmInline,
 } from 'lib/keyboards';
+// sanitize imported below
 import { validateAndFix, normalizeBody, exactBodyKey } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm } from 'lib/time';
@@ -102,10 +105,15 @@ async function checkRateLimit(uid) {
 
 async function roleKb(uid) {
   const r = await getRole(uid);
-  if (r === 'owner') return ownerKeyboard();
-  if (r === 'subleader') return subLeaderKeyboard();
-  if (r === 'admin') return adminKeyboard();
-  return userKeyboard();
+  let kb =
+    r === 'owner'
+      ? ownerKeyboard()
+      : r === 'subleader'
+        ? subLeaderKeyboard()
+        : r === 'admin'
+          ? adminKeyboard()
+          : userKeyboard();
+  return sanitizeMarkup(kb);
 }
 
 export default async function (message) {
@@ -528,7 +536,7 @@ export default async function (message) {
           await api.sendMessage({
             chat_id: chatId,
             text: '✅ همه‌ی پیام‌های Batch شماره ' + fin.batch.batchNumber + ' بررسی شدند.',
-            reply_markup: reviewNextInline(fin.batch.batchNumber),
+            reply_markup: sanitizeMarkup(reviewNextInline(fin.batch.batchNumber)),
           });
         } else {
           await api.sendMessage({
@@ -701,7 +709,7 @@ export default async function (message) {
       const board = await api.sendMessage({
         chat_id: chatId,
         text: head,
-        reply_markup: shiftSlotsInline(entry.key, takenMap, myStarts, null, !!owner),
+        reply_markup: sanitizeMarkup(shiftSlotsInline(entry.key, takenMap, myStarts, null, !!owner)),
       });
       try {
         const mid = board && board.message_id;
@@ -851,7 +859,7 @@ export default async function (message) {
           'ساعت را انتخاب کنید (' +
           (mode === 'perm' ? 'دائمی — هر ساعت' : 'روزانه — ۲۴ ساعت آینده') +
           '):',
-        reply_markup: shiftSlotsInline(channelKey, takenMap, new Set(), ownerSlots, true),
+        reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, new Set(), ownerSlots, true)),
       });
       // reuse shift_pick won't know admin - use special callbacks
       // store and intercept - for simplicity owner uses same shift_pick but we need different insert
@@ -902,7 +910,7 @@ export default async function (message) {
             '»\nتعداد: ' +
             ads.length +
             (ads.length ? '\nروی اسم بزنید تا پیوی باز شود.' : '\n(خالی — همگام‌سازی یا افزودن دستی)'),
-          reply_markup: adminListInline(ads, entry.key),
+          reply_markup: sanitizeMarkup(adminListInline(ads, entry.key)),
         });
       } catch (e) {
         console.error('admin list', e);
@@ -944,7 +952,7 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: 'کانال مقصد را انتخاب کنید:',
-        reply_markup: postChannelInline(),
+        reply_markup: sanitizeMarkup(postChannelInline()),
       });
       return;
     }
@@ -1038,7 +1046,7 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: '👥 لیست ساب‌لیدرها\nروی مورد بزنید:',
-        reply_markup: subLeaderListInline(items),
+        reply_markup: sanitizeMarkup(subLeaderListInline(items)),
       });
       return;
     }
@@ -1074,7 +1082,7 @@ export default async function (message) {
             '»\nتعداد: ' +
             admins.length +
             '\nروی «حذف» بزنید تا از کانال شما برداشته شوند (سابقه پاک نمی‌شود).',
-          reply_markup: subLeaderAdminsInline(admins, channelKey || myCh),
+          reply_markup: sanitizeMarkup(subLeaderAdminsInline(admins, channelKey || myCh)),
         });
         return;
       }
@@ -1267,7 +1275,7 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: 'نوع جستجو:',
-        reply_markup: searchKeyboard(),
+        reply_markup: sanitizeMarkup(searchKeyboard()),
       });
       return;
     }
@@ -1450,13 +1458,13 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: body,
-          reply_markup: searchKeyboard(),
+          reply_markup: sanitizeMarkup(searchKeyboard()),
         });
       } else {
         await api.sendMessage({
           chat_id: chatId,
           text: 'پیامی ثبت نشده.',
-          reply_markup: searchKeyboard(),
+          reply_markup: sanitizeMarkup(searchKeyboard()),
         });
       }
       return;
@@ -1646,7 +1654,7 @@ export default async function (message) {
           '📤 انتشار مستقیم صف\n\n' +
           'قدیمی‌ترین پیام‌های در انتظار بدون بررسی ادمین، مستقیم در کانال منتشر می‌شوند.\n' +
           'کانال را انتخاب کنید:',
-        reply_markup: flushChannelPickInline(),
+        reply_markup: sanitizeMarkup(flushChannelPickInline()),
       });
       return;
     }
