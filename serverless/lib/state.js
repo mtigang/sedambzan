@@ -24,12 +24,21 @@ export async function setState(userId, kind, extra = {}) {
   }
 }
 
+const STATE_TTL_MS = 30 * 60 * 1000; // ۳۰ دقیقه
+
 export async function getState(userId) {
   try {
     const rows = await db.select().from(settings).where(eq(settings.key, k(userId))).all();
     if (!rows || !rows[0] || !rows[0].value) return null;
     try {
-      return JSON.parse(rows[0].value);
+      const parsed = JSON.parse(rows[0].value);
+      if (parsed && parsed.ts && Date.now() - Number(parsed.ts) > STATE_TTL_MS) {
+        try {
+          await db.delete(settings).where(eq(settings.key, k(userId))).run();
+        } catch (_e) {}
+        return null;
+      }
+      return parsed;
     } catch (_e) {
       return null;
     }
