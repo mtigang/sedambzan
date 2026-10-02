@@ -70,6 +70,29 @@ export function normalizeBody(text) {
   return t;
 }
 
+/**
+ * کلید تکراری سخت‌گیرانه:
+ * فقط متن بین «پیشوند کانال» و «نقطه پایانی» — بدون فشرده‌سازی فاصله‌های وسط.
+ * مثال: صدام بزن | نیلسا چون ... | .
+ * فقط اگر همان وسط دقیقاً یکی باشد → تکراری
+ */
+export function exactBodyKey(text) {
+  let t = String(text || '').trim();
+  // حذف HTML بولد احتمالی
+  t = t.replace(/<\/?b>/gi, '');
+  for (const { prefix } of CHANNEL_PREFIXES) {
+    if (t.startsWith(prefix)) {
+      t = t.slice(prefix.length);
+      break;
+    }
+  }
+  // فقط نقطه/فاصله انتهایی
+  t = t.replace(/[\s.．.]+$/u, '');
+  // فقط trim دو سر — فاصله‌های وسط دست نخورند
+  t = t.replace(/^\s+/, '').replace(/\s+$/, '');
+  return t;
+}
+
 export function detectChannel(text) {
 
   const t = (text || '').trim();
