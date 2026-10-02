@@ -1,5 +1,6 @@
 import { api, db } from 'sdk';
-import { channels, channelAdmins, shifts, settings, users, messages } from 'schema';
+import {  channels, channelAdmins, shifts, settings, users, messages, subLeaders } from 'schema';
+// subLeaders used for role
 import { eq, and } from 'sdk/db';
 import {
   DEFAULT_CHANNELS,
@@ -175,12 +176,34 @@ export function displayName(u, id) {
 export async function getRole(id) {
   if (isOwner(id)) return 'owner';
   try {
+    // ساب‌لیدر فعال اولویت بالاتر از admin
+    try {
+      const sl = await db.select().from(subLeaders).where(eq(subLeaders.userId, Number(id))).all();
+      if (sl && sl[0] && sl[0].status === 'active') return 'subleader';
+    } catch (_e) {}
     const u = await getUser(id);
+    if (u?.role === 'subleader') {
+      // رکورد inactive یا بدون جدول
+      try {
+        const sl2 = await db.select().from(subLeaders).where(eq(subLeaders.userId, Number(id))).all();
+        if (sl2 && sl2[0] && sl2[0].status === 'active') return 'subleader';
+      } catch (_e) {}
+    }
     if (u?.role === 'admin') return 'admin';
     const ca = await db.select().from(channelAdmins).where(eq(channelAdmins.userId, id)).all();
     if (ca?.length) return 'admin';
   } catch (_) {}
   return 'user';
+}
+
+/** کانال Scope ساب‌لیدر فعال */
+export async function getActiveSubLeaderChannel(userId) {
+  try {
+    const rows = await db.select().from(subLeaders).where(eq(subLeaders.userId, Number(userId))).all();
+    const r = rows && rows[0];
+    if (r && r.status === 'active') return r.channelKey;
+  } catch (_e) {}
+  return null;
 }
 
 export async function adminChannels(userId) {
@@ -547,6 +570,9 @@ async function selectReviewablePending(adminId) {
   const pending = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
   pending.sort((a, b) => a.id - b.id);
   if (isOwner(adminId)) return pending;
+  // ساب‌لیدر: فقط کانال Scope — بدون نیاز به شیفت
+  const slCh = await getActiveSubLeaderChannel(adminId);
+  if (slCh) return pending.filter((m) => m.channelKey === slCh);
   const keys = await activeShiftChannelKeys(adminId);
   if (!keys.length) return [];
   return pending.filter((m) => keys.includes(m.channelKey));
@@ -585,10 +611,15 @@ export async function finishReviewBatchIfComplete(adminId, messageId) {
 export async function createReviewBatch(adminId) {
   adminId = Number(adminId);
   const owner = isOwner(adminId);
+  const slCh = owner ? null : await getActiveSubLeaderChannel(adminId);
   let keys = null;
   if (!owner) {
-    keys = await activeShiftChannelKeys(adminId);
-    if (!keys.length) return { status: 'no_shift' };
+    if (slCh) {
+      keys = [slCh];
+    } else {
+      keys = await activeShiftChannelKeys(adminId);
+      if (!keys.length) return { status: 'no_shift' };
+    }
   }
 
   const lockKey = 'review_lock:' + adminId;
@@ -691,6 +722,17 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
  */
 export async function checkReviewAccess(adminId, row) {
   if (isOwner(adminId)) return { ok: true };
+  const slCh = await getActiveSubLeaderChannel(adminId);
+  if (slCh) {
+    if (!row || row.channelKey !== slCh) {
+      return { ok: false, code: 'channel', text: '⛔ این پیام خارج از محدوده کانال شماست.' };
+    }
+    const batch = await getReviewBatch(adminId);
+    if (!batch || !batch.ids.map(Number).includes(Number(row.id))) {
+      return { ok: false, code: 'not_in_batch', text: '⛔ این پیام در Batch فعلی شما نیست.' };
+    }
+    return { ok: true };
+  }
   const keys = await activeShiftChannelKeys(adminId);
   if (!keys.length) return { ok: false, code: 'shift_ended', text: '❌ شیفت شما تمام شده است.' };
   if (!row || !keys.includes(row.channelKey)) {
