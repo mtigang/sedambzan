@@ -52,6 +52,8 @@ import {
   subLeaderKeyboard,
   ownerSubLeaderMenuKeyboard,
   flushConfirmInline,
+  purgeUserConfirmInline,
+  purgeUserProgressInline,
   flushProgressInline,
   flushChannelPickInline,
   subLeaderAdminsInline,
@@ -1581,7 +1583,89 @@ async function loadAnnounceJob() {
     }
 
     // ========== Owner: انتشار مستقیم صف pending ==========
-    if (data.startsWith('flush_ch:')) {
+    
+    if (data.startsWith('purge_user_go:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const targetId = Number(data.split(':')[1]);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پاک‌سازی...' });
+      const pending =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.userId, targetId), eq(messages.status, 'pending')))
+          .all()) || [];
+      pending.sort(function (a, b) {
+        return a.id - b.id;
+      });
+      const slice = pending.slice(0, 15);
+      let n = 0;
+      for (const row of slice) {
+        try {
+          await db
+            .update(messages)
+            .set({
+              status: 'rejected',
+              rejectReason: 'پاک‌سازی توسط مالک',
+              reviewedBy: Number(userId),
+              reviewedAt: new Date(),
+            })
+            .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
+            .run();
+          n++;
+        } catch (e) {
+          console.error('purge one', row.id, e);
+        }
+      }
+      const left =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.userId, targetId), eq(messages.status, 'pending')))
+          .all()) || [];
+      const finished = left.length === 0;
+      const body =
+        '🗑 پاک‌سازی pending کاربر ' +
+        targetId +
+        '\n' +
+        'در این دسته: ' +
+        n +
+        '\n' +
+        'باقی‌مانده: ' +
+        left.length +
+        (finished ? '\n\n✅ تمام شد.' : '\n\n▶️ برای ۱۵تای بعدی دکمه را بزنید.');
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: body,
+          reply_markup: purgeUserProgressInline(targetId, finished),
+        });
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: body,
+          reply_markup: purgeUserProgressInline(targetId, finished),
+        });
+      }
+      return;
+    }
+
+    if (data === 'purge_user_cancel') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'بسته شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: 'پاک‌سازی لغو/متوقف شد.',
+        });
+      } catch (_e) {}
+      return;
+    }
+
+if (data.startsWith('flush_ch:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
