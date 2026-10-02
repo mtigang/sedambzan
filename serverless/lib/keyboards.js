@@ -65,6 +65,7 @@ export function settingsKeyboard(botOn) {
       [{ text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
       [{ text: '📣 ارسال به کانال' }, { text: '📣 اطلاعیه' }],
       [{ text: '🧪 تست کانال‌ها' }],
+      [{ text: '📤 انتشار مستقیم صف' }],
       [{ text: '🧹 پاک‌سازی صف' }],
       [{ text: '◀️ بازگشت' }],
     ],
@@ -410,6 +411,72 @@ export function subLeaderAnnounceConfirmInline() {
       [
         { text: '✅ ارسال', callback_data: 'sl_ann_yes', style: 'success' },
         { text: '❌ لغو', callback_data: 'sl_ann_no', style: 'danger' },
+      ],
+    ],
+  };
+}
+
+/** لیست ادمین ساب‌لیدر با دکمه حذف */
+export function subLeaderAdminsInline(admins, channelKey) {
+  const rows = [];
+  for (const a of admins || []) {
+    const name = String(a.display || a.userId).slice(0, 28);
+    rows.push([
+      { text: name, callback_data: 'sl_ainfo:' + a.userId, style: 'primary' },
+      {
+        text: 'حذف',
+        callback_data: 'sl_adel:' + channelKey + ':' + a.userId,
+        style: 'danger',
+      },
+    ]);
+  }
+  if (!rows.length) {
+    rows.push([{ text: 'ادمینی نیست', callback_data: 'sl_noop', style: 'primary' }]);
+  }
+  return { inline_keyboard: rows };
+}
+
+export function flushChannelPickInline() {
+  const rows = [];
+  for (const c of Object.values(DEFAULT_CHANNELS)) {
+    rows.push([
+      {
+        text: '📢 ' + c.title,
+        callback_data: 'flush_ch:' + c.key,
+        style: 'primary',
+      },
+    ]);
+  }
+  rows.push([{ text: 'لغو', callback_data: 'flush_cancel', style: 'danger' }]);
+  return { inline_keyboard: rows };
+}
+
+export function flushProgressInline(finished) {
+  if (finished) {
+    return {
+      inline_keyboard: [[{ text: '✅ تمام', callback_data: 'flush_noop', style: 'success' }]],
+    };
+  }
+  return {
+    inline_keyboard: [
+      [
+        { text: '▶️ انتشار دسته بعدی', callback_data: 'flush_next', style: 'success' },
+        { text: '⏹ توقف', callback_data: 'flush_stop', style: 'danger' },
+      ],
+    ],
+  };
+}
+
+export function flushConfirmInline(channelKey) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: '✅ بله، منتشر کن',
+          callback_data: 'flush_go:' + channelKey,
+          style: 'success',
+        },
+        { text: 'لغو', callback_data: 'flush_cancel', style: 'danger' },
       ],
     ],
   };
