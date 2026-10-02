@@ -1,3 +1,4 @@
+import { normalizeBody } from 'lib/validation';
 import { api, db } from 'sdk';
 import { eq, and } from 'sdk/db';
 import { messages, feedback, shifts, settings, users, channelAdmins } from 'schema';
@@ -1069,7 +1070,7 @@ if (data.startsWith('own_shift:')) {
 
     
     async function runFlushBatch(chatId, progressMessageId) {
-      const BATCH = 30;
+      const BATCH = 12;
       let job = null;
       try {
         const raw = await settingGet('flush_job', '');
@@ -1078,10 +1079,7 @@ if (data.startsWith('own_shift:')) {
         job = null;
       }
       if (!job || job.status !== 'running') {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'هیچ انتشار فعالی نیست.',
-        });
+        await api.sendMessage({ chat_id: chatId, text: 'هیچ انتشار فعالی نیست.' });
         return;
       }
       const channelKey = job.channelKey;
@@ -1092,6 +1090,11 @@ if (data.startsWith('own_shift:')) {
         await api.sendMessage({ chat_id: chatId, text: 'کانال نامعتبر' });
         return;
       }
+      const totalStart = Number(job.total) || 0;
+      let ok = Number(job.ok) || 0;
+      let fail = Number(job.fail) || 0;
+      let skip = Number(job.skip) || 0;
+
       const pending =
         (await db
           .select()
@@ -1101,11 +1104,97 @@ if (data.startsWith('own_shift:')) {
       pending.sort(function (a, b) {
         return a.id - b.id;
       });
-      const slice = pending.slice(0, BATCH);
-      let ok = Number(job.ok) || 0;
-      let fail = Number(job.fail) || 0;
-      for (const row of slice) {
+
+      // بدنه پیام‌های قبلاً تأییدشده همین کانال برای ضدتکرار
+      const approved =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.status, 'approved'), eq(messages.channelKey, channelKey)))
+          .all()) || [];
+      const seenBody = {};
+      for (const a of approved) {
         try {
+          const b = normalizeBody(a.content);
+          if (b) seenBody[b] = true;
+        } catch (_e) {}
+      }
+
+      const slice = pending.slice(0, BATCH);
+      let processed = 0;
+
+      async function paint() {
+        const leftEst = Math.max(0, totalStart - ok - fail - skip);
+        const done = ok + fail + skip;
+        const pct = totalStart ? Math.min(10, Math.floor((done / totalStart) * 10)) : 0;
+        let bar = '';
+        for (let i = 0; i < 10; i++) bar += i < pct ? '█' : '░';
+        const body =
+          '📤 انتشار مستقیم صف\n' +
+          bar +
+          ' ' +
+          done +
+          '/' +
+          totalStart +
+          '\n' +
+          'کانال: «' +
+          (conf.title || channelKey) +
+          '»\n' +
+          '✅ منتشر: ' +
+          ok +
+          '  ⏭ تکراری: ' +
+          skip +
+          '  ❌ خطا: ' +
+          fail +
+          '\n' +
+          'باقی حدودی: ' +
+          leftEst;
+        try {
+          if (progressMessageId) {
+            await api.editMessageText({
+              chat_id: chatId,
+              message_id: progressMessageId,
+              text: body,
+              reply_markup: flushProgressInline(false),
+            });
+          }
+        } catch (_e) {}
+      }
+
+      await paint();
+
+      for (const row of slice) {
+        if (job.status !== 'running') break;
+        try {
+          let bodyKey = '';
+          try {
+            bodyKey = normalizeBody(row.content) || String(row.content || '').trim();
+          } catch (_e) {
+            bodyKey = String(row.content || '').trim();
+          }
+          if (bodyKey && seenBody[bodyKey]) {
+            await db
+              .update(messages)
+              .set({
+                status: 'rejected',
+                rejectReason: 'تکراری',
+                reviewedBy: Number(job.ownerId) || null,
+                reviewedAt: new Date(),
+              })
+              .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
+              .run();
+            skip++;
+            processed++;
+            if (processed % 3 === 0) {
+              job.ok = ok;
+              job.fail = fail;
+              job.skip = skip;
+              await settingSet('flush_job', JSON.stringify(job));
+              await paint();
+            }
+            continue;
+          }
+
           const sent = await api.sendMessage({
             chat_id: conf.chatId,
             text: toBoldHtml(row.content),
@@ -1125,7 +1214,9 @@ if (data.startsWith('own_shift:')) {
             })
             .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
             .run();
+          if (bodyKey) seenBody[bodyKey] = true;
           ok++;
+          processed++;
           const link = channelMessageLink(conf.chatId, mid, channelKey);
           try {
             let txt = '✅ پیام شما تأیید و منتشر شد.';
@@ -1145,9 +1236,17 @@ if (data.startsWith('own_shift:')) {
         } catch (e) {
           console.error('flush one', row.id, e);
           fail++;
+          processed++;
+        }
+        job.ok = ok;
+        job.fail = fail;
+        job.skip = skip;
+        await settingSet('flush_job', JSON.stringify(job));
+        if (processed % 2 === 0 || processed === slice.length) {
+          await paint();
         }
       }
-      // recount remaining
+
       const left =
         (await db
           .select()
@@ -1156,24 +1255,36 @@ if (data.startsWith('own_shift:')) {
           .all()) || [];
       job.ok = ok;
       job.fail = fail;
+      job.skip = skip;
       const finished = left.length === 0;
       if (finished) job.status = 'done';
       await settingSet('flush_job', JSON.stringify(job));
-      const title = conf.title || channelKey;
-      const doneCount = ok;
+
+      const done = ok + fail + skip;
+      const pct = totalStart ? Math.min(10, Math.floor((done / Math.max(totalStart, done)) * 10)) : 10;
+      let bar = '';
+      for (let i = 0; i < 10; i++) bar += i < pct ? '█' : '░';
       const body =
         (finished ? '✅ انتشار صف تمام شد\n' : '📤 انتشار صف (تکه‌تکه)\n') +
+        bar +
+        ' ' +
+        done +
+        '/' +
+        totalStart +
+        '\n' +
         'کانال: «' +
-        title +
+        (conf.title || channelKey) +
         '»\n' +
         '✅ منتشر: ' +
         ok +
+        '  ⏭ تکراری (بدون ارسال): ' +
+        skip +
         '  ❌ خطا: ' +
         fail +
         '\n' +
         'باقی‌مانده pending: ' +
         left.length +
-        (finished ? '' : '\n\nبرای دسته بعدی «▶️ انتشار دسته بعدی» را بزنید.');
+        (finished ? '' : '\n\n▶️ دسته بعدی را بزنید (هر دسته ۱۲ پیام یکتا).');
       try {
         if (progressMessageId) {
           await api.editMessageText({
