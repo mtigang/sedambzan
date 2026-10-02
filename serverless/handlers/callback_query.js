@@ -50,6 +50,10 @@ import {
   subLeaderManageInline,
   subLeaderKeyboard,
   ownerSubLeaderMenuKeyboard,
+  flushConfirmInline,
+  flushProgressInline,
+  flushChannelPickInline,
+  subLeaderAdminsInline,
   ownerCancelShiftsInline,
   reviewNextInline,
   reviewDoneInline,
@@ -1063,7 +1067,138 @@ if (data.startsWith('own_shift:')) {
     }
 
 
-    async function loadAnnounceJob() {
+    
+    async function runFlushBatch(chatId, progressMessageId) {
+      const BATCH = 30;
+      let job = null;
+      try {
+        const raw = await settingGet('flush_job', '');
+        job = raw ? JSON.parse(raw) : null;
+      } catch (_e) {
+        job = null;
+      }
+      if (!job || job.status !== 'running') {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'هیچ انتشار فعالی نیست.',
+        });
+        return;
+      }
+      const channelKey = job.channelKey;
+      const conf = DEFAULT_CHANNELS[channelKey];
+      if (!conf || !conf.chatId) {
+        job.status = 'stopped';
+        await settingSet('flush_job', JSON.stringify(job));
+        await api.sendMessage({ chat_id: chatId, text: 'کانال نامعتبر' });
+        return;
+      }
+      const pending =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, channelKey)))
+          .all()) || [];
+      pending.sort(function (a, b) {
+        return a.id - b.id;
+      });
+      const slice = pending.slice(0, BATCH);
+      let ok = Number(job.ok) || 0;
+      let fail = Number(job.fail) || 0;
+      for (const row of slice) {
+        try {
+          const sent = await api.sendMessage({
+            chat_id: conf.chatId,
+            text: toBoldHtml(row.content),
+            parse_mode: 'HTML',
+          });
+          const mid = sent && sent.message_id;
+          if (!mid) throw new Error('no message_id');
+          try {
+            await settingSet('chmsg:' + channelKey + ':' + mid, String(row.id));
+          } catch (_e) {}
+          await db
+            .update(messages)
+            .set({
+              status: 'approved',
+              reviewedBy: Number(job.ownerId) || null,
+              reviewedAt: new Date(),
+            })
+            .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
+            .run();
+          ok++;
+          const link = channelMessageLink(conf.chatId, mid, channelKey);
+          try {
+            let txt = '✅ پیام شما تأیید و منتشر شد.';
+            if (link) {
+              txt +=
+                '\n\nمشاهده در کانال «' +
+                (conf.title || channelKey) +
+                '»:\n' +
+                link;
+            }
+            await api.sendMessage({
+              chat_id: row.userId,
+              text: txt,
+              link_preview_options: link ? { is_disabled: false, url: link } : undefined,
+            });
+          } catch (_e) {}
+        } catch (e) {
+          console.error('flush one', row.id, e);
+          fail++;
+        }
+      }
+      // recount remaining
+      const left =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, channelKey)))
+          .all()) || [];
+      job.ok = ok;
+      job.fail = fail;
+      const finished = left.length === 0;
+      if (finished) job.status = 'done';
+      await settingSet('flush_job', JSON.stringify(job));
+      const title = conf.title || channelKey;
+      const doneCount = ok;
+      const body =
+        (finished ? '✅ انتشار صف تمام شد\n' : '📤 انتشار صف (تکه‌تکه)\n') +
+        'کانال: «' +
+        title +
+        '»\n' +
+        '✅ منتشر: ' +
+        ok +
+        '  ❌ خطا: ' +
+        fail +
+        '\n' +
+        'باقی‌مانده pending: ' +
+        left.length +
+        (finished ? '' : '\n\nبرای دسته بعدی «▶️ انتشار دسته بعدی» را بزنید.');
+      try {
+        if (progressMessageId) {
+          await api.editMessageText({
+            chat_id: chatId,
+            message_id: progressMessageId,
+            text: body,
+            reply_markup: flushProgressInline(finished),
+          });
+        } else {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: body,
+            reply_markup: flushProgressInline(finished),
+          });
+        }
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: body,
+          reply_markup: flushProgressInline(finished),
+        });
+      }
+    }
+
+async function loadAnnounceJob() {
       const raw = await settingGet('announce_job', '');
       if (!raw) return null;
       try {
@@ -1257,7 +1392,200 @@ if (data.startsWith('own_shift:')) {
     
     
     // ========== Sub-Leader owner management ==========
-    if (data.startsWith('sl_setch:')) {
+    
+    // ========== Sub-Leader: حذف ادمین کانال خودش ==========
+    if (data.startsWith('sl_adel:')) {
+      const parts = data.split(':');
+      const channelKey = parts[1];
+      const tid = Number(parts[2]);
+      const role = await getRole(userId);
+      const slCh = await getActiveSubLeaderChannel(userId);
+      if (role !== 'subleader' || !slCh || slCh !== channelKey) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: '⛔ خارج از محدوده',
+          show_alert: true,
+        });
+        return;
+      }
+      if (isOwner(tid)) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'مالک قابل حذف نیست',
+          show_alert: true,
+        });
+        return;
+      }
+      await removeChannelAdmin(tid, channelKey);
+      try {
+        await api.sendMessage({
+          chat_id: tid,
+          text:
+            '🚫 دسترسی ادمینی شما در کانال «' +
+            ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
+            '» توسط ساب‌لیدر لغو شد.',
+        });
+      } catch (_e) {}
+      const ads = await listAdminsByChannel(channelKey);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'حذف شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text:
+            '👥 ادمین‌های «' +
+            ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
+            '»\nتعداد: ' +
+            ads.length +
+            '\nروی «حذف» بزنید تا از کانال برداشته شوند.',
+          reply_markup: subLeaderAdminsInline(ads, channelKey),
+        });
+      } catch (_e) {}
+      return;
+    }
+
+    if (data.startsWith('sl_ainfo:')) {
+      const tid = Number(data.split(':')[1]);
+      const role = await getRole(userId);
+      const slCh = await getActiveSubLeaderChannel(userId);
+      if (role !== 'subleader' || !slCh) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⛔', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      let name = String(tid);
+      try {
+        name = displayName(await getUser(tid), tid);
+      } catch (_e) {}
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '👤 ' + name + '\n🆔 ' + tid + '\n📢 کانال Scope شما',
+      });
+      return;
+    }
+
+    // ========== Owner: انتشار مستقیم صف pending ==========
+    if (data.startsWith('flush_ch:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const channelKey = data.split(':')[1];
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      const pending =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, channelKey)))
+          .all()) || [];
+      pending.sort(function (a, b) {
+        return a.id - b.id;
+      });
+      const title =
+        (DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey;
+      if (!pending.length) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'ℹ️ صف «' + title + '» خالی است.',
+        });
+        return;
+      }
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '⚠️ انتشار مستقیم\n\n' +
+          'کانال: «' +
+          title +
+          '»\n' +
+          'تعداد pending: ' +
+          pending.length +
+          '\n\n' +
+          'بدون بررسی ادمین، از قدیمی‌ترین به کانال منتشر می‌شوند (هر دسته حدود ۳۰ پیام).\nادامه؟',
+        reply_markup: flushConfirmInline(channelKey),
+      });
+      return;
+    }
+
+    if (data === 'flush_cancel' || data === 'flush_noop') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: data === 'flush_cancel' ? 'لغو' : 'OK' });
+      if (data === 'flush_cancel') {
+        try {
+          await settingSet('flush_job', '');
+        } catch (_e) {}
+      }
+      return;
+    }
+
+    if (data.startsWith('flush_go:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const channelKey = data.split(':')[1];
+      const pending =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, channelKey)))
+          .all()) || [];
+      pending.sort(function (a, b) {
+        return a.id - b.id;
+      });
+      const job = {
+        status: 'running',
+        channelKey: channelKey,
+        total: pending.length,
+        ok: 0,
+        fail: 0,
+        ownerId: userId,
+      };
+      await settingSet('flush_job', JSON.stringify(job));
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'شروع...' });
+      const progress = await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '📤 در حال انتشار...\n0/' + pending.length,
+        reply_markup: flushProgressInline(false),
+      });
+      await runFlushBatch(cq.message.chat.id, progress && progress.message_id);
+      return;
+    }
+
+    if (data === 'flush_next') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ادامه...' });
+      await runFlushBatch(cq.message.chat.id, cq.message.message_id);
+      return;
+    }
+
+    if (data === 'flush_stop') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      try {
+        const raw = await settingGet('flush_job', '');
+        if (raw) {
+          const job = JSON.parse(raw);
+          job.status = 'stopped';
+          await settingSet('flush_job', JSON.stringify(job));
+        }
+      } catch (_e) {}
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'متوقف شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: '⏹ انتشار صف متوقف شد.',
+          reply_markup: flushProgressInline(true),
+        });
+      } catch (_e) {}
+      return;
+    }
+
+if (data.startsWith('sl_setch:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
