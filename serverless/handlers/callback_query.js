@@ -523,7 +523,7 @@ if (data.startsWith('reject_menu:')) {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: reviewTakenInline(),
+          reply_markup: sanitizeMarkup(reviewTakenInline()),
         });
       } catch (_) {}
       await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: false });
@@ -1961,7 +1961,7 @@ if (data.startsWith('flush_ch:')) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text: body,
-        reply_markup: kb,
+        reply_markup: sanitizeMarkup(kb),
       });
       if (!more) await clearState(userId);
       return;
@@ -2023,7 +2023,7 @@ if (data.startsWith('sl_setch:')) {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text: '✅ کانال ساب‌لیدر به‌روز شد.',
-          reply_markup: ownerSubLeaderMenuKeyboard(),
+          reply_markup: sanitizeMarkup(ownerSubLeaderMenuKeyboard()),
         });
         return;
       }
@@ -2051,7 +2051,7 @@ if (data.startsWith('sl_setch:')) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text: '✅ ساب‌لیدر با موفقیت ایجاد شد.\nکاربر: ' + tid + '\nکانال: «' + title + '»',
-        reply_markup: ownerSubLeaderMenuKeyboard(),
+        reply_markup: sanitizeMarkup(ownerSubLeaderMenuKeyboard()),
       });
       return;
     }
@@ -2106,7 +2106,7 @@ if (data.startsWith('sl_setch:')) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text: 'کانال جدید را انتخاب کنید:',
-        reply_markup: subLeaderPickChannelInline(),
+        reply_markup: sanitizeMarkup(subLeaderPickChannelInline()),
       });
       return;
     }
@@ -2123,7 +2123,7 @@ if (data.startsWith('sl_setch:')) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text: '🚫 ساب‌لیدر ' + tid + ' غیرفعال شد.',
-        reply_markup: ownerSubLeaderMenuKeyboard(),
+        reply_markup: sanitizeMarkup(ownerSubLeaderMenuKeyboard()),
       });
       return;
     }
@@ -2160,7 +2160,7 @@ if (data.startsWith('sl_setch:')) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text: '✅ ارسال شد\nموفق: ' + ok + ' | ناموفق: ' + fail,
-        reply_markup: subLeaderKeyboard(),
+        reply_markup: sanitizeMarkup(subLeaderKeyboard()),
       });
       return;
     }
