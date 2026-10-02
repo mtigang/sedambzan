@@ -1830,18 +1830,34 @@ async function loadAnnounceJob() {
       const ads = await listAdminsByChannel(channelKey);
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'حذف شد' });
       try {
+        let listBody =
+          '👥 ادمین‌های «' +
+          ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
+          '»\nتعداد: ' +
+          ads.length +
+          '\n';
+        for (let i = 0; i < (ads || []).length; i++) {
+          const a = ads[i] || {};
+          listBody +=
+            i +
+            1 +
+            '. ' +
+            String(a.display != null && a.display !== '' ? a.display : a.userId) +
+            ' | 🆔 ' +
+            String(a.userId) +
+            '\n';
+        }
+        const built = subLeaderAdminsInline(ads, channelKey);
+        const markup = built && built.markup ? built.markup : built;
         await api.editMessageText({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          text:
-            '👥 ادمین‌های «' +
-            ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
-            '»\nتعداد: ' +
-            ads.length +
-            '\nروی «حذف» بزنید تا از کانال برداشته شوند.',
-          reply_markup: sanitizeMarkup(subLeaderAdminsInline(ads, channelKey)),
+          text: listBody.slice(0, 4000),
+          reply_markup: sanitizeMarkup(markup),
         });
-      } catch (_e) {}
+      } catch (_e) {
+        console.error('sl_adel refresh', _e);
+      }
       return;
     }
 

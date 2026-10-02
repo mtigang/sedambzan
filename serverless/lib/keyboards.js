@@ -523,24 +523,42 @@ export function subLeaderAnnounceConfirmInline() {
   });
 }
 
-/** لیست ادمین ساب‌لیدر با دکمه حذف */
+/**
+ * لیست ادمین ساب‌لیدر با دکمه حذف.
+ * روی دکمه‌ها فقط شناسه عددی امن می‌آید (نه اسم خام) تا خطای
+ * "text must be of type String" از اسم‌های خراب/یونیکد پیش نیاید.
+ * خروجی: { markup, skipped[] } — skipped = ادمین‌هایی که دکمه نشدند.
+ */
 export function subLeaderAdminsInline(admins, channelKey) {
   const rows = [];
+  const skipped = [];
+  const ch = channelKey != null ? String(channelKey) : '';
   for (const a of admins || []) {
-    const name = String(a.display || a.userId || 'کاربر').slice(0, 28);
+    const uid = a && (a.userId != null ? a.userId : a.user_id);
+    const uidNum = Number(uid);
+    const fullName = a
+      ? String(a.display != null && a.display !== '' ? a.display : uid != null ? uid : 'کاربر')
+      : 'کاربر';
+    // فقط اگر userId عددی معتبر باشد دکمه ساخته می‌شود
+    if (!uidNum || !Number.isFinite(uidNum)) {
+      skipped.push({ userId: uid, display: fullName, reason: 'userId نامعتبر' });
+      continue;
+    }
+    // برچسب دکمه: فقط عدد — همیشه String امن
+    const label = btnText(String(uidNum), String(uidNum));
     rows.push([
-      { text: btnText(name, 'کاربر'), callback_data: 'sl_ainfo:' + a.userId, style: 'primary' },
+      { text: label, callback_data: 'sl_ainfo:' + uidNum, style: 'primary' },
       {
-        text: 'حذف',
-        callback_data: 'sl_adel:' + channelKey + ':' + a.userId,
+        text: btnText('حذف', 'حذف'),
+        callback_data: 'sl_adel:' + ch + ':' + uidNum,
         style: 'danger',
       },
     ]);
   }
   if (!rows.length) {
-    rows.push([{ text: 'ادمینی نیست', callback_data: 'sl_noop', style: 'primary' }]);
+    rows.push([{ text: btnText('ادمینی نیست', '—'), callback_data: 'sl_noop', style: 'primary' }]);
   }
-  return sanitizeMarkup({ inline_keyboard: rows });
+  return { markup: sanitizeMarkup({ inline_keyboard: rows }), skipped: skipped };
 }
 
 export function flushChannelPickInline() {

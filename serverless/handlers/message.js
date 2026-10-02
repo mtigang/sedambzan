@@ -1117,16 +1117,86 @@ export default async function (message) {
           });
           return;
         }
-        await api.sendMessage({
-          chat_id: chatId,
-          text:
-            '👥 ادمین‌های «' +
-            chTitle +
-            '»\nتعداد: ' +
-            admins.length +
-            '\nروی «حذف» بزنید تا از کانال شما برداشته شوند (سابقه پاک نمی‌شود).',
-          reply_markup: sanitizeMarkup(subLeaderAdminsInline(admins, channelKey || myCh)),
-        });
+        const chKey = channelKey || myCh || '';
+        // لیست متنی کامل (اسم + آیدی) — اسم روی دکمه نمی‌آید
+        let listText =
+          '👥 ادمین‌های «' +
+          chTitle +
+          '»\nتعداد: ' +
+          admins.length +
+          '\n\n';
+        for (let i = 0; i < admins.length; i++) {
+          const a = admins[i] || {};
+          const uid = a.userId != null ? a.userId : a.user_id;
+          const nm =
+            a.display != null && String(a.display).trim() !== ''
+              ? String(a.display)
+              : '—';
+          listText +=
+            i +
+            1 +
+            '. ' +
+            nm +
+            '\n   🆔 ' +
+            (uid != null ? String(uid) : 'نامشخص') +
+            '\n';
+        }
+        listText +=
+          '\nدکمه‌ها فقط با آیدی عددی‌اند.\nروی آیدی بزنید برای جزئیات، روی «حذف» برای برداشتن از کانال.';
+
+        try {
+          const built = subLeaderAdminsInline(admins, chKey);
+          const markup = built && built.markup ? built.markup : built;
+          const skipped = (built && built.skipped) || [];
+          if (skipped.length) {
+            listText += '\n\n⚠️ ادمین‌های بدون دکمه (داده نامعتبر):\n';
+            for (const s of skipped) {
+              listText +=
+                '• ' +
+                String(s.display || '—') +
+                ' | 🆔 ' +
+                String(s.userId != null ? s.userId : '?') +
+                ' | ' +
+                String(s.reason || '') +
+                '\n';
+            }
+          }
+          await api.sendMessage({
+            chat_id: chatId,
+            text: listText.slice(0, 4000),
+            reply_markup: sanitizeMarkup(markup),
+          });
+        } catch (e) {
+          // گزارش کامل برای تشخیص: خطا + لیست ادمین‌ها
+          let errDetail =
+            '⚠️ خطا در نمایش دکمه‌های ادمین.\n' +
+            String(e && (e.description || e.message) ? e.description || e.message : e) +
+            '\n\n📋 لیست ادمین‌ها (متن):\n';
+          for (let i = 0; i < admins.length; i++) {
+            const a = admins[i] || {};
+            const uid = a.userId != null ? a.userId : a.user_id;
+            errDetail +=
+              i +
+              1 +
+              '. نام: ' +
+              String(a.display != null ? a.display : '—') +
+              ' | آیدی: ' +
+              String(uid != null ? uid : '?') +
+              ' | typeof display=' +
+              typeof a.display +
+              '\n';
+          }
+          try {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: errDetail.slice(0, 4000),
+              reply_markup: sanitizeMarkup(subLeaderKeyboard()),
+            });
+          } catch (_e2) {
+            console.error('sl admins fallback', _e2);
+          }
+          console.error('subLeader admins keyboard', e);
+        }
         return;
       }
 
