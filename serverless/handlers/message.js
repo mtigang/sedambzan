@@ -40,7 +40,7 @@ import {
   flushProgressInline,
   flushConfirmInline,
 } from 'lib/keyboards';
-import { validateAndFix, normalizeBody } from 'lib/validation';
+import { validateAndFix, normalizeBody, exactBodyKey } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm } from 'lib/time';
 // normHm via time
@@ -105,6 +105,7 @@ async function roleKb(uid) {
 }
 
 export default async function (message) {
+  let idemKeyFinal = null;
   try {
     if (!message?.chat) return;
     const chatId = message.chat.id;
@@ -128,6 +129,25 @@ export default async function (message) {
 
     if (message.chat.type && message.chat.type !== 'private') return;
     if (!userId) return;
+
+    // —— ضد پردازش دوباره (retry تلگرام / timeout)
+    const telegramMsgId = message.message_id;
+    const idemKey =
+      telegramMsgId != null ? 'idem:tg:' + chatId + ':' + telegramMsgId : null;
+    if (idemKey) {
+      try {
+        const already = await settingGet(idemKey, '');
+        if (already === '1' || already === 'pending') {
+          console.log('skip duplicate telegram message', idemKey, already);
+          return;
+        }
+        // قفل زودهنگام تا retry موازی insert نزند
+        await settingSet(idemKey, 'pending');
+        idemKeyFinal = idemKey;
+      } catch (e) {
+        console.error('idempotency', e);
+      }
+    }
 
     await ensureChannelsSeeded();
     try {
@@ -361,24 +381,96 @@ export default async function (message) {
           }
         } catch (_) {}
 
+        // —— محدودیت نرخ
+        if (!owner) {
+          const rl = await checkRateLimit(userId);
+          if (!rl.ok) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text:
+                '⏳ محدودیت ارسال: حداکثر ۶ پیام در ۱۰ دقیقه.\nلطفاً کمی صبر کنید و دوباره بفرستید.',
+              reply_markup: backKeyboard(),
+            });
+            return;
+          }
+        }
+
+        // —— ضدتکرار بدنه دقیق (بین پیشوند و نقطه پایانی)
+        const bodyKey = exactBodyKey(v.content);
+        if (bodyKey) {
+          let dup = null;
+          try {
+            const sameCh =
+              (await db
+                .select()
+                .from(messages)
+                .where(eq(messages.channelKey, v.channelKey))
+                .all()) || [];
+            for (const row of sameCh) {
+              if (row.status !== 'pending' && row.status !== 'approved') continue;
+              const other = exactBodyKey(row.content);
+              if (other && other === bodyKey) {
+                dup = row;
+                break;
+              }
+            }
+          } catch (e) {
+            console.error('dup check', e);
+          }
+          if (dup) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text:
+                '⚠️ این پیام تکراری است و ثبت نشد.\n\n' +
+                'متن بعد از پیشوند کانال قبلاً در صف یا منتشر شده (#' +
+                dup.id +
+                ').\nپیام دیگری بفرستید یا ◀️ بازگشت.',
+              reply_markup: backKeyboard(),
+            });
+            return;
+          }
+        }
+
+        // —— قفل کوتاه ضد double-submit موازی
+        const sendLockKey = 'lock:send:' + userId;
+        try {
+          const lockVal = await settingGet(sendLockKey, '');
+          const lockTs = Number(lockVal) || 0;
+          if (lockTs && Date.now() - lockTs < 4000) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '⏳ درخواست قبلی هنوز در حال ثبت است. چند ثانیه صبر کنید.',
+              reply_markup: backKeyboard(),
+            });
+            return;
+          }
+          await settingSet(sendLockKey, String(Date.now()));
+        } catch (_e) {}
+
         let msgId = null;
-        await db
-          .insert(messages)
-          .values({
-            userId,
-            content: v.content,
-            channelKey: v.channelKey,
-            status: 'pending',
-            submittedAt: new Date(),
-          })
-          .run();
-        const recent = await db
-          .select()
-          .from(messages)
-          .where(eq(messages.userId, userId))
-          .orderBy(desc(messages.id))
-          .all();
-        if (recent?.[0]) msgId = recent[0].id;
+        try {
+          await db
+            .insert(messages)
+            .values({
+              userId,
+              content: v.content,
+              channelKey: v.channelKey,
+              status: 'pending',
+              submittedAt: new Date(),
+            })
+            .run();
+          const recent = await db
+            .select()
+            .from(messages)
+            .where(eq(messages.userId, userId))
+            .orderBy(desc(messages.id))
+            .all();
+          if (recent && recent[0]) msgId = recent[0].id;
+        } finally {
+          try {
+            await settingSet(sendLockKey, '0');
+          } catch (_e) {}
+        }
 
         // keep user_send state for continuous
         let note =
