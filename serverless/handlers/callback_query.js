@@ -3,6 +3,7 @@ import { eq, and } from 'sdk/db';
 import { messages, feedback, shifts, settings, users, channelAdmins } from 'schema';
 import {
   isOwner,
+  getActiveSubLeaderChannel,
   removeChannelAdmin,
   listAdminsByChannel,
   syncAdminsFromGroup,
@@ -24,6 +25,16 @@ import {
   findAdminShiftConflict,
 } from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
+import {
+  upsertSubLeader,
+  deactivateSubLeader,
+  getSubLeaderRecord,
+  getSubLeaderChannel,
+  notifySubLeaderAppointed,
+  notifySubLeaderChannelChange,
+  notifySubLeaderRemoved,
+  subLeaderAdmins,
+} from 'lib/subleader';
 import { tehranNow, inRange, periodDateStr, formatTsJalali } from 'lib/time';
 import { DEFAULT_CHANNELS } from 'lib/config';
 import { channelMessageLink } from 'lib/resolve';
@@ -35,6 +46,10 @@ import {
   userOpenInline,
   shiftSlotsInline,
   announceProgressInline,
+  subLeaderPickChannelInline,
+  subLeaderManageInline,
+  subLeaderKeyboard,
+  ownerSubLeaderMenuKeyboard,
   ownerCancelShiftsInline,
   reviewNextInline,
   reviewDoneInline,
@@ -1240,7 +1255,185 @@ if (data.startsWith('own_shift:')) {
 
 
     
-    if (data.startsWith('ann_target:')) {
+    
+    // ========== Sub-Leader owner management ==========
+    if (data.startsWith('sl_setch:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const channelKey = data.split(':')[1];
+      const st = await getState(userId);
+      // change channel for existing: state sl_change_ch
+      if (st && st.kind === 'sl_change_ch' && st.targetId) {
+        const tid = Number(st.targetId);
+        const prev = await getSubLeaderRecord(tid);
+        const oldKey = prev && prev.channelKey;
+        await upsertSubLeader(tid, channelKey, userId);
+        await clearState(userId);
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال تغییر کرد' });
+        if (oldKey && oldKey !== channelKey) {
+          await notifySubLeaderChannelChange(tid, oldKey, channelKey);
+        }
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '✅ کانال ساب‌لیدر به‌روز شد.',
+          reply_markup: ownerSubLeaderMenuKeyboard(),
+        });
+        return;
+      }
+      if (!st || st.kind !== 'sl_add_ch' || !st.targetId) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'جلسه منقضی', show_alert: true });
+        return;
+      }
+      const tid = Number(st.targetId);
+      try {
+        await upsertSubLeader(tid, channelKey, userId);
+      } catch (e) {
+        const msg =
+          e && e.message === 'owner'
+            ? '❌ مالک مجاز نیست'
+            : e && e.message === 'blocked'
+              ? '❌ کاربر بلاک است'
+              : '❌ این کاربر قابل انتخاب نیست';
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: msg, show_alert: true });
+        return;
+      }
+      await clearState(userId);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت شد' });
+      await notifySubLeaderAppointed(tid, channelKey);
+      const title = (DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey;
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '✅ ساب‌لیدر با موفقیت ایجاد شد.\nکاربر: ' + tid + '\nکانال: «' + title + '»',
+        reply_markup: ownerSubLeaderMenuKeyboard(),
+      });
+      return;
+    }
+
+    if (data === 'sl_cancel' || data === 'sl_noop') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      if (data === 'sl_cancel') await clearState(userId);
+      return;
+    }
+
+    if (data.startsWith('sl_view:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const tid = Number(data.split(':')[1]);
+      const rec = await getSubLeaderRecord(tid);
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      if (!rec) {
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: 'یافت نشد' });
+        return;
+      }
+      const title = (DEFAULT_CHANNELS[rec.channelKey] && DEFAULT_CHANNELS[rec.channelKey].title) || rec.channelKey;
+      let name = String(tid);
+      try {
+        name = displayName(await getUser(tid), tid);
+      } catch (_e) {}
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '🛡️ ' +
+          name +
+          '\n🆔 ' +
+          tid +
+          '\n📢 «' +
+          title +
+          '»\nوضعیت: ' +
+          (rec.status === 'active' ? '🟢 فعال' : '🔴 غیرفعال'),
+        reply_markup: subLeaderManageInline(tid),
+      });
+      return;
+    }
+
+    if (data.startsWith('sl_ch:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const tid = Number(data.split(':')[1]);
+      await setState(userId, 'sl_change_ch', { targetId: tid });
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'کانال جدید را انتخاب کنید:',
+        reply_markup: subLeaderPickChannelInline(),
+      });
+      return;
+    }
+
+    if (data.startsWith('sl_off:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const tid = Number(data.split(':')[1]);
+      await deactivateSubLeader(tid);
+      await notifySubLeaderRemoved(tid);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'غیرفعال شد' });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '🚫 ساب‌لیدر ' + tid + ' غیرفعال شد.',
+        reply_markup: ownerSubLeaderMenuKeyboard(),
+      });
+      return;
+    }
+
+    if (data === 'sl_ann_yes') {
+      const st = await getState(userId);
+      const role = await getRole(userId);
+      if (role !== 'subleader' || !st || st.kind !== 'sl_ann_confirm') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⛔ دسترسی ندارید', show_alert: true });
+        return;
+      }
+      const ch = await getSubLeaderChannel(userId);
+      if (!ch || (st.channelKey && st.channelKey !== ch)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⛔ خارج از محدوده', show_alert: true });
+        return;
+      }
+      const { admins } = await subLeaderAdmins(userId);
+      await clearState(userId);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ارسال...' });
+      let ok = 0,
+        fail = 0;
+      const text = st.annText || '';
+      for (const a of admins) {
+        try {
+          await api.sendMessage({
+            chat_id: a.userId,
+            text: '📢 اطلاعیه ساب‌لیدر\n\n' + text,
+          });
+          ok++;
+        } catch (_e) {
+          fail++;
+        }
+      }
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '✅ ارسال شد\nموفق: ' + ok + ' | ناموفق: ' + fail,
+        reply_markup: subLeaderKeyboard(),
+      });
+      return;
+    }
+
+    if (data === 'sl_ann_no') {
+      await clearState(userId);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: 'اطلاعیه لغو شد.',
+        });
+      } catch (_e) {}
+      return;
+    }
+
+if (data.startsWith('ann_target:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
@@ -1411,6 +1604,18 @@ if (data === 'ann_continue') {
       if (startHm === endHm) {
         const h = (Number(startHm.split(':')[0]) + 1) % 24;
         endHm = String(h).padStart(2, '0') + ':00';
+      }
+      // Scope ساب‌لیدر
+      if (!isOwner(userId)) {
+        const slCh = await getActiveSubLeaderChannel(userId);
+        if (slCh && slCh !== channelKey) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: '⛔ خارج از محدوده کانال شما',
+            show_alert: true,
+          });
+          return;
+        }
       }
       const now = tehranNow();
       const pdate = periodDateStr(now);
