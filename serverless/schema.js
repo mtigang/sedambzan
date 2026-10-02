@@ -65,3 +65,12 @@ export const settings = table('settings', {
   key: text('key').primaryKey(),
   value: text('value'),
 });
+
+/** ساب‌لیدر — یک کانال به ازای هر کاربر (بدون حذف داده قبلی) */
+export const subLeaders = table('sub_leaders', {
+  userId: integer('user_id').primaryKey(),
+  channelKey: text('channel_key').notNull(),
+  status: text('status').notNull().default('active'), // active | inactive
+  createdBy: integer('created_by'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(unixepoch())`),
+});
