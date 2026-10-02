@@ -75,6 +75,9 @@ import {
   getRole,
   adminChannels,
   addChannelAdmin,
+  shiftPickChannels,
+  canManageOthersShifts,
+  getActiveSubLeaderChannel,
   listAdminsByChannel,
   syncAdminsFromGroup,
   syncAllAdminGroups,
@@ -124,22 +127,7 @@ export default async function (message) {
     const userId = message.from?.id;
     const text = (message.text || '').trim();
 
-    // —— پیام داخل گروه ادمین → ثبت عضو به عنوان ادمین کانال ——
-    if (message.chat.type === 'group' || message.chat.type === 'supergroup') {
-      for (const [key, gid] of Object.entries(ADMIN_GROUP_IDS)) {
-        if (Number(chatId) === Number(gid) && userId && !isOwner(userId)) {
-          try {
-            await upsertUser(message.from);
-            // addChannelAdmin خودش admin_removed و blocked را چک می‌کند
-            await addChannelAdmin(userId, key);
-          } catch (e) {
-            console.error('group admin register', e);
-          }
-        }
-      }
-      return;
-    }
-
+    // گروه: هیچ ثبت ادمین خودکاری نیست
     if (message.chat.type && message.chat.type !== 'private') return;
     if (!userId) return;
 
@@ -656,8 +644,8 @@ export default async function (message) {
     }
 
     // ========== ADMIN/OWNER: shifts ==========
-    if ((role === 'admin' || owner) && text === '⏰ شیفت من') {
-      const keys = owner ? Object.keys(DEFAULT_CHANNELS) : await adminChannels(userId);
+    if ((role === 'admin' || role === 'subleader' || owner) && text === '⏰ شیفت من') {
+      const keys = owner ? Object.keys(DEFAULT_CHANNELS) : await shiftPickChannels(userId);
       if (!keys.length) {
         await api.sendMessage({
           chat_id: chatId,
@@ -749,10 +737,14 @@ export default async function (message) {
       } else {
         head += 'هنوز شیفت معتبری ثبت نشده.';
       }
+      let manageMode = !!owner;
+      try {
+        manageMode = manageMode || (await canManageOthersShifts(userId, entry.key));
+      } catch (_e) {}
       const board = await api.sendMessage({
         chat_id: chatId,
         text: head,
-        reply_markup: sanitizeMarkup(shiftSlotsInline(entry.key, takenMap, myStarts, null, !!owner)),
+        reply_markup: sanitizeMarkup(shiftSlotsInline(entry.key, takenMap, myStarts, null, manageMode)),
       });
       try {
         const mid = board && board.message_id;
@@ -918,8 +910,7 @@ export default async function (message) {
             [{ text: 'ادمین‌های صدام بزن' }],
             [{ text: 'ادمین‌های این کاربر' }],
             [{ text: 'ادمین‌های تو زندگی بعدی' }],
-            [{ text: '🔄 همگام‌سازی ادمین‌ها' }],
-            [{ text: '◀️ بازگشت' }],
+                        [{ text: '◀️ بازگشت' }],
           ],
           resize_keyboard: true,
         },
@@ -1028,6 +1019,148 @@ export default async function (message) {
     // ========== OWNER: stats / feedback / search / announce / settings ==========
 
     // ========== OWNER: Sub-Leaders ==========
+    
+    if (role === 'subleader' && text === '➕ افزودن ادمین') {
+      const myCh = await getActiveSubLeaderChannel(userId);
+      if (!myCh) {
+        await api.sendMessage({ chat_id: chatId, text: 'اسکوپ کانال مشخص نیست.', reply_markup: await roleKb(userId) });
+        return;
+      }
+      await setState(userId, 'sl_add_admin', { channelKey: myCh });
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'آیدی عددی یا @username ادمین جدید برای «' + (DEFAULT_CHANNELS[myCh]?.title || myCh) + '»:',
+        reply_markup: sanitizeMarkup(backKeyboard()),
+      });
+      return;
+    }
+
+    if (role === 'subleader' && state?.kind === 'sl_add_admin' && text) {
+      const chKey = state.channelKey;
+      await clearState(userId);
+      let id = null;
+      if (/^\d+$/.test(text.replace(/\s/g, ''))) id = Number(text.replace(/\D/g, ''));
+      else {
+        try { id = await resolveUserId(text); } catch (_e) {}
+      }
+      if (!id) {
+        await api.sendMessage({ chat_id: chatId, text: 'آیدی نامعتبر', reply_markup: await roleKb(userId) });
+        return;
+      }
+      try {
+        await settingSet('admin_removed:' + chKey + ':' + Number(id), '0');
+      } catch (_e) {}
+      await addChannelAdmin(id, chKey);
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '✅ ادمین ' + id + ' به «' + (DEFAULT_CHANNELS[chKey]?.title || chKey) + '» اضافه شد.',
+        reply_markup: await roleKb(userId),
+      });
+      return;
+    }
+
+    if (role === 'subleader' && text === '📋 شیفت‌های ۷ روز') {
+      const myCh = await getActiveSubLeaderChannel(userId);
+      if (!myCh) {
+        await api.sendMessage({ chat_id: chatId, text: 'اسکوپ نامشخص', reply_markup: await roleKb(userId) });
+        return;
+      }
+      const now = tehranNow();
+      let body = '📋 شیفت‌های ۷ روز — «' + (DEFAULT_CHANNELS[myCh]?.title || myCh) + '»\n\n';
+      const allSh = (await db.select().from(shifts).where(eq(shifts.channelKey, myCh)).all()) || [];
+      for (let i = 0; i < 7; i++) {
+        const parts = now.date.split('-').map(Number);
+        const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+        dt.setUTCDate(dt.getUTCDate() - i);
+        const day =
+          dt.getUTCFullYear() +
+          '-' +
+          String(dt.getUTCMonth() + 1).padStart(2, '0') +
+          '-' +
+          String(dt.getUTCDate()).padStart(2, '0');
+        const dayRows = allSh.filter(
+          (s) =>
+            s.status === 'active' &&
+            (s.shiftDate === day || s.shiftDate === 'perm' || s.shiftDate === 'permanent') &&
+            String(s.startHm) !== String(s.endHm)
+        );
+        body += '📅 ' + day + (i === 0 ? ' (امروز)' : '') + '\n';
+        if (!dayRows.length) body += '  —\n';
+        else {
+          for (const s of dayRows.sort((a, b) => String(a.startHm).localeCompare(String(b.startHm)))) {
+            let who = String(s.adminId);
+            try { who = displayName(await getUser(s.adminId), s.adminId); } catch (_e) {}
+            body += '  ' + s.startHm + '–' + s.endHm + ' | ' + who + '\n';
+          }
+        }
+        body += '\n';
+      }
+      await api.sendMessage({ chat_id: chatId, text: body.slice(0, 4000), reply_markup: await roleKb(userId) });
+      return;
+    }
+
+    if (role === 'subleader' && text === '🔎 جستجوی پیام') {
+      await setState(userId, 'sl_search_msg');
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'آیدی عددی پیام یا لینک کانال خودتان را بفرستید:',
+        reply_markup: sanitizeMarkup(backKeyboard()),
+      });
+      return;
+    }
+
+    if (role === 'subleader' && state?.kind === 'sl_search_msg' && text) {
+      const myCh = await getActiveSubLeaderChannel(userId);
+      await clearState(userId);
+      let id = null;
+      const linkM = text.match(/t\.me\/[^/]+\/(\d+)/) || text.match(/t\.me\/c\/\d+\/(\d+)/);
+      if (linkM) {
+        // map channel message id via settings
+        try {
+          const mapped = await settingGet('chmsg:' + myCh + ':' + linkM[1], '');
+          if (mapped) id = Number(mapped);
+        } catch (_e) {}
+      }
+      if (id == null) {
+        const only = String(text).replace(/\D/g, '');
+        if (only) id = Number(only);
+      }
+      if (!id) {
+        await api.sendMessage({ chat_id: chatId, text: 'آیدی نامعتبر', reply_markup: await roleKb(userId) });
+        return;
+      }
+      const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
+      const row = rows && rows[0];
+      if (!row || row.channelKey !== myCh) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'پیام در کانال شما یافت نشد.',
+          reply_markup: await roleKb(userId),
+        });
+        return;
+      }
+      let reviewer = '—';
+      if (row.reviewedBy) {
+        try { reviewer = displayName(await getUser(row.reviewedBy), row.reviewedBy) + ' (' + row.reviewedBy + ')'; }
+        catch (_e) { reviewer = String(row.reviewedBy); }
+      }
+      const body =
+        '#' +
+        row.id +
+        ' | ' +
+        row.status +
+        '\nکاربر: ' +
+        row.userId +
+        '\nبررسی‌کننده: ' +
+        reviewer +
+        (row.rejectReason ? '\nدلیل رد: ' + row.rejectReason : '') +
+        '\n\n' +
+        String(row.content || '').slice(0, 500);
+      await api.sendMessage({ chat_id: chatId, text: body, reply_markup: await roleKb(userId) });
+      return;
+    }
+
+
     if (owner && text === '🛡️ ساب‌لیدرها') {
       await api.sendMessage({
         chat_id: chatId,
@@ -1688,15 +1821,7 @@ export default async function (message) {
       return;
     }
 
-    if (owner && text === '🔄 همگام‌سازی ادمین‌ها') {
-      const res = await syncAllAdminGroups(true);
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '🔄 همگام‌سازی انجام شد.\n' + JSON.stringify(res.results || {}, null, 0).slice(0, 500),
-        reply_markup: ownerKeyboard(),
-      });
-      return;
-    }
+    // همگام‌سازی از گروه حذف شد
 
 
     // بازیابی بکاپ حذف شد
