@@ -1669,5 +1669,11 @@ export default async function (message) {
         });
       }
     } catch (_) {}
+  } finally {
+    if (idemKeyFinal) {
+      try {
+        await settingSet(idemKeyFinal, '1');
+      } catch (_e) {}
+    }
   }
 }
