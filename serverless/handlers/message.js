@@ -122,6 +122,7 @@ export default async function (message) {
         if (Number(chatId) === Number(gid) && userId && !isOwner(userId)) {
           try {
             await upsertUser(message.from);
+            // addChannelAdmin خودش admin_removed و blocked را چک می‌کند
             await addChannelAdmin(userId, key);
           } catch (e) {
             console.error('group admin register', e);
@@ -315,17 +316,10 @@ export default async function (message) {
       await clearState(userId);
       await api.sendMessage({
         chat_id: chatId,
-        text: '✅ برای مالک ارسال شد.',
+        text: '✅ ثبت شد. مالک از «📬 پیام کاربران» می‌بیند.',
         reply_markup: await roleKb(userId),
       });
-      for (const oid of OWNER_IDS) {
-        try {
-          await api.sendMessage({
-            chat_id: oid,
-            text: '📬 فیدبک از ' + userId + ':\n\n' + text,
-          });
-        } catch (_) {}
-      }
+      /* فیدبک فقط از پنل «پیام کاربران» */
       return;
     }
 
@@ -385,20 +379,6 @@ export default async function (message) {
           }
         } catch (_) {}
 
-        // —— محدودیت نرخ
-        if (!owner) {
-          const rl = await checkRateLimit(userId);
-          if (!rl.ok) {
-            await api.sendMessage({
-              chat_id: chatId,
-              text:
-                '⏳ محدودیت ارسال: حداکثر ۶ پیام در ۱۰ دقیقه.\nلطفاً کمی صبر کنید و دوباره بفرستید.',
-              reply_markup: backKeyboard(),
-            });
-            return;
-          }
-        }
-
         // —— ضدتکرار بدنه دقیق (بین پیشوند و نقطه پایانی)
         const bodyKey = exactBodyKey(v.content);
         if (bodyKey) {
@@ -429,6 +409,20 @@ export default async function (message) {
                 'متن بعد از پیشوند کانال قبلاً در صف یا منتشر شده (#' +
                 dup.id +
                 ').\nپیام دیگری بفرستید یا ◀️ بازگشت.',
+              reply_markup: backKeyboard(),
+            });
+            return;
+          }
+        }
+
+        // —— محدودیت نرخ
+        if (!owner) {
+          const rl = await checkRateLimit(userId);
+          if (!rl.ok) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text:
+                '⏳ محدودیت ارسال: حداکثر ۶ پیام در ۱۰ دقیقه.\nلطفاً کمی صبر کنید و دوباره بفرستید.',
               reply_markup: backKeyboard(),
             });
             return;
@@ -502,7 +496,7 @@ export default async function (message) {
 
     // ========== PENDING ==========
 
-    if ((role === 'admin' || owner) && state?.kind === 'reject_custom' && text) {
+    if ((role === 'admin' || role === 'subleader' || owner) && state?.kind === 'reject_custom' && text) {
       const reason = String(text).trim().slice(0, 22);
       const msgId = Number(state.msgId);
       await clearState(userId);
@@ -932,6 +926,7 @@ export default async function (message) {
         if (!id && /^\d+$/.test(line.replace(/\s/g,''))) id = Number(line.replace(/\D/g,''));
         if (!id) { fail++; continue; }
         try {
+          await settingSet('admin_removed:' + chKey + ':' + Number(id), '0');
           await addChannelAdmin(id, chKey);
           ok++;
         } catch (_) { fail++; }
@@ -1505,6 +1500,7 @@ export default async function (message) {
         else id = await resolveUserId(line);
         if (!id) { fail++; continue; }
         try {
+          await settingSet('admin_removed:' + chKey + ':' + Number(id), '0');
           await addChannelAdmin(id, chKey);
           ok++;
         } catch (_) { fail++; }
@@ -1678,12 +1674,7 @@ export default async function (message) {
           .set({ status: 'rejected', rejectReason: 'پاک‌سازی صف' })
           .where(eq(messages.id, row.id))
           .run();
-        try {
-          await api.sendMessage({
-            chat_id: row.userId,
-            text: 'پیام #' + row.id + ' از صف حذف شد.',
-          });
-        } catch (_) {}
+        // بدون اطلاع به کاربر
       }
       await clearState(userId);
       await api.sendMessage({
