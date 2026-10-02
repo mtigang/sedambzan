@@ -1094,6 +1094,7 @@ if (data.startsWith('own_shift:')) {
       let ok = Number(job.ok) || 0;
       let fail = Number(job.fail) || 0;
       let skip = Number(job.skip) || 0;
+      let skipIds = Array.isArray(job.skipIds) ? job.skipIds.slice() : [];
 
       const pending =
         (await db
@@ -1155,7 +1156,7 @@ if (data.startsWith('own_shift:')) {
               chat_id: chatId,
               message_id: progressMessageId,
               text: body,
-              reply_markup: flushProgressInline(false),
+              reply_markup: flushProgressInline(false, skip > 0 || (skipIds && skipIds.length)),
             });
           }
         } catch (_e) {}
@@ -1177,18 +1178,20 @@ if (data.startsWith('own_shift:')) {
               .update(messages)
               .set({
                 status: 'rejected',
-                rejectReason: 'تکراری',
+                rejectReason: 'تکراری (انتشار مستقیم)',
                 reviewedBy: Number(job.ownerId) || null,
                 reviewedAt: new Date(),
               })
               .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
               .run();
             skip++;
+            skipIds.push(Number(row.id));
             processed++;
             if (processed % 3 === 0) {
               job.ok = ok;
               job.fail = fail;
               job.skip = skip;
+              job.skipIds = skipIds;
               await settingSet('flush_job', JSON.stringify(job));
               await paint();
             }
@@ -1241,6 +1244,7 @@ if (data.startsWith('own_shift:')) {
         job.ok = ok;
         job.fail = fail;
         job.skip = skip;
+        job.skipIds = skipIds;
         await settingSet('flush_job', JSON.stringify(job));
         if (processed % 2 === 0 || processed === slice.length) {
           await paint();
@@ -1256,6 +1260,7 @@ if (data.startsWith('own_shift:')) {
       job.ok = ok;
       job.fail = fail;
       job.skip = skip;
+      job.skipIds = skipIds;
       const finished = left.length === 0;
       if (finished) job.status = 'done';
       await settingSet('flush_job', JSON.stringify(job));
@@ -1291,20 +1296,20 @@ if (data.startsWith('own_shift:')) {
             chat_id: chatId,
             message_id: progressMessageId,
             text: body,
-            reply_markup: flushProgressInline(finished),
+            reply_markup: flushProgressInline(finished, skip > 0 || (skipIds && skipIds.length > 0)),
           });
         } else {
           await api.sendMessage({
             chat_id: chatId,
             text: body,
-            reply_markup: flushProgressInline(finished),
+            reply_markup: flushProgressInline(finished, skip > 0 || (skipIds && skipIds.length > 0)),
           });
         }
       } catch (_e) {
         await api.sendMessage({
           chat_id: chatId,
           text: body,
-          reply_markup: flushProgressInline(finished),
+          reply_markup: flushProgressInline(finished, skip > 0 || (skipIds && skipIds.length > 0)),
         });
       }
     }
@@ -1661,7 +1666,97 @@ async function loadAnnounceJob() {
       return;
     }
 
-    if (data === 'flush_next') {
+    
+    if (data === 'flush_view_skip') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      let job = null;
+      try {
+        const raw = await settingGet('flush_job', '');
+        job = raw ? JSON.parse(raw) : null;
+      } catch (_e) {}
+      let ids = (job && Array.isArray(job.skipIds) ? job.skipIds : []).map(Number).filter(Boolean);
+      // fallback: آخرین ردهای «تکراری (انتشار مستقیم)» همین کانال
+      if (!ids.length && job && job.channelKey) {
+        const all =
+          (await db
+            .select()
+            .from(messages)
+            .where(
+              and(
+                eq(messages.channelKey, job.channelKey),
+                eq(messages.status, 'rejected')
+              )
+            )
+            .all()) || [];
+        ids = all
+          .filter(function (r) {
+            return String(r.rejectReason || '') === 'تکراری (انتشار مستقیم)';
+          })
+          .sort(function (a, b) {
+            return b.id - a.id;
+          })
+          .slice(0, 40)
+          .map(function (r) {
+            return Number(r.id);
+          });
+      }
+      if (!ids.length) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'ℹ️ در این انتشار پیام ردشده‌ای ثبت نشده.',
+        });
+        return;
+      }
+      // نمایش حداکثر ۱۵ تا در هر درخواست
+      const st = await getState(userId);
+      let offset = 0;
+      if (st && st.kind === 'flush_skip_view') offset = Number(st.offset) || 0;
+      const page = ids.slice(offset, offset + 15);
+      await setState(userId, 'flush_skip_view', { offset: offset + page.length, ids: ids });
+      let body = '🔴 ردشده‌های انتشار مستقیم (' + ids.length + ' مورد)\nصفحه از #' + (offset + 1) + '\n\n';
+      for (const id of page) {
+        const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
+        const row = rows && rows[0];
+        if (!row) {
+          body += '#' + id + ' (یافت نشد)\n────────────\n';
+          continue;
+        }
+        body +=
+          '#' +
+          row.id +
+          ' | ' +
+          (row.rejectReason || 'تکراری') +
+          '\n' +
+          String(row.content || '').slice(0, 180) +
+          '\n────────────\n';
+      }
+      const more = offset + page.length < ids.length;
+      const kb = more
+        ? {
+            inline_keyboard: [
+              [{ text: '▶️ بعدی', callback_data: 'flush_view_skip', style: 'primary' }],
+            ],
+          }
+        : {
+            inline_keyboard: [
+              [{ text: 'پایان لیست', callback_data: 'flush_noop', style: 'primary' }],
+            ],
+          };
+      if (body.length > 3500) body = body.slice(0, 3500) + '\n…';
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: body,
+        reply_markup: kb,
+      });
+      if (!more) await clearState(userId);
+      return;
+    }
+
+if (data === 'flush_next') {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
