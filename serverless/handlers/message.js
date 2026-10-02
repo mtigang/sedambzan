@@ -251,7 +251,7 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: RULES_TEXT + '\n\nمی‌توانید چند پیام پشت‌سرهم بفرستید.\nحداکثر ۶ پیام در ۱۰ دقیقه.',
-        reply_markup: backKeyboard(),
+        reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
     }
@@ -303,7 +303,7 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: FEEDBACK_HINT,
-        reply_markup: backKeyboard(),
+        reply_markup: sanitizeMarkup(backKeyboard()),
         parse_mode: 'Markdown',
       });
       return;
@@ -316,7 +316,7 @@ export default async function (message) {
           chat_id: chatId,
           text:
             '⚠️ این دکمه فقط برای انتقاد/پیشنهاد به مالک است.\n\nبرای کانال از «📝 ارسال پیام» استفاده کنید.',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
       }
@@ -337,7 +337,7 @@ export default async function (message) {
           await api.sendMessage({
             chat_id: chatId,
             text: workHoursClosedText(),
-            reply_markup: backKeyboard(),
+            reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
         }
@@ -355,7 +355,7 @@ export default async function (message) {
           await api.sendMessage({
             chat_id: chatId,
             text: v.error,
-            reply_markup: backKeyboard(),
+            reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
         }
@@ -364,7 +364,7 @@ export default async function (message) {
           await api.sendMessage({
             chat_id: chatId,
             text: '🔴 این کانال غیرفعال است.',
-            reply_markup: backKeyboard(),
+            reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
         }
@@ -381,7 +381,7 @@ export default async function (message) {
                 ' تا ' +
                 ch.workEnd +
                 ' است.',
-              reply_markup: backKeyboard(),
+              reply_markup: sanitizeMarkup(backKeyboard()),
             });
             return;
           }
@@ -417,7 +417,7 @@ export default async function (message) {
                 'متن بعد از پیشوند کانال قبلاً در صف یا منتشر شده (#' +
                 dup.id +
                 ').\nپیام دیگری بفرستید یا ◀️ بازگشت.',
-              reply_markup: backKeyboard(),
+              reply_markup: sanitizeMarkup(backKeyboard()),
             });
             return;
           }
@@ -431,7 +431,7 @@ export default async function (message) {
               chat_id: chatId,
               text:
                 '⏳ محدودیت ارسال: حداکثر ۶ پیام در ۱۰ دقیقه.\nلطفاً کمی صبر کنید و دوباره بفرستید.',
-              reply_markup: backKeyboard(),
+              reply_markup: sanitizeMarkup(backKeyboard()),
             });
             return;
           }
@@ -446,7 +446,7 @@ export default async function (message) {
             await api.sendMessage({
               chat_id: chatId,
               text: '⏳ درخواست قبلی هنوز در حال ثبت است. چند ثانیه صبر کنید.',
-              reply_markup: backKeyboard(),
+              reply_markup: sanitizeMarkup(backKeyboard()),
             });
             return;
           }
@@ -486,7 +486,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: note,
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
 
         // batch only
@@ -631,7 +631,7 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: 'کانال شیفت را انتخاب کنید:',
-        reply_markup: shiftChannelPickKeyboard(chans),
+        reply_markup: sanitizeMarkup(shiftChannelPickKeyboard(chans)),
       });
       return;
     }
@@ -643,7 +643,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: 'کانال نامعتبر',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
       }
@@ -799,7 +799,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: t,
-          reply_markup: ownerShiftMenuInline(),
+          reply_markup: sanitizeMarkup(ownerShiftMenuInline()),
         });
       } catch (e) {
         console.error('owner shifts', e);
@@ -824,14 +824,14 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: 'آیدی عددی ادمین را بفرستید:',
-        reply_markup: backKeyboard(),
+        reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
     }
     if (owner && state?.kind === 'own_assign_admin' && text) {
       const adminId = Number(String(text).replace(/\D/g, ''));
       if (!adminId) {
-        await api.sendMessage({ chat_id: chatId, text: 'آیدی نامعتبر', reply_markup: backKeyboard() });
+        await api.sendMessage({ chat_id: chatId, text: 'آیدی نامعتبر', reply_markup: sanitizeMarkup(backKeyboard()) });
         return;
       }
       const mode = state.mode;
@@ -989,7 +989,7 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: '🛡️ مدیریت ساب‌لیدرها',
-        reply_markup: ownerSubLeaderMenuKeyboard(),
+        reply_markup: sanitizeMarkup(ownerSubLeaderMenuKeyboard()),
       });
       return;
     }
@@ -998,30 +998,30 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: 'آیدی عددی یا @username کاربر را بفرستید:',
-        reply_markup: backKeyboard(),
+        reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
     }
     if (owner && state?.kind === 'sl_add_id' && text) {
       const tid = await resolveUserId(text);
       if (!tid) {
-        await api.sendMessage({ chat_id: chatId, text: '❌ کاربر پیدا نشد.', reply_markup: backKeyboard() });
+        await api.sendMessage({ chat_id: chatId, text: '❌ کاربر پیدا نشد.', reply_markup: sanitizeMarkup(backKeyboard()) });
         return;
       }
       if (isOwner(tid)) {
-        await api.sendMessage({ chat_id: chatId, text: '❌ مالک را نمی‌توان ساب‌لیدر کرد.', reply_markup: backKeyboard() });
+        await api.sendMessage({ chat_id: chatId, text: '❌ مالک را نمی‌توان ساب‌لیدر کرد.', reply_markup: sanitizeMarkup(backKeyboard()) });
         return;
       }
       const tu = await getUser(tid);
       if (tu && Number(tu.blocked) === 1) {
-        await api.sendMessage({ chat_id: chatId, text: '❌ این کاربر بلاک است.', reply_markup: backKeyboard() });
+        await api.sendMessage({ chat_id: chatId, text: '❌ این کاربر بلاک است.', reply_markup: sanitizeMarkup(backKeyboard()) });
         return;
       }
       await setState(userId, 'sl_add_ch', { targetId: tid });
       await api.sendMessage({
         chat_id: chatId,
         text: 'کانال تحت مدیریت را انتخاب کنید:',
-        reply_markup: subLeaderPickChannelInline(),
+        reply_markup: sanitizeMarkup(subLeaderPickChannelInline()),
       });
       return;
     }
@@ -1031,7 +1031,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: 'ℹ️ ساب‌لیدری ثبت نشده.',
-          reply_markup: ownerSubLeaderMenuKeyboard(),
+          reply_markup: sanitizeMarkup(ownerSubLeaderMenuKeyboard()),
         });
         return;
       }
@@ -1070,7 +1070,7 @@ export default async function (message) {
           await api.sendMessage({
             chat_id: chatId,
             text: 'ℹ️ در حال حاضر ادمینی تحت مدیریت شما وجود ندارد.',
-            reply_markup: subLeaderKeyboard(),
+            reply_markup: sanitizeMarkup(subLeaderKeyboard()),
           });
           return;
         }
@@ -1117,7 +1117,7 @@ export default async function (message) {
             st.ap +
             ' 🔴' +
             st.rj,
-          reply_markup: subLeaderKeyboard(),
+          reply_markup: sanitizeMarkup(subLeaderKeyboard()),
         });
         return;
       }
@@ -1132,7 +1132,7 @@ export default async function (message) {
             myCh +
             '`\n\nدسترسی فقط به همین کانال محدود است.',
           parse_mode: 'Markdown',
-          reply_markup: subLeaderKeyboard(),
+          reply_markup: sanitizeMarkup(subLeaderKeyboard()),
         });
         return;
       }
@@ -1142,7 +1142,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: '📢 متن اطلاعیه را برای ادمین‌های «' + chTitle + '» بفرستید:',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
       }
@@ -1154,7 +1154,7 @@ export default async function (message) {
           await api.sendMessage({
             chat_id: chatId,
             text: 'ℹ️ ادمین فعالی برای ارسال نیست.',
-            reply_markup: subLeaderKeyboard(),
+            reply_markup: sanitizeMarkup(subLeaderKeyboard()),
           });
           return;
         }
@@ -1286,7 +1286,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: 'عدد آیدی پیام را بفرستید:',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
       } catch (e) {
         console.error('search_msg', e);
@@ -1305,7 +1305,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: 'آیدی عددی یا @username کاربر را بفرستید:',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
       } catch (e) {
         console.error('search_user', e);
@@ -1352,7 +1352,7 @@ export default async function (message) {
           text:
             (linkHint ? linkHint + '\n\n' : '') +
             'آیدی یا لینک معتبر بفرستید.\nمثال: 123 یا https://t.me/callMeAraIl/108010',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
       }
@@ -1365,7 +1365,7 @@ export default async function (message) {
             'پیام #' +
             id +
             ' پیدا نشد.\nآیدی یا لینک بعدی را بفرستید:',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
       }
@@ -1406,7 +1406,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: 'کاربر پیدا نشد.\nآیدی بعدی را بفرستید یا ◀️ بازگشت',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
       }
@@ -1477,7 +1477,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: 'متن اطلاعیه را بفرستید:',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
       } catch (e) {
         console.error('announce', e);
@@ -1586,7 +1586,7 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text: 'آیدی عددی کاربری که pendingهایش پاک شود را بفرستید:',
-        reply_markup: backKeyboard(),
+        reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
     }
@@ -1597,7 +1597,7 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: 'آیدی عددی نامعتبر است.',
-          reply_markup: backKeyboard(),
+          reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
       }
