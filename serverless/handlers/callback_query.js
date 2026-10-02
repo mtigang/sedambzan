@@ -18,6 +18,9 @@ import {
   addChannelAdmin,
   getRole,
   decideMessage,
+  dropMessageFromAllReviewBatches,
+  pruneReviewBatchToPending,
+  clearReviewBatch,
   checkReviewAccess,
   createReviewBatch,
   sendReviewBatch,
@@ -166,8 +169,35 @@ export default async function (cq) {
       const id = Number(data.split(':')[1]);
       const rows0 = await db.select().from(messages).where(eq(messages.id, id)).all();
       const pendingRow = rows0 && rows0[0];
-      if (!pendingRow || pendingRow.status !== 'pending') {
+      if (!pendingRow || String(pendingRow.status) !== 'pending') {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'قبلاً بررسی شده', show_alert: true });
+        try {
+          await dropMessageFromAllReviewBatches(id);
+        } catch (_e) {}
+        try {
+          await api.editMessageReplyMarkup({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            reply_markup: { inline_keyboard: [] },
+          });
+        } catch (_e) {}
+        const fin = await finishReviewBatchIfComplete(userId, id);
+        if (fin && fin.complete) {
+          await clearReviewBatch(userId);
+          if (fin.hasMore) {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: '✅ Batch تمام شد. برای دسته بعدی «📥 پیام‌های در انتظار» یا دکمه زیر را بزنید.',
+              reply_markup: reviewNextInline(fin.batch && fin.batch.batchNumber),
+            });
+          } else {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: '✅ Batch تمام شد. پیام pending دیگری نیست.',
+              reply_markup: reviewDoneInline(),
+            });
+          }
+        }
         return;
       }
       const acc = await checkReviewAccess(userId, pendingRow);
@@ -356,6 +386,29 @@ if (data.startsWith('reject_menu:')) {
       const dec = await decideMessage(userId, id, 'reject', reason);
       if (!dec.ok) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: dec.text, show_alert: true });
+        if (dec.code === 'done') {
+          try {
+            await dropMessageFromAllReviewBatches(id);
+          } catch (_e) {}
+          try {
+            await api.editMessageReplyMarkup({
+              chat_id: cq.message.chat.id,
+              message_id: cq.message.message_id,
+              reply_markup: { inline_keyboard: [] },
+            });
+          } catch (_e) {}
+          const fin = await finishReviewBatchIfComplete(userId, id);
+          if (fin && fin.complete) {
+            await clearReviewBatch(userId);
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: fin.hasMore
+                ? '✅ Batch تمام شد. برای بعدی «📥 پیام‌های در انتظار» را بزنید.'
+                : '✅ Batch تمام شد.',
+              reply_markup: fin.hasMore ? reviewNextInline(fin.batch && fin.batch.batchNumber) : reviewDoneInline(),
+            });
+          }
+        }
         return;
       }
       const row = dec.row;
@@ -407,9 +460,9 @@ if (data.startsWith('reject_menu:')) {
       if (res.status === 'incomplete') {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: 'اول هر ۱۰ پیام فعلی را بررسی کنید.',
-          show_alert: true,
+          text: 'ارسال مجدد پیام‌های pending باقی‌مانده…',
         });
+        await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: true });
         return;
       }
       if (res.status === 'empty') {
@@ -1219,6 +1272,9 @@ if (data.startsWith('own_shift:')) {
             })
             .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
             .run();
+          try {
+            await dropMessageFromAllReviewBatches(row.id);
+          } catch (_e) {}
           if (bodyKey) seenBody[bodyKey] = true;
           ok++;
           processed++;
