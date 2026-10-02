@@ -966,7 +966,7 @@ export default async function (message) {
       const chTitle = (DEFAULT_CHANNELS[myCh] && DEFAULT_CHANNELS[myCh].title) || myCh;
 
       if (text === '👥 ادمین‌های من') {
-        const { admins } = await subLeaderAdmins(userId);
+        const { admins, channelKey } = await subLeaderAdmins(userId);
         if (!admins.length) {
           await api.sendMessage({
             chat_id: chatId,
@@ -975,15 +975,15 @@ export default async function (message) {
           });
           return;
         }
-        let body = '👥 ادمین‌های «' + chTitle + '»\nتعداد: ' + admins.length + '\n\n';
-        for (const a of admins) {
-          body += '• ' + (a.display || a.userId) + ' (`' + a.userId + '`)\n';
-        }
         await api.sendMessage({
           chat_id: chatId,
-          text: body,
-          parse_mode: 'Markdown',
-          reply_markup: subLeaderKeyboard(),
+          text:
+            '👥 ادمین‌های «' +
+            chTitle +
+            '»\nتعداد: ' +
+            admins.length +
+            '\nروی «حذف» بزنید تا از کانال شما برداشته شوند (سابقه پاک نمی‌شود).',
+          reply_markup: subLeaderAdminsInline(admins, channelKey || myCh),
         });
         return;
       }
