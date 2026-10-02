@@ -1602,13 +1602,14 @@ async function loadAnnounceJob() {
       });
       const slice = pending.slice(0, 15);
       let n = 0;
+      // فقط وضعیت → rejected | بدون پیام به کاربر | بدون انتشار کانال
       for (const row of slice) {
         try {
           await db
             .update(messages)
             .set({
               status: 'rejected',
-              rejectReason: 'پاک‌سازی توسط مالک',
+              rejectReason: 'رد شده',
               reviewedBy: Number(userId),
               reviewedAt: new Date(),
             })
