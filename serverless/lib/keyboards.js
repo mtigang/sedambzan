@@ -66,6 +66,7 @@ export function settingsKeyboard(botOn) {
       [{ text: '📣 ارسال به کانال' }, { text: '📣 اطلاعیه' }],
       [{ text: '🧪 تست کانال‌ها' }],
       [{ text: '📤 انتشار مستقیم صف' }],
+      [{ text: '🗑 پاک‌سازی pending کاربر' }],
       [{ text: '🧹 پاک‌سازی صف' }],
       [{ text: '◀️ بازگشت' }],
     ],
@@ -483,6 +484,41 @@ export function flushConfirmInline(channelKey) {
           style: 'success',
         },
         { text: 'لغو', callback_data: 'flush_cancel', style: 'danger' },
+      ],
+    ],
+  };
+}
+
+export function purgeUserConfirmInline(targetId, count) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: '🗑 پاک کردن ۱۵تای اول (' + count + ' pending)',
+          callback_data: 'purge_user_go:' + targetId,
+          style: 'danger',
+        },
+      ],
+      [{ text: 'لغو', callback_data: 'purge_user_cancel', style: 'primary' }],
+    ],
+  };
+}
+
+export function purgeUserProgressInline(targetId, finished) {
+  if (finished) {
+    return {
+      inline_keyboard: [[{ text: '✅ تمام', callback_data: 'purge_user_cancel', style: 'success' }]],
+    };
+  }
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: '▶️ پاک کردن ۱۵تای بعدی',
+          callback_data: 'purge_user_go:' + targetId,
+          style: 'danger',
+        },
+        { text: '⏹ توقف', callback_data: 'purge_user_cancel', style: 'primary' },
       ],
     ],
   };
