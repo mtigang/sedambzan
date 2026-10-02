@@ -9,7 +9,7 @@ import {
   ADMIN_GROUP_IDS,
 } from 'lib/config';
 import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf } from 'lib/time';
-import { reviewInline } from 'lib/keyboards';
+import { reviewInline, sanitizeMarkup } from 'lib/keyboards';
 
 export async function ensureChannelsSeeded() {
   try {
@@ -772,7 +772,7 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
           displayName(sender, row.userId) +
           '\n\n' +
           String(row.content || '').slice(0, 3800),
-        reply_markup: reviewInline(row.id, Number(row.id) === lastId, batch.batchNumber),
+        reply_markup: sanitizeMarkup(reviewInline(row.id, Number(row.id) === lastId, batch.batchNumber)),
       });
     } catch (e) {
       console.error('sendReviewBatch', row.id, e);
