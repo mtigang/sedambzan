@@ -805,10 +805,12 @@ if (data.startsWith('reject_menu:')) {
     }
 
     if (data.startsWith('async:')) {
-      if (!isOwner(userId)) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
-        return;
-      }
+      await api.answerCallbackQuery({
+        callback_query_id: cq.id,
+        text: 'همگام‌سازی گروه غیرفعال است. ادمین را دستی اضافه/حذف کنید.',
+        show_alert: true,
+      });
+      return;
       const channelKey = data.split(':')[1];
       const res = await syncAdminsFromGroup(channelKey);
       const ads = await listAdminsByChannel(channelKey);
@@ -906,9 +908,20 @@ if (data.startsWith('reject_menu:')) {
     }
     
     if (data.startsWith('shift_ocancel|') || data.startsWith('shift_ocancel:')) {
+      // channelKey parsed below — check after parse
+      let _preChannel = null;
+      try {
+        _preChannel = data.indexOf('|') >= 0 ? data.split('|')[1] : data.split(':')[1];
+      } catch (_e) {}
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
-        return;
+        let ok = false;
+        try {
+          ok = await canManageOthersShifts(userId, _preChannel);
+        } catch (_e) {}
+        if (!ok) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+          return;
+        }
       }
       let channelKey, hourKey;
       if (data.indexOf('|') >= 0) {
@@ -1795,6 +1808,24 @@ async function loadAnnounceJob() {
     // ========== Sub-Leader owner management ==========
     
     // ========== Sub-Leader: حذف ادمین کانال خودش ==========
+    
+    if (data.startsWith('sl_aadd:')) {
+      const channelKey = data.split(':')[1];
+      const role = await getRole(userId);
+      const slCh = await getActiveSubLeaderChannel(userId);
+      if (!isOwner(userId) && !(role === 'subleader' && slCh === channelKey)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+        return;
+      }
+      await setState(userId, 'sl_add_admin', { channelKey });
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'آیدی عددی یا @username ادمین جدید:',
+      });
+      return;
+    }
+
     if (data.startsWith('sl_adel:')) {
       const parts = data.split(':');
       const channelKey = parts[1];
@@ -1861,7 +1892,7 @@ async function loadAnnounceJob() {
       return;
     }
 
-    if (data.startsWith('sl_ainfo:')) {
+        if (data.startsWith('sl_ainfo:')) {
       const tid = Number(data.split(':')[1]);
       const role = await getRole(userId);
       const slCh = await getActiveSubLeaderChannel(userId);
@@ -1874,9 +1905,37 @@ async function loadAnnounceJob() {
       try {
         name = displayName(await getUser(tid), tid);
       } catch (_e) {}
+      const allMsg = (await db.select().from(messages).where(eq(messages.channelKey, slCh)).all()) || [];
+      const mine = allMsg.filter(function (x) { return Number(x.reviewedBy) === tid; });
+      const ap = mine.filter(function (x) { return x.status === 'approved'; }).length;
+      const rj = mine.filter(function (x) { return x.status === 'rejected'; }).length;
+      const now = tehranNow();
+      const pdate = periodDateStr(now);
+      const sh =
+        (await db
+          .select()
+          .from(shifts)
+          .where(and(eq(shifts.adminId, tid), eq(shifts.channelKey, slCh), eq(shifts.status, 'active')))
+          .all()) || [];
+      const todaySh = sh.filter(function (s) {
+        return s.shiftDate === pdate || s.shiftDate === 'perm' || s.shiftDate === 'permanent';
+      });
+      const shLine = todaySh.length
+        ? todaySh.map(function (s) { return s.startHm + '–' + s.endHm; }).join(', ')
+        : '—';
+      const title = (DEFAULT_CHANNELS[slCh] && DEFAULT_CHANNELS[slCh].title) || slCh;
+      const body =
+        '👤 ' + name +
+        '\n🆔 ' + tid +
+        '\n📢 ' + title +
+        '\n\n📊 عملکرد (کل کانال)' +
+        '\n🟢 تأیید: ' + ap +
+        '\n🔴 رد: ' + rj +
+        '\n📦 مجموع بررسی: ' + mine.length +
+        '\n\n⏰ شیفت امروز: ' + shLine;
       await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: '👤 ' + name + '\n🆔 ' + tid + '\n📢 کانال Scope شما',
+        text: body,
       });
       return;
     }
@@ -2539,13 +2598,18 @@ if (data === 'ann_continue') {
         const h = (Number(startHm.split(':')[0]) + 1) % 24;
         endHm = String(h).padStart(2, '0') + ':00';
       }
-      // Scope ساب‌لیدر
+      // کانال‌های مجاز: ادمین کانال‌ها + اسکوپ ساب‌لیدر
       if (!isOwner(userId)) {
-        const slCh = await getActiveSubLeaderChannel(userId);
-        if (slCh && slCh !== channelKey) {
+        let allowed = [];
+        try {
+          allowed = await shiftPickChannels(userId);
+        } catch (_e) {
+          allowed = [];
+        }
+        if (!allowed.includes(channelKey)) {
           await api.answerCallbackQuery({
             callback_query_id: cq.id,
-            text: '⛔ خارج از محدوده کانال شما',
+            text: '⛔ برای این کانال اجازه شیفت ندارید',
             show_alert: true,
           });
           return;
