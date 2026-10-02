@@ -654,20 +654,24 @@ async function selectReviewablePending(adminId) {
 export async function finishReviewBatchIfComplete(adminId, messageId) {
   try {
     const batch = await getReviewBatch(adminId);
-    if (!batch) return { inBatch: false, complete: true, hasMore: false, batch: null };
-    if (messageId != null && !batch.ids.map(Number).includes(Number(messageId))) {
-      return { inBatch: false, complete: false, hasMore: false, batch };
+    if (!batch) {
+      // Batch قبلاً پاک شده — ممکن است hasMore هنوز باشد
+      const hasMore = (await selectReviewablePending(adminId)).length > 0;
+      return { inBatch: false, complete: true, hasMore, batch: null };
     }
+    // حتی اگر messageId دیگر در لیست نباشد (drop شده)، وضعیت کامل بودن را چک کن
+    const inBatch =
+      messageId == null || batch.ids.map(Number).includes(Number(messageId));
     const complete = await isReviewBatchComplete(adminId);
     let hasMore = false;
     if (complete) {
       hasMore = (await selectReviewablePending(adminId)).length > 0;
-      // آزاد کردن Batch تا گیر نکند
+      // آزاد کردن Batch تا گیر نکند — شماره Batch را برای دکمه نگه می‌داریم
       try {
         await clearReviewBatch(adminId);
       } catch (_e) {}
     }
-    return { inBatch: true, complete, hasMore, batch };
+    return { inBatch: inBatch || complete, complete, hasMore, batch };
   } catch (e) {
     console.error('finishReviewBatchIfComplete', e);
     return { inBatch: false, complete: false, hasMore: false, batch: null };
@@ -778,7 +782,8 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
           displayName(sender, row.userId) +
           '\n\n' +
           String(row.content || '').slice(0, 3800),
-        reply_markup: sanitizeMarkup(reviewInline(row.id, Number(row.id) === lastId, batch.batchNumber)),
+        // همیشه دکمه Batch بعدی را نشان بده؛ اگر Batch ناقص باشد review_next جلوی ادامه را می‌گیرد
+        reply_markup: sanitizeMarkup(reviewInline(row.id, true, batch.batchNumber)),
       });
     } catch (e) {
       console.error('sendReviewBatch', row.id, e);

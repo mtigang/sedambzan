@@ -116,38 +116,47 @@ async function refreshAllShiftBoards(channelKey, date) {
 
 /** ویرایش پیام بعد از تأیید/رد؛ اگر Batch کامل شد دکمه‌ی بعدی یا «صف تمام شد» */
 async function editReviewResult(cq, text, fin) {
+  // کیبورد نتیجه: اگر Batch تمام شد و pending بیشتری هست → دکمه Batch بعدی بماند
+  // اگر تمام شد و چیزی نمانده → صف خالی
+  // اگر Batch هنوز کامل نشده → کیبورد خالی (فقط نتیجه)
+  let markup = { inline_keyboard: [] };
+  let extraSend = null;
+  if (fin && fin.complete) {
+    if (fin.hasMore) {
+      const bn = fin.batch && fin.batch.batchNumber;
+      markup = sanitizeMarkup(reviewNextInline(bn));
+      extraSend = {
+        text: '✅ این Batch تمام شد.\nبرای دریافت دسته بعدی دکمه زیر را بزنید.',
+        reply_markup: sanitizeMarkup(reviewNextInline(bn)),
+      };
+    } else {
+      markup = sanitizeMarkup(reviewDoneInline());
+    }
+  }
   try {
     await api.editMessageText({
       chat_id: cq.message.chat.id,
       message_id: cq.message.message_id,
       text: String(text || ''),
-      reply_markup: { inline_keyboard: [] },
+      reply_markup: markup,
     });
   } catch (_) {
     try {
       await api.editMessageReplyMarkup({
         chat_id: cq.message.chat.id,
         message_id: cq.message.message_id,
-        reply_markup: { inline_keyboard: [] },
+        reply_markup: markup,
       });
     } catch (_e) {}
   }
-  // دکمه Batch بعدی همیشه در پیام جدا — تا زیر پیام آخر غیب نشود
-  if (fin && fin.inBatch && fin.complete) {
+  // پیام جدا به‌عنوان پشتیبان — اگر edit کیبورد را نگه نداشت، دکمه از دست نرود
+  if (extraSend) {
     try {
-      if (fin.hasMore) {
-        await api.sendMessage({
-          chat_id: cq.message.chat.id,
-          text: '✅ این Batch تمام شد.\nبرای دریافت دسته بعدی دکمه زیر را بزنید.',
-          reply_markup: sanitizeMarkup(reviewNextInline(fin.batch && fin.batch.batchNumber)),
-        });
-      } else {
-        await api.sendMessage({
-          chat_id: cq.message.chat.id,
-          text: '📭 پیام Pending دیگری برای شیفت شما وجود ندارد.',
-          reply_markup: sanitizeMarkup(reviewDoneInline()),
-        });
-      }
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: extraSend.text,
+        reply_markup: extraSend.reply_markup,
+      });
     } catch (_) {}
   }
 }
@@ -239,22 +248,11 @@ export default async function (cq) {
           });
         } catch (_e) {}
         const fin = await finishReviewBatchIfComplete(userId, id);
-        if (fin && fin.complete) {
-          await clearReviewBatch(userId);
-          if (fin.hasMore) {
-            await api.sendMessage({
-              chat_id: cq.message.chat.id,
-              text: '✅ Batch تمام شد. برای دسته بعدی «📥 پیام‌های در انتظار» یا دکمه زیر را بزنید.',
-              reply_markup: sanitizeMarkup(reviewNextInline(fin.batch && fin.batch.batchNumber)),
-            });
-          } else {
-            await api.sendMessage({
-              chat_id: cq.message.chat.id,
-              text: '✅ Batch تمام شد. پیام pending دیگری نیست.',
-              reply_markup: sanitizeMarkup(reviewDoneInline()),
-            });
-          }
-        }
+        await editReviewResult(
+          cq,
+          'ℹ️ این پیام قبلاً بررسی شده #' + id,
+          fin && fin.complete ? fin : { inBatch: true, complete: true, hasMore: !!(fin && fin.hasMore), batch: fin && fin.batch }
+        );
         return;
       }
       const acc = await checkReviewAccess(userId, pendingRow);
@@ -419,20 +417,16 @@ if (data.startsWith('reject_menu:')) {
     if (data.startsWith('reject_cancel:')) {
       const id = Number(data.split(':')[1]);
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
-      let showNext = false;
       let bn = null;
       try {
         const b = await getReviewBatch(userId);
-        if (b && b.ids.length && Number(b.ids[b.ids.length - 1]) === id) {
-          showNext = true;
-          bn = b.batchNumber;
-        }
+        if (b) bn = b.batchNumber;
       } catch (_) {}
       try {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: sanitizeMarkup(reviewInline(id, showNext, bn)),
+          reply_markup: sanitizeMarkup(reviewInline(id, true, bn)),
         });
       } catch (_) {}
       return;
@@ -471,24 +465,14 @@ if (data.startsWith('reject_menu:')) {
           try {
             await dropMessageFromAllReviewBatches(id);
           } catch (_e) {}
-          try {
-            await api.editMessageReplyMarkup({
-              chat_id: cq.message.chat.id,
-              message_id: cq.message.message_id,
-              reply_markup: { inline_keyboard: [] },
-            });
-          } catch (_e) {}
           const fin = await finishReviewBatchIfComplete(userId, id);
-          if (fin && fin.complete) {
-            await clearReviewBatch(userId);
-            await api.sendMessage({
-              chat_id: cq.message.chat.id,
-              text: fin.hasMore
-                ? '✅ Batch تمام شد. برای بعدی «📥 پیام‌های در انتظار» را بزنید.'
-                : '✅ Batch تمام شد.',
-              reply_markup: fin.hasMore ? sanitizeMarkup(reviewNextInline(fin.batch && fin.batch.batchNumber)) : sanitizeMarkup(reviewDoneInline()),
-            });
-          }
+          await editReviewResult(
+            cq,
+            'ℹ️ این پیام قبلاً بررسی شده #' + id,
+            fin && fin.complete
+              ? fin
+              : { inBatch: true, complete: true, hasMore: !!(fin && fin.hasMore), batch: fin && fin.batch }
+          );
         }
         return;
       }
@@ -555,9 +539,33 @@ if (data.startsWith('reject_menu:')) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
         return;
       }
+      // اگر Batch فعلی هنوز پیام pending دارد → اجازه نده زودتر برود
+      try {
+        const curBatch = await getReviewBatch(userId);
+        if (curBatch && curBatch.ids && curBatch.ids.length) {
+          let stillPending = false;
+          for (const mid of curBatch.ids) {
+            const rows = await db.select().from(messages).where(eq(messages.id, Number(mid))).all();
+            if (rows && rows[0] && String(rows[0].status) === 'pending') {
+              stillPending = true;
+              break;
+            }
+          }
+          if (stillPending) {
+            await api.answerCallbackQuery({
+              callback_query_id: cq.id,
+              text: '⛔ ابتدا همه پیام‌های این Batch را تأیید یا رد کنید.',
+              show_alert: true,
+            });
+            return;
+          }
+        }
+      } catch (_e) {}
+      // want = شماره Batch قبلی؛ بعد از اتمام، Batch پاک شده و null است → اشکالی ندارد
       if (want != null) {
         const cur = await getReviewBatch(userId);
         if (cur && Number(cur.batchNumber) !== want) {
+          // Batch جدیدتری ساخته شده — دکمه قدیمی
           await api.answerCallbackQuery({
             callback_query_id: cq.id,
             text: 'این دکمه قدیمی است. دوباره «📥 پیام‌های در انتظار» را بزنید.',
