@@ -26,7 +26,30 @@ export function ownerKeyboard() {
       [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌ها' }],
       [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
       [{ text: '📬 پیام کاربران' }, { text: '🔍 جستجو' }],
-      [{ text: '⚙️ تنظیمات' }],
+      [{ text: '🛡️ ساب‌لیدرها' }, { text: '⚙️ تنظیمات' }],
+    ],
+    resize_keyboard: true,
+  };
+}
+
+export function subLeaderKeyboard() {
+  return {
+    keyboard: [
+      [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌های من' }],
+      [{ text: '⏰ مدیریت شیفت‌ها' }, { text: '📊 آمار کانال' }],
+      [{ text: '📢 اطلاعیه برای ادمین‌ها' }],
+      [{ text: 'ℹ️ اطلاعات کانال' }],
+    ],
+    resize_keyboard: true,
+  };
+}
+
+export function ownerSubLeaderMenuKeyboard() {
+  return {
+    keyboard: [
+      [{ text: '➕ افزودن ساب‌لیدر' }],
+      [{ text: '👥 لیست ساب‌لیدرها' }],
+      [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
   };
@@ -337,6 +360,57 @@ export function announceProgressInline(done) {
     inline_keyboard: [
       [{ text: '▶️ ادامه ارسال', callback_data: 'ann_continue', style: 'success' }],
       [{ text: '⏹ توقف', callback_data: 'ann_stop', style: 'danger' }],
+    ],
+  };
+}
+
+export function subLeaderPickChannelInline() {
+  const rows = [];
+  for (const c of Object.values(DEFAULT_CHANNELS)) {
+    rows.push([{ text: '📢 ' + c.title, callback_data: 'sl_setch:' + c.key, style: 'primary' }]);
+  }
+  rows.push([{ text: 'لغو', callback_data: 'sl_cancel', style: 'danger' }]);
+  return { inline_keyboard: rows };
+}
+
+export function subLeaderListInline(items) {
+  const rows = [];
+  for (const it of items || []) {
+    const title =
+      (DEFAULT_CHANNELS[it.channelKey] && DEFAULT_CHANNELS[it.channelKey].title) || it.channelKey;
+    const st = it.status === 'active' ? '🟢' : '🔴';
+    rows.push([
+      {
+        text: st + ' ' + (it.display || it.userId) + ' | ' + title,
+        callback_data: 'sl_view:' + it.userId,
+        style: 'primary',
+      },
+    ]);
+  }
+  if (!rows.length) {
+    rows.push([{ text: 'لیست خالی', callback_data: 'sl_noop', style: 'primary' }]);
+  }
+  return { inline_keyboard: rows };
+}
+
+export function subLeaderManageInline(userId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🔄 تغییر کانال', callback_data: 'sl_ch:' + userId, style: 'primary' },
+        { text: '🚫 غیرفعال', callback_data: 'sl_off:' + userId, style: 'danger' },
+      ],
+    ],
+  };
+}
+
+export function subLeaderAnnounceConfirmInline() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ ارسال', callback_data: 'sl_ann_yes', style: 'success' },
+        { text: '❌ لغو', callback_data: 'sl_ann_no', style: 'danger' },
+      ],
     ],
   };
 }
