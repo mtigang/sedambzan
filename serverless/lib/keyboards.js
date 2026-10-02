@@ -451,20 +451,26 @@ export function flushChannelPickInline() {
   return { inline_keyboard: rows };
 }
 
-export function flushProgressInline(finished) {
-  if (finished) {
-    return {
-      inline_keyboard: [[{ text: '✅ تمام', callback_data: 'flush_noop', style: 'success' }]],
-    };
+export function flushProgressInline(finished, hasSkipped) {
+  const rows = [];
+  if (!finished) {
+    rows.push([
+      { text: '▶️ انتشار دسته بعدی', callback_data: 'flush_next', style: 'success' },
+      { text: '⏹ توقف', callback_data: 'flush_stop', style: 'danger' },
+    ]);
+  } else {
+    rows.push([{ text: '✅ تمام', callback_data: 'flush_noop', style: 'success' }]);
   }
-  return {
-    inline_keyboard: [
-      [
-        { text: '▶️ انتشار دسته بعدی', callback_data: 'flush_next', style: 'success' },
-        { text: '⏹ توقف', callback_data: 'flush_stop', style: 'danger' },
-      ],
-    ],
-  };
+  if (hasSkipped) {
+    rows.push([
+      {
+        text: '👁 مشاهده ردشده‌های این انتشار',
+        callback_data: 'flush_view_skip',
+        style: 'primary',
+      },
+    ]);
+  }
+  return { inline_keyboard: rows };
 }
 
 export function flushConfirmInline(channelKey) {
