@@ -304,6 +304,8 @@ export async function listAdminsByChannel(channelKey) {
 
 /** همگام‌سازی از گروه ادمین — getChatAdministrators + ثبت */
 export async function syncAdminsFromGroup(channelKey) {
+  // SYNC از گروه غیرفعال — فقط افزودن/حذف دستی
+  return { ok: true, added: 0, total: 0, disabled: true };
   const groupId = ADMIN_GROUP_IDS[channelKey];
   if (!groupId) return { ok: false, error: 'no group', added: 0 };
 
@@ -334,16 +336,8 @@ export async function syncAdminsFromGroup(channelKey) {
 }
 
 export async function syncAllAdminGroups(force = false) {
-  if (!force) {
-    const last = Number(await settingGet('last_admin_sync', '0')) || 0;
-    if (Date.now() - last < 30 * 60 * 1000) return null;
-  }
-  const results = {};
-  for (const key of Object.keys(ADMIN_GROUP_IDS)) {
-    results[key] = await syncAdminsFromGroup(key);
-  }
-  await settingSet('last_admin_sync', String(Date.now()));
-  return results;
+  // غیرفعال
+  return { results: {}, disabled: true };
 }
 
 export async function activeShiftAdmins(channelKey) {
@@ -434,6 +428,29 @@ export async function findAdminShiftConflict(adminId, shiftDate, startHm, endHm,
     console.error('findAdminShiftConflict', e);
     return null;
   }
+}
+
+
+/** کانال‌هایی که کاربر می‌تواند برای خودش شیفت بردارد: ادمین کانال + اسکوپ ساب‌لیدر */
+export async function shiftPickChannels(userId) {
+  if (isOwner(userId)) return Object.keys(DEFAULT_CHANNELS || {});
+  const set = new Set();
+  try {
+    const chs = await adminChannels(userId);
+    for (const c of chs || []) set.add(c);
+  } catch (_e) {}
+  try {
+    const sl = await getActiveSubLeaderChannel(userId);
+    if (sl) set.add(sl);
+  } catch (_e) {}
+  return [...set];
+}
+
+/** آیا می‌تواند شیفت دیگران را در این کانال لغو/تغییر دهد؟ */
+export async function canManageOthersShifts(userId, channelKey) {
+  if (isOwner(userId)) return true;
+  const sl = await getActiveSubLeaderChannel(userId);
+  return !!(sl && sl === channelKey);
 }
 
 export async function activeShiftChannelKeys(adminId) {
