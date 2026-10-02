@@ -64,6 +64,7 @@ import {
   reviewNextInline,
   reviewDoneInline,
   reviewTakenInline,
+  sanitizeMarkup,
 } from 'lib/keyboards';
 
 async function refreshAllShiftBoards(channelKey, date) {
@@ -100,7 +101,7 @@ async function refreshAllShiftBoards(channelKey, date) {
         await api.editMessageReplyMarkup({
           chat_id: info.chatId,
           message_id: info.messageId,
-          reply_markup: shiftSlotsInline(channelKey, takenMap, myStarts),
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts)),
         });
       } catch (e) {
         console.error('refresh board', e);
@@ -136,13 +137,13 @@ async function editReviewResult(cq, text, fin) {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text: '✅ این Batch تمام شد.\nبرای دریافت دسته بعدی دکمه زیر را بزنید.',
-          reply_markup: reviewNextInline(fin.batch && fin.batch.batchNumber),
+          reply_markup: sanitizeMarkup(reviewNextInline(fin.batch && fin.batch.batchNumber)),
         });
       } else {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text: '📭 پیام Pending دیگری برای شیفت شما وجود ندارد.',
-          reply_markup: reviewDoneInline(),
+          reply_markup: sanitizeMarkup(reviewDoneInline()),
         });
       }
     } catch (_) {}
@@ -201,13 +202,13 @@ export default async function (cq) {
             await api.sendMessage({
               chat_id: cq.message.chat.id,
               text: '✅ Batch تمام شد. برای دسته بعدی «📥 پیام‌های در انتظار» یا دکمه زیر را بزنید.',
-              reply_markup: reviewNextInline(fin.batch && fin.batch.batchNumber),
+              reply_markup: sanitizeMarkup(reviewNextInline(fin.batch && fin.batch.batchNumber)),
             });
           } else {
             await api.sendMessage({
               chat_id: cq.message.chat.id,
               text: '✅ Batch تمام شد. پیام pending دیگری نیست.',
-              reply_markup: reviewDoneInline(),
+              reply_markup: sanitizeMarkup(reviewDoneInline()),
             });
           }
         }
@@ -366,7 +367,7 @@ if (data.startsWith('reject_menu:')) {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: rejectReasonsInline(id),
+          reply_markup: sanitizeMarkup(rejectReasonsInline(id)),
         });
       } catch (_) {}
       return;
@@ -388,7 +389,7 @@ if (data.startsWith('reject_menu:')) {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: reviewInline(id, showNext, bn),
+          reply_markup: sanitizeMarkup(reviewInline(id, showNext, bn)),
         });
       } catch (_) {}
       return;
@@ -442,7 +443,7 @@ if (data.startsWith('reject_menu:')) {
               text: fin.hasMore
                 ? '✅ Batch تمام شد. برای بعدی «📥 پیام‌های در انتظار» را بزنید.'
                 : '✅ Batch تمام شد.',
-              reply_markup: fin.hasMore ? reviewNextInline(fin.batch && fin.batch.batchNumber) : reviewDoneInline(),
+              reply_markup: fin.hasMore ? sanitizeMarkup(reviewNextInline(fin.batch && fin.batch.batchNumber)) : sanitizeMarkup(reviewDoneInline()),
             });
           }
         }
@@ -508,7 +509,7 @@ if (data.startsWith('reject_menu:')) {
           await api.editMessageReplyMarkup({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
-            reply_markup: reviewDoneInline(),
+            reply_markup: sanitizeMarkup(reviewDoneInline()),
           });
         } catch (_) {}
         await api.sendMessage({
@@ -622,7 +623,7 @@ if (data.startsWith('reject_menu:')) {
             (DEFAULT_CHANNELS[channelKey]?.title || channelKey) +
             '»\nتعداد: ' +
             ads.length,
-          reply_markup: adminListInline(ads, channelKey),
+          reply_markup: sanitizeMarkup(adminListInline(ads, channelKey)),
         });
       } catch (_) {}
       return;
@@ -670,7 +671,7 @@ if (data.startsWith('reject_menu:')) {
             (DEFAULT_CHANNELS[channelKey]?.title || channelKey) +
             '»\nتعداد: ' +
             ads.length,
-          reply_markup: adminListInline(ads, channelKey),
+          reply_markup: sanitizeMarkup(adminListInline(ads, channelKey)),
         });
       } catch (_) {}
       return;
@@ -951,7 +952,7 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: shiftSlotsInline(channelKey, takenMap, myStarts),
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts)),
         });
       } catch (_e) {}
       return;
@@ -1031,7 +1032,7 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text: t,
-        reply_markup: today.length ? ownerCancelShiftsInline(rows) : undefined,
+        reply_markup: today.length ? sanitizeMarkup(ownerCancelShiftsInline(rows)) : undefined,
       });
       return;
     }
@@ -1250,7 +1251,7 @@ if (data.startsWith('own_shift:')) {
               chat_id: chatId,
               message_id: progressMessageId,
               text: body,
-              reply_markup: flushProgressInline(false, skip > 0 || (skipIds && skipIds.length)),
+              reply_markup: sanitizeMarkup(flushProgressInline(false, skip > 0 || (skipIds && skipIds.length))),
             });
           }
         } catch (_e) {}
@@ -1404,20 +1405,20 @@ if (data.startsWith('own_shift:')) {
             chat_id: chatId,
             message_id: progressMessageId,
             text: body,
-            reply_markup: flushProgressInline(finished, skip > 0 || (skipIds && skipIds.length > 0)),
+            reply_markup: sanitizeMarkup(flushProgressInline(finished, skip > 0 || (skipIds && skipIds.length > 0))),
           });
         } else {
           await api.sendMessage({
             chat_id: chatId,
             text: body,
-            reply_markup: flushProgressInline(finished, skip > 0 || (skipIds && skipIds.length > 0)),
+            reply_markup: sanitizeMarkup(flushProgressInline(finished, skip > 0 || (skipIds && skipIds.length > 0))),
           });
         }
       } catch (_e) {
         await api.sendMessage({
           chat_id: chatId,
           text: body,
-          reply_markup: flushProgressInline(finished, skip > 0 || (skipIds && skipIds.length > 0)),
+          reply_markup: sanitizeMarkup(flushProgressInline(finished, skip > 0 || (skipIds && skipIds.length > 0))),
         });
       }
     }
@@ -1492,20 +1493,20 @@ async function loadAnnounceJob() {
             chat_id: chatId,
             message_id: progressMessageId,
             text: body,
-            reply_markup: announceProgressInline(finished),
+            reply_markup: sanitizeMarkup(announceProgressInline(finished)),
           });
         } else {
           await api.sendMessage({
             chat_id: chatId,
             text: body,
-            reply_markup: announceProgressInline(finished),
+            reply_markup: sanitizeMarkup(announceProgressInline(finished)),
           });
         }
       } catch (_e) {
         await api.sendMessage({
           chat_id: chatId,
           text: body,
-          reply_markup: announceProgressInline(finished),
+          reply_markup: sanitizeMarkup(announceProgressInline(finished)),
         });
       }
     }
@@ -1681,7 +1682,7 @@ async function loadAnnounceJob() {
             '»\nتعداد: ' +
             ads.length +
             '\nروی «حذف» بزنید تا از کانال برداشته شوند.',
-          reply_markup: subLeaderAdminsInline(ads, channelKey),
+          reply_markup: sanitizeMarkup(subLeaderAdminsInline(ads, channelKey)),
         });
       } catch (_e) {}
       return;
@@ -1767,13 +1768,13 @@ async function loadAnnounceJob() {
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
           text: body,
-          reply_markup: purgeUserProgressInline(targetId, finished),
+          reply_markup: sanitizeMarkup(purgeUserProgressInline(targetId, finished)),
         });
       } catch (_e) {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text: body,
-          reply_markup: purgeUserProgressInline(targetId, finished),
+          reply_markup: sanitizeMarkup(purgeUserProgressInline(targetId, finished)),
         });
       }
       return;
@@ -1827,7 +1828,7 @@ if (data.startsWith('flush_ch:')) {
           pending.length +
           '\n\n' +
           'بدون بررسی ادمین، از قدیمی‌ترین به کانال منتشر می‌شوند (هر دسته حدود ۳۰ پیام).\nادامه؟',
-        reply_markup: flushConfirmInline(channelKey),
+        reply_markup: sanitizeMarkup(flushConfirmInline(channelKey)),
       });
       return;
     }
@@ -1870,7 +1871,7 @@ if (data.startsWith('flush_ch:')) {
       const progress = await api.sendMessage({
         chat_id: cq.message.chat.id,
         text: '📤 در حال انتشار...\n0/' + pending.length,
-        reply_markup: flushProgressInline(false),
+        reply_markup: sanitizeMarkup(flushProgressInline(false)),
       });
       await runFlushBatch(cq.message.chat.id, progress && progress.message_id);
       return;
@@ -1995,7 +1996,7 @@ if (data === 'flush_next') {
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
           text: '⏹ انتشار صف متوقف شد.',
-          reply_markup: flushProgressInline(true),
+          reply_markup: sanitizeMarkup(flushProgressInline(true)),
         });
       } catch (_e) {}
       return;
@@ -2245,7 +2246,7 @@ if (data.startsWith('ann_target:')) {
       const progress = await api.sendMessage({
         chat_id: cq.message.chat.id,
         text: '📣 صف آماده شد: ' + ids.length + ' نفر\nاولین دسته در حال ارسال...',
-        reply_markup: announceProgressInline(false),
+        reply_markup: sanitizeMarkup(announceProgressInline(false)),
       });
       const mid = progress && progress.message_id;
       await runAnnounceBatch(cq.message.chat.id, mid);
@@ -2296,7 +2297,7 @@ if (data === 'ann_continue') {
               ? 'پیشرفت: ' + (job.cursor || 0) + '/' + ((job.ids && job.ids.length) || 0) +
                 '\n✅ ' + (job.ok || 0) + '  ❌ ' + (job.fail || 0)
               : ''),
-          reply_markup: announceProgressInline(true),
+          reply_markup: sanitizeMarkup(announceProgressInline(true)),
         });
       } catch (_e) {}
       return;
@@ -2540,7 +2541,7 @@ if (data === 'ann_continue') {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: shiftSlotsInline(channelKey, takenMap, myStarts),
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts)),
         });
       } catch (e) {
         console.error('edit self board', e);
