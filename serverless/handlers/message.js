@@ -77,6 +77,8 @@ import {
   syncAllAdminGroups,
   notifyShiftAdmins,
   createReviewBatch,
+  pruneReviewBatchToPending,
+  clearReviewBatch,
   sendReviewBatch,
   decideMessage,
   finishReviewBatchIfComplete,
