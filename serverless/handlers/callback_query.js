@@ -113,25 +113,38 @@ async function refreshAllShiftBoards(channelKey, date) {
 
 /** ویرایش پیام بعد از تأیید/رد؛ اگر Batch کامل شد دکمه‌ی بعدی یا «صف تمام شد» */
 async function editReviewResult(cq, text, fin) {
-  let markup = null;
-  if (fin && fin.inBatch && fin.complete) {
-    markup = fin.hasMore ? reviewNextInline(fin.batch.batchNumber) : reviewDoneInline();
-  }
   try {
-    const p = {
+    await api.editMessageText({
       chat_id: cq.message.chat.id,
       message_id: cq.message.message_id,
-      text,
-    };
-    if (markup) p.reply_markup = markup;
-    await api.editMessageText(p);
-  } catch (_) {}
-  if (fin && fin.inBatch && fin.complete && !fin.hasMore) {
+      text: String(text || ''),
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch (_) {
     try {
-      await api.sendMessage({
+      await api.editMessageReplyMarkup({
         chat_id: cq.message.chat.id,
-        text: '📭 پیام Pending دیگری برای شیفت شما وجود ندارد.',
+        message_id: cq.message.message_id,
+        reply_markup: { inline_keyboard: [] },
       });
+    } catch (_e) {}
+  }
+  // دکمه Batch بعدی همیشه در پیام جدا — تا زیر پیام آخر غیب نشود
+  if (fin && fin.inBatch && fin.complete) {
+    try {
+      if (fin.hasMore) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '✅ این Batch تمام شد.\nبرای دریافت دسته بعدی دکمه زیر را بزنید.',
+          reply_markup: reviewNextInline(fin.batch && fin.batch.batchNumber),
+        });
+      } else {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '📭 پیام Pending دیگری برای شیفت شما وجود ندارد.',
+          reply_markup: reviewDoneInline(),
+        });
+      }
     } catch (_) {}
   }
 }
@@ -206,9 +219,30 @@ export default async function (cq) {
         return;
       }
 
-      // ۱) اول انتشار در کانال — اگر شکست، pending می‌ماند
+      // ۱) رزرو اتمیک pending → publishing تا کسی موازی منتشر نکند
+      try {
+        await db
+          .update(messages)
+          .set({ status: 'publishing' })
+          .where(and(eq(messages.id, id), eq(messages.status, 'pending')))
+          .run();
+      } catch (e) {
+        console.error('reserve', e);
+      }
+      {
+        const check = (await db.select().from(messages).where(eq(messages.id, id)).all()) || [];
+        if (!check[0] || String(check[0].status) !== 'publishing') {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'این پیام توسط شخص دیگری در حال بررسی/انتشار است',
+            show_alert: true,
+          });
+          return;
+        }
+      }
       const conf = DEFAULT_CHANNELS[pendingRow.channelKey];
       if (!conf || !conf.chatId) {
+        await db.update(messages).set({ status: 'pending' }).where(eq(messages.id, id)).run();
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
           text: 'کانال پیکربندی نشده',
@@ -232,6 +266,9 @@ export default async function (cq) {
         } catch (_e) {}
       } catch (e) {
         console.error('publish first', e);
+        try {
+          await db.update(messages).set({ status: 'pending' }).where(eq(messages.id, id)).run();
+        } catch (_e) {}
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
           text: 'ارسال به کانال ناموفق — تأیید نشد',
@@ -433,7 +470,7 @@ if (data.startsWith('reject_menu:')) {
     if (data === 'review_next' || data.startsWith('review_next:')) {
       const want = data.indexOf(':') >= 0 ? Number(data.split(':')[1]) : null;
       const role = await getRole(userId);
-      if (role !== 'admin' && !isOwner(userId)) {
+      if (role !== 'admin' && role !== 'subleader' && !isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
         return;
       }
@@ -619,7 +656,9 @@ if (data.startsWith('reject_menu:')) {
       const ads = await listAdminsByChannel(channelKey);
       await api.answerCallbackQuery({
         callback_query_id: cq.id,
-        text: res.ok ? 'بروز شد' : 'خطا',
+        text: res.ok
+          ? ('بروز شد — +' + (res.added || 0) + ' / کل گروه ' + (res.total || 0))
+          : ('خطا: ' + (res.error || '')).slice(0, 180),
         show_alert: true,
       });
       try {
@@ -672,7 +711,7 @@ if (data.startsWith('reject_menu:')) {
         const sent = await postToChannel(st.channelKey, st.postText);
         await clearState(userId);
         const conf = DEFAULT_CHANNELS[st.channelKey];
-        const link = channelMessageLink(conf && conf.chatId, sent && sent.message_id, state && state.channelKey);
+        const link = channelMessageLink(conf && conf.chatId, sent && sent.message_id, st.channelKey);
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ارسال شد' });
         try {
           await api.editMessageText({
@@ -1253,6 +1292,17 @@ if (data.startsWith('own_shift:')) {
             continue;
           }
 
+          // رزرو
+          await db
+            .update(messages)
+            .set({ status: 'publishing' })
+            .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
+            .run();
+          const chk = (await db.select().from(messages).where(eq(messages.id, row.id)).all()) || [];
+          if (!chk[0] || String(chk[0].status) !== 'publishing') {
+            skip++;
+            continue;
+          }
           const sent = await api.sendMessage({
             chat_id: conf.chatId,
             text: toBoldHtml(row.content),
@@ -1270,7 +1320,7 @@ if (data.startsWith('own_shift:')) {
               reviewedBy: Number(job.ownerId) || null,
               reviewedAt: new Date(),
             })
-            .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
+            .where(eq(messages.id, row.id))
             .run();
           try {
             await dropMessageFromAllReviewBatches(row.id);
@@ -1523,7 +1573,26 @@ async function loadAnnounceJob() {
             name = displayName(await getUser(aid), aid);
           } catch (_e) {}
           const reviewed = allMsg.filter(function (msg) {
-            return msg.channelKey === conf.key && Number(msg.reviewedBy) === aid;
+            if (msg.channelKey !== conf.key || Number(msg.reviewedBy) !== aid) return false;
+            // فیلتر همان روز (تهران تقریبی از reviewedAt)
+            if (!msg.reviewedAt) return daysAgo === 0; // بدون تاریخ فقط در «امروز»
+            try {
+              const jal = formatTsJalali(msg.reviewedAt);
+              // formatTsJalali: "23 مهر 1405 — 12:00" — بهتر میلادی خام
+              const t = new Date(msg.reviewedAt).getTime();
+              if (!Number.isFinite(t)) return false;
+              const IR = 3.5 * 3600 * 1000;
+              const adj = new Date(t + IR);
+              const dstr =
+                adj.getUTCFullYear() +
+                '-' +
+                String(adj.getUTCMonth() + 1).padStart(2, '0') +
+                '-' +
+                String(adj.getUTCDate()).padStart(2, '0');
+              return dstr === day;
+            } catch (_e) {
+              return false;
+            }
           });
           const ap = reviewed.filter(function (x) {
             return x.status === 'approved';
