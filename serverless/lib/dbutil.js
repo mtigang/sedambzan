@@ -13,19 +13,17 @@ import { reviewInline } from 'lib/keyboards';
 
 export async function ensureChannelsSeeded() {
   try {
-    // همیشه از DEFAULT_CHANNELS همگام کن (ساعت کاری ۱۲:۰۰–۰۳:۰۰)
+    // فقط در صورت نبود ردیف، seed کن — enabled/work را overwrite نکن
     for (const c of Object.values(DEFAULT_CHANNELS)) {
       try {
         const exist = await db.select().from(channels).where(eq(channels.key, c.key)).all();
         if (exist?.length) {
+          // فقط title/link ثابت؛ enabled دست‌نخورده بماند
           await db
             .update(channels)
             .set({
               title: c.title,
               link: String(c.chatId),
-              enabled: 1,
-              workStart: c.workStart || '12:00',
-              workEnd: c.workEnd || '03:00',
             })
             .where(eq(channels.key, c.key))
             .run();
@@ -222,6 +220,14 @@ export async function adminChannels(userId) {
 export async function addChannelAdmin(userId, channelKey) {
   if (isOwner(userId)) return;
   try {
+    const removed = await settingGet('admin_removed:' + channelKey + ':' + Number(userId), '');
+    if (removed === '1') return;
+  } catch (_e) {}
+  try {
+    const u0 = await getUser(userId);
+    if (u0 && Number(u0.blocked) === 1) return;
+  } catch (_e) {}
+  try {
     const all = (await db.select().from(channelAdmins).all()) || [];
     const exists = all.some(
       (r) =>
@@ -260,6 +266,11 @@ export async function removeChannelAdmin(userId, channelKey) {
       .delete(channelAdmins)
       .where(and(eq(channelAdmins.userId, userId), eq(channelAdmins.channelKey, channelKey)))
       .run();
+    // جلوگیری از بازگشت با sync گروه
+    try {
+      const key = 'admin_removed:' + channelKey + ':' + Number(userId);
+      await settingSet(key, '1');
+    } catch (_e) {}
     const left = await adminChannels(userId);
     if (!left.length) {
       const u = await getUser(userId);
@@ -619,6 +630,7 @@ export async function isReviewBatchComplete(adminId) {
 /** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول */
 async function selectReviewablePending(adminId) {
   const pending = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
+  // publishing عمداً نیست — رزرو شده
   pending.sort((a, b) => a.id - b.id);
   if (isOwner(adminId)) return pending;
   // ساب‌لیدر: فقط کانال Scope — بدون نیاز به شیفت
@@ -806,7 +818,10 @@ export async function decideMessage(adminId, id, decision, reason) {
   id = Number(id);
   const row = await getMessageById(id);
   if (!row) return { ok: false, code: 'notfound', text: 'پیام پیدا نشد.' };
-  if (row.status !== 'pending') return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
+  const st0 = String(row.status || '');
+  if (st0 !== 'pending' && st0 !== 'publishing') {
+    return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
+  }
 
   const access = await checkReviewAccess(adminId, row);
   if (!access.ok) return access;
@@ -816,7 +831,10 @@ export async function decideMessage(adminId, id, decision, reason) {
   if (!lock) return { ok: false, code: 'busy', text: '⏳ در حال پردازش…' };
   try {
     const fresh = await getMessageById(id);
-    if (!fresh || fresh.status !== 'pending') return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
+    const st = fresh ? String(fresh.status) : '';
+    if (!fresh || (st !== 'pending' && st !== 'publishing')) {
+      return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
+    }
     const patch =
       decision === 'approve'
         ? { status: 'approved', reviewedBy: Number(adminId), reviewedAt: new Date() }
@@ -826,11 +844,8 @@ export async function decideMessage(adminId, id, decision, reason) {
             reviewedBy: Number(adminId),
             reviewedAt: new Date(),
           };
-    await db
-      .update(messages)
-      .set(patch)
-      .where(and(eq(messages.id, id), eq(messages.status, 'pending')))
-      .run();
+    // از pending یا publishing نهایی کن
+    await db.update(messages).set(patch).where(eq(messages.id, id)).run();
     try {
       await dropMessageFromAllReviewBatches(id);
     } catch (_e) {}
