@@ -261,7 +261,7 @@ export default async function (message) {
         });
         return;
       }
-      const map = { pending: '🟡 در انتظار', approved: '🟢 تأیید', rejected: '🔴 رد' };
+      const map = { pending: '🟡 در انتظار', approved: '🟢 تأیید', rejected: '🔴 رد شده' };
       let body = '📊 پیام‌های شما (' + list.length + ' مورد اخیر)\n\n';
       for (const row of list) {
         const short = (row.content || '').replace(/\n/g, ' ').slice(0, 70);
