@@ -2600,25 +2600,37 @@ if (data === 'ann_continue') {
         const h = (Number(startHm.split(':')[0]) + 1) % 24;
         endHm = String(h).padStart(2, '0') + ':00';
       }
-      // کانال‌های مجاز: ادمین کانال‌ها + اسکوپ ساب‌لیدر
+      // ساده: کاربر عادی نه؛ ادمین/ساب‌لیدر/مالک بله
+      // اگر channel_admins خراب بود، نقش admin کافی است
       if (!isOwner(userId)) {
-        let allowed = [];
-        try {
-          allowed = await shiftPickChannels(userId);
-        } catch (_e) {
-          allowed = [];
-        }
-        const ck = String(channelKey || '');
-        const ok = (allowed || []).some(function (x) { return String(x) === ck; });
-        if (!ok) {
-          console.error('shift_pick denied', { userId, channelKey: ck, allowed });
+        const role = await getRole(userId);
+        if (role === 'user') {
           await api.answerCallbackQuery({
             callback_query_id: cq.id,
-            text: '⛔ برای این کانال اجازه شیفت ندارید',
+            text: '⛔ فقط ادمین می‌تواند شیفت بردارد',
             show_alert: true,
           });
           return;
         }
+        // ساب‌لیدر فقط کانال خودش + کانال‌هایی که ادمین است
+        if (role === 'subleader') {
+          let allowed = [];
+          try {
+            allowed = await shiftPickChannels(userId);
+          } catch (_e) {
+            allowed = [];
+          }
+          const ck = String(channelKey || '');
+          if (allowed.length && !allowed.some(function (x) { return String(x) === ck; })) {
+            await api.answerCallbackQuery({
+              callback_query_id: cq.id,
+              text: '⛔ خارج از محدوده کانال شما',
+              show_alert: true,
+            });
+            return;
+          }
+        }
+        // role === 'admin' → بدون محدودیت کانال (ثبت در همان کانال انتخاب‌شده)
       }
       const now = tehranNow();
       const pdate = periodDateStr(now);
