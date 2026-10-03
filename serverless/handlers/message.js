@@ -20,6 +20,7 @@ import {
   channelAdminPickKeyboard,
   shiftChannelPickKeyboard,
   postChannelInline,
+  sendDestInline,
   reviewInline,
   ownerReviewInline,
   feedbackInline,
@@ -118,6 +119,49 @@ async function roleKb(uid) {
           ? adminKeyboard()
           : userKeyboard();
   return sanitizeMarkup(kb);
+}
+
+
+function extractMedia(message) {
+  if (!message) return null;
+  if (message.photo && message.photo.length) {
+    return { type: 'photo', fileId: message.photo[message.photo.length - 1].file_id };
+  }
+  if (message.video) return { type: 'video', fileId: message.video.file_id };
+  if (message.voice) return { type: 'voice', fileId: message.voice.file_id };
+  if (message.audio) return { type: 'audio', fileId: message.audio.file_id };
+  if (message.document) return { type: 'document', fileId: message.document.file_id };
+  if (message.video_note) return { type: 'video_note', fileId: message.video_note.file_id };
+  if (message.sticker) return { type: 'sticker', fileId: message.sticker.file_id };
+  return null;
+}
+
+async function copyOrSendContent(api, toChatId, message) {
+  try {
+    await api.copyMessage({
+      chat_id: toChatId,
+      from_chat_id: message.chat.id,
+      message_id: message.message_id,
+    });
+    return;
+  } catch (e) {
+    console.error('copyMessage', e);
+  }
+  const media = extractMedia(message);
+  const caption = message.caption || message.text || '';
+  if (!media) {
+    if (caption) await api.sendMessage({ chat_id: toChatId, text: caption });
+    return;
+  }
+  if (media.type === 'photo') await api.sendPhoto({ chat_id: toChatId, photo: media.fileId, caption: caption || undefined });
+  else if (media.type === 'video') await api.sendVideo({ chat_id: toChatId, video: media.fileId, caption: caption || undefined });
+  else if (media.type === 'voice') {
+    await api.sendVoice({ chat_id: toChatId, voice: media.fileId });
+    if (caption) await api.sendMessage({ chat_id: toChatId, text: caption });
+  } else if (media.type === 'audio') await api.sendAudio({ chat_id: toChatId, audio: media.fileId, caption: caption || undefined });
+  else if (media.type === 'document') await api.sendDocument({ chat_id: toChatId, document: media.fileId, caption: caption || undefined });
+  else if (media.type === 'video_note') await api.sendVideoNote({ chat_id: toChatId, video_note: media.fileId });
+  else if (media.type === 'sticker') await api.sendSticker({ chat_id: toChatId, sticker: media.fileId });
 }
 
 export default async function (message) {
@@ -914,27 +958,35 @@ export default async function (message) {
     }
 
     
-    if (owner && text === '📣 ارسال به کانال') {
+    if (owner && (text === '📣 ارسال' || text === '📣 ارسال به کانال')) {
       await api.sendMessage({
         chat_id: chatId,
-        text: 'کانال مقصد را انتخاب کنید:',
-        reply_markup: sanitizeMarkup(postChannelInline()),
+        text: 'مقصد ارسال را انتخاب کنید:',
+        reply_markup: sanitizeMarkup(sendDestInline()),
       });
       return;
     }
 
-    if (owner && state?.kind === 'post_text' && text) {
+    if (owner && state?.kind === 'post_text' && (text || message.photo || message.video || message.voice || message.audio || message.document || message.video_note || message.sticker)) {
+      const media = extractMedia(message);
       await setState(userId, 'post_confirm', {
         channelKey: state.channelKey,
-        postText: text,
+        postText: text || message.caption || '',
+        media: media,
+        fromChatId: chatId,
+        fromMsgId: message.message_id,
       });
+      const preview =
+        media && media.type
+          ? '[' + media.type + '] ' + (text || message.caption || '')
+          : text || '';
       await api.sendMessage({
         chat_id: chatId,
         text:
           'ارسال به «' +
           (DEFAULT_CHANNELS[state.channelKey]?.title || state.channelKey) +
           '»:\n\n' +
-          text +
+          (preview || '(مدیا)') +
           '\n\nتأیید می‌کنید؟',
         reply_markup: {
           inline_keyboard: [
@@ -1708,11 +1760,11 @@ export default async function (message) {
       return;
     }
 
-    if (owner && text === '⚙️ تنظیمات') {
+    if (owner && text === '⚙️ ابزار ربات' || text === '⚙️ تنظیمات') {
       const on = await isBotOn();
       await api.sendMessage({
         chat_id: chatId,
-        text: '⚙️ تنظیمات ربات',
+        text: '⚙️ ابزار ربات',
         reply_markup: settingsKeyboard(on),
       });
       return;
@@ -1872,7 +1924,57 @@ export default async function (message) {
       return;
     }
 
-    if (owner && state?.kind === 'fb_reply' && text) {
+
+    // مالک → پیام مستقیم به کاربر
+    if (owner && state?.kind === 'owner_dm_target' && text) {
+      const tid = await resolveUserId(text);
+      if (!tid) {
+        await api.sendMessage({ chat_id: chatId, text: '❌ کاربر پیدا نشد. آیدی عددی یا @username بفرستید.', reply_markup: sanitizeMarkup(backKeyboard()) });
+        return;
+      }
+      const tu = await getUser(tid);
+      if (!tu) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '⚠️ این کاربر هنوز ربات را استارت نکرده. باز هم می‌توانید پیام بفرستید (ممکن است به او نرسد).\nآیدی: ' + tid + '\n\nحالا متن/عکس/ویس/ویدیو را بفرستید:',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } else {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '✅ مقصد: ' + displayName(tu, tid) + ' (' + tid + ')\nحالا متن، عکس، ویس، ویدیو یا فایل را بفرستید:',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      }
+      await setState(userId, 'owner_dm_content', { targetId: tid });
+      return;
+    }
+
+    if (owner && state?.kind === 'owner_dm_content' && (text || message.photo || message.video || message.voice || message.audio || message.document || message.video_note || message.sticker)) {
+      if (text === '◀️ بازگشت') {
+        await clearState(userId);
+        await api.sendMessage({ chat_id: chatId, text: 'منوی اصلی', reply_markup: ownerKeyboard() });
+        return;
+      }
+      const tid = Number(state.targetId);
+      try {
+        await api.sendMessage({ chat_id: tid, text: '📩 پیام از مدیریت:' });
+        await copyOrSendContent(api, tid, message);
+        await clearState(userId);
+        await api.sendMessage({ chat_id: chatId, text: '✅ ارسال شد به ' + tid, reply_markup: ownerKeyboard() });
+      } catch (e) {
+        console.error('owner_dm', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '❌ ارسال ناموفق: ' + (e.message || e) + '\nکاربر باید ربات را استارت کرده باشد.',
+          reply_markup: ownerKeyboard(),
+        });
+        await clearState(userId);
+      }
+      return;
+    }
+
+    if (owner && state?.kind === 'fb_reply' && (text || message.photo || message.video || message.voice || message.audio || message.document || message.video_note || message.sticker)) {
       const rows = await db
         .select()
         .from(feedback)
@@ -1880,17 +1982,33 @@ export default async function (message) {
         .all();
       const row = rows?.[0];
       if (row) {
-        await db
-          .update(feedback)
-          .set({ status: 'replied', ownerReply: text })
-          .where(eq(feedback.id, state.feedbackId))
-          .run();
+        const replyNote = text || message.caption || '(مدیا)';
+        try {
+          await db
+            .update(feedback)
+            .set({ status: 'replied', ownerReply: String(replyNote).slice(0, 500) })
+            .where(eq(feedback.id, state.feedbackId))
+            .run();
+        } catch (_e) {}
         try {
           await api.sendMessage({
             chat_id: row.userId,
-            text: '💬 پاسخ مدیریت:\n\n' + text + '\n\nبا تشکر — مجموعه آرال',
+            text: '💬 پاسخ مدیریت:',
           });
-        } catch (_) {}
+          await copyOrSendContent(api, row.userId, message);
+          await api.sendMessage({
+            chat_id: row.userId,
+            text: 'با تشکر — مجموعه آرال',
+          });
+        } catch (e) {
+          console.error('fb_reply send', e);
+          try {
+            await api.sendMessage({
+              chat_id: row.userId,
+              text: '💬 پاسخ مدیریت:\n\n' + (text || '') + '\n\nبا تشکر — مجموعه آرال',
+            });
+          } catch (_e2) {}
+        }
       }
       await clearState(userId);
       await api.sendMessage({
