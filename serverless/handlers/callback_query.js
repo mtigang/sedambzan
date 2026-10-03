@@ -43,7 +43,7 @@ import {
   subLeaderAdmins,
   listActiveSubLeaders,
 } from 'lib/subleader';
-import { tehranNow, inRange, periodDateStr, formatTsJalali } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod } from 'lib/time';
 import { DEFAULT_CHANNELS } from 'lib/config';
 import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
 import {
@@ -1316,41 +1316,52 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
       let t =
         '⏰ شیفت‌های دوره ' +
         pdate +
-        '\nروی هر دکمه بزنید تا همان شیفت لغو شود.\n\n';
+        '\nروی هر دکمه بزنید تا همان شیفت لغو شود.\n';
       if (!today.length) {
-        t += 'خالی — شیفتی برای لغو نیست.';
-      }
-      for (const s of today) {
-        let name = String(s.adminId);
-        try {
-          name = displayName(await getUser(s.adminId), s.adminId);
-        } catch (_e) {}
-        const title =
-          DEFAULT_CHANNELS[s.channelKey] && DEFAULT_CHANNELS[s.channelKey].title
-            ? DEFAULT_CHANNELS[s.channelKey].title
-            : s.channelKey;
-        t +=
-          '• #' +
-          s.id +
-          ' | ' +
-          title +
-          ' | ' +
-          String(s.startHm).slice(0, 5) +
-          '–' +
-          String(s.endHm).slice(0, 5) +
-          ' | ' +
-          name +
-          (s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' (دائم)' : '') +
-          '\n';
-        rows.push({
-          id: s.id,
-          channelKey: s.channelKey,
-          channelTitle: title,
-          startHm: s.startHm,
-          endHm: s.endHm,
-          adminId: s.adminId,
-          name: name,
-        });
+        t += '\nخالی — شیفتی برای لغو نیست.';
+      } else {
+        const order = Object.keys(DEFAULT_CHANNELS);
+        for (const ck of order) {
+          const group = sortShiftsByPeriod(
+            today.filter(function (s) {
+              return String(s.channelKey || s.channel_key) === ck;
+            })
+          );
+          if (!group.length) continue;
+          const title =
+            DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title
+              ? DEFAULT_CHANNELS[ck].title
+              : ck;
+          t += '\n—— «' + title + '» ——\n';
+          for (const s of group) {
+            let name = String(s.adminId);
+            try {
+              name = displayName(await getUser(s.adminId), s.adminId);
+            } catch (_e) {}
+            const tag =
+              s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' · دائم' : '';
+            t +=
+              '▫️ #' +
+              s.id +
+              '  ' +
+              String(s.startHm).slice(0, 5) +
+              '–' +
+              String(s.endHm).slice(0, 5) +
+              '  ·  ' +
+              name +
+              tag +
+              '\n';
+            rows.push({
+              id: s.id,
+              channelKey: s.channelKey,
+              channelTitle: title,
+              startHm: s.startHm,
+              endHm: s.endHm,
+              adminId: s.adminId,
+              name: name,
+            });
+          }
+        }
       }
       await api.sendMessage({
         chat_id: cq.message.chat.id,
