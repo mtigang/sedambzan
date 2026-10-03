@@ -318,6 +318,18 @@ export function userOpenInline(userId) {
 }
 
 /** takenMap: startHm -> adminId ; myStarts: Set ; ownerMode: مالک بتواند شیفت دیگران را لغو کند */
+
+export function shiftModePickInline(channelKey) {
+  const ck = String(channelKey || '');
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: '📅 شیفت روزانه (فقط همین دوره)', callback_data: 'shift_mode|daily|' + ck, style: 'primary' }],
+      [{ text: '♾️ شیفت دائمی (هر روز)', callback_data: 'shift_mode|perm|' + ck, style: 'success' }],
+      [{ text: 'انصراف', callback_data: 'shift_close', style: 'danger' }],
+    ],
+  });
+}
+
 export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, ownerMode) {
   const slots = slotsOverride && slotsOverride.length ? slotsOverride : buildShiftSlots();
   const rows = [];
