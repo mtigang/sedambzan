@@ -860,20 +860,102 @@ if (data.startsWith('reject_menu:')) {
       return;
     }
 
+    
+    if (data.startsWith('send_dest:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const dest = data.split(':')[1];
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      if (dest === 'cancel') {
+        await clearState(userId);
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: 'لغو شد.',
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (dest === 'channel') {
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: 'کانال مقصد را انتخاب کنید:',
+            reply_markup: sanitizeMarkup(postChannelInline()),
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: 'کانال مقصد را انتخاب کنید:',
+            reply_markup: sanitizeMarkup(postChannelInline()),
+          });
+        }
+        return;
+      }
+      if (dest === 'user') {
+        await setState(userId, 'owner_dm_target');
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: 'آیدی عددی یا @username کاربر را بفرستید:\n(کاربر باید ربات را استارت کرده باشد)',
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: 'آیدی عددی یا @username کاربر را بفرستید:\n(کاربر باید ربات را استارت کرده باشد)',
+          });
+        }
+        return;
+      }
+      return;
+    }
+
     if (data === 'post_yes') {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
       const st = await getState(userId);
-      if (!st || st.kind !== 'post_confirm' || !st.postText) {
+      if (!st || st.kind !== 'post_confirm' || (!st.postText && !st.media && !st.fromMsgId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'منقضی', show_alert: true });
         return;
       }
       try {
-        const sent = await postToChannel(st.channelKey, st.postText);
-        await clearState(userId);
         const conf = DEFAULT_CHANNELS[st.channelKey];
+        const chId = conf && conf.chatId;
+        let sent = null;
+        if (st.media && st.media.fileId && chId) {
+          const cap = st.postText || undefined;
+          const t = st.media.type;
+          if (t === 'photo') sent = await api.sendPhoto({ chat_id: chId, photo: st.media.fileId, caption: cap });
+          else if (t === 'video') sent = await api.sendVideo({ chat_id: chId, video: st.media.fileId, caption: cap });
+          else if (t === 'voice') {
+            sent = await api.sendVoice({ chat_id: chId, voice: st.media.fileId });
+            if (cap) await api.sendMessage({ chat_id: chId, text: cap });
+          } else if (t === 'audio') sent = await api.sendAudio({ chat_id: chId, audio: st.media.fileId, caption: cap });
+          else if (t === 'document') sent = await api.sendDocument({ chat_id: chId, document: st.media.fileId, caption: cap });
+          else if (t === 'video_note') sent = await api.sendVideoNote({ chat_id: chId, video_note: st.media.fileId });
+          else if (t === 'sticker') sent = await api.sendSticker({ chat_id: chId, sticker: st.media.fileId });
+          else sent = await postToChannel(st.channelKey, st.postText || '');
+        } else if (st.fromChatId && st.fromMsgId && chId) {
+          try {
+            sent = await api.copyMessage({
+              chat_id: chId,
+              from_chat_id: st.fromChatId,
+              message_id: st.fromMsgId,
+            });
+          } catch (_e) {
+            sent = await postToChannel(st.channelKey, st.postText || '');
+          }
+        } else {
+          sent = await postToChannel(st.channelKey, st.postText || '');
+        }
+        await clearState(userId);
         const link = channelMessageLink(conf && conf.chatId, sent && sent.message_id, st.channelKey);
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ارسال شد' });
         try {
@@ -890,7 +972,7 @@ if (data.startsWith('reject_menu:')) {
       } catch (e) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: 'خطا: ' + (e?.description || 'fail'),
+          text: 'خطا: ' + (e?.description || e?.message || 'fail'),
           show_alert: true,
         });
       }
