@@ -261,3 +261,12 @@ export function workHoursClosedText() {
     ' ساعت تا شروع کار مانده.'
   );
 }
+
+/** مرتب‌سازی شیفت‌ها داخل دوره ۱۲→۰۳ */
+export function sortShiftsByPeriod(list) {
+  return (list || []).slice().sort(function (a, b) {
+    const sa = periodOrd(normHm(a.startHm || a.start_hm || '12:00'));
+    const sb = periodOrd(normHm(b.startHm || b.start_hm || '12:00'));
+    return sa - sb;
+  });
+}
