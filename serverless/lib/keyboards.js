@@ -129,10 +129,10 @@ export function adminKeyboard() {
 export function ownerKeyboard() {
   return sanitizeMarkup({
     keyboard: [
-      [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌ها' }],
+      [{ text: '📥 پیام‌های در انتظار' }, { text: '📬 پیام کاربران' }],
       [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
-      [{ text: '📬 پیام کاربران' }, { text: '🔍 جستجو' }],
-      [{ text: '🛡️ ساب‌لیدرها' }, { text: '⚙️ تنظیمات' }],
+      [{ text: '👥 ادمین‌ها' }, { text: '🛡️ ساب‌لیدرها' }],
+      [{ text: '⚙️ ابزار ربات' }, { text: '🔍 جستجو' }],
     ],
     resize_keyboard: true,
   });
@@ -170,15 +170,23 @@ export function backKeyboard() {
 export function settingsKeyboard(botOn) {
   return sanitizeMarkup({
     keyboard: [
-      [{ text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
-      [{ text: '📣 ارسال به کانال' }, { text: '📣 اطلاعیه' }],
-      [{ text: '🧪 تست کانال‌ها' }],
-      [{ text: '📤 انتشار مستقیم صف' }],
-      [{ text: '🗑 پاک‌سازی pending کاربر' }],
+      [{ text: '🧪 تست کانال‌ها' }, { text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
+      [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
+      [{ text: '📤 انتشار مستقیم صف' }, { text: '🗑 پاک‌سازی pending کاربر' }],
       [{ text: '🧹 پاک‌سازی صف' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
+  });
+}
+
+export function sendDestInline() {
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: '📢 ارسال به کانال', callback_data: 'send_dest:channel', style: 'primary' }],
+      [{ text: '👤 ارسال به کاربر', callback_data: 'send_dest:user', style: 'success' }],
+      [{ text: 'انصراف', callback_data: 'send_dest:cancel', style: 'danger' }],
+    ],
   });
 }
 
