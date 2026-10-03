@@ -715,7 +715,7 @@ export default async function (message) {
         entry.title +
         '»\n📅 دوره ' +
         date +
-        '\nساعت کاری: ۱۲:۰۰ تا ۰۳:۰۰\nحداکثر ۳ شیفت یک‌ساعته\n🟢 خالی  ·  🔴 پر\n\n';
+        '\nساعت کاری: ۱۲:۰۰ تا ۰۳:۰۰\nانتخاب شیفت: همیشه (۲۴ ساعته)\nشیفت‌ها دائمی · حداکثر ۳ بازه\n🟢 خالی  ·  🔴 پر\n\n';
       if (today.length) {
         const shiftLines = [];
         for (const s of today) {
