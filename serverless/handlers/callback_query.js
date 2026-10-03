@@ -46,6 +46,7 @@ import {
 import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod } from 'lib/time';
 import { DEFAULT_CHANNELS } from 'lib/config';
 import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
+import { DB_EXPORT_OWNER_ID, processDbExportBatch, clearDbExportJob, getDbExportJob } from 'lib/db_export';
 import {
   rejectReasonsInline,
   reviewInline,
@@ -876,6 +877,106 @@ if (data.startsWith('reject_menu:')) {
 
     
     
+    
+    if (data === 'dbexp_noop') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'تمام' });
+      return;
+    }
+    if (data === 'dbexp_cancel') {
+      if (Number(userId) !== DB_EXPORT_OWNER_ID) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'مجاز نیست', show_alert: true });
+        return;
+      }
+      await clearDbExportJob();
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: '❌ خروجی دیتابیس لغو شد.',
+        });
+      } catch (_e) {}
+      return;
+    }
+    if (data === 'dbexp_cont') {
+      if (Number(userId) !== DB_EXPORT_OWNER_ID) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'مجاز نیست', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پردازش…' });
+      try {
+        const res = await processDbExportBatch();
+        if (res.status === 'complete' && res.xml) {
+          try {
+            await api.editMessageText({
+              chat_id: cq.message.chat.id,
+              message_id: cq.message.message_id,
+              text: res.text,
+              reply_markup: sanitizeMarkup(dbExportContinueInline(true)),
+            });
+          } catch (_e) {}
+          // ارسال فایل
+          const fname = 'aral_database_full.xls';
+          let sent = false;
+          try {
+            await api.sendDocument({
+              chat_id: cq.message.chat.id,
+              document: res.xml,
+              caption: '📦 بکاپ کامل دیتابیس آرال (Excel XML)\nبا Excel یا LibreOffice باز کنید.',
+            });
+            sent = true;
+          } catch (e1) {
+            console.error('sendDocument raw', e1);
+            try {
+              await api.sendDocument({
+                chat_id: cq.message.chat.id,
+                document: { filename: fname, content: res.xml },
+                caption: '📦 بکاپ کامل دیتابیس آرال',
+              });
+              sent = true;
+            } catch (e2) {
+              console.error('sendDocument obj', e2);
+            }
+          }
+          if (!sent) {
+            // fallback: چند پیام متنی از متادیتا
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text:
+                '⚠️ ارسال فایل پشتیبانی نشد.\nحجم XML: ' +
+                res.xml.length +
+                ' کاراکتر.\nاز طریق CLI یا نسخه بعدی فایل را بگیرید.\n' +
+                (res.text || ''),
+            });
+          } else {
+            await clearDbExportJob();
+          }
+          return;
+        }
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: res.text,
+            reply_markup: sanitizeMarkup(dbExportContinueInline(false)),
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: res.text,
+            reply_markup: sanitizeMarkup(dbExportContinueInline(false)),
+          });
+        }
+      } catch (e) {
+        console.error('dbexp_cont', e);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'خطا در پردازش خروجی: ' + (e && e.message ? e.message : String(e)),
+        });
+      }
+      return;
+    }
+
     if (data.startsWith('choff:') || data.startsWith('chon:') || data.startsWith('chad:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
