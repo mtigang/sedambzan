@@ -292,7 +292,7 @@ export async function removeChannelAdmin(userId, channelKey) {
     const all = (await db.select().from(channelAdmins).all()) || [];
     for (const r of all) {
       const rid = Number(r.userId ?? r.user_id);
-      const rck = String(r.channelKey ?? r.channel_key || '');
+      const rck = String((r.channelKey ?? r.channel_key) || '');
       if (rid === uid && rck === ck) {
         const id = r.id;
         try {
