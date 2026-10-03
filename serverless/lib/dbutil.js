@@ -542,10 +542,27 @@ export async function hasActiveShift(adminId, channelKey) {
   return channelKey ? keys.includes(channelKey) : keys.length > 0;
 }
 
+
+/** کانال‌هایی که کاربر حق بررسی دارد: اسکوپ ساب‌لیدر ∪ شیفت‌های فعال */
+export async function allowedReviewChannels(userId) {
+  if (isOwner(userId)) return Object.keys(DEFAULT_CHANNELS || {});
+  const set = {};
+  try {
+    const sl = await getActiveSubLeaderChannel(userId);
+    if (sl) set[String(sl)] = true;
+  } catch (_e) {}
+  try {
+    const keys = await activeShiftChannelKeys(userId);
+    for (const k of keys || []) if (k) set[String(k)] = true;
+  } catch (_e) {}
+  return Object.keys(set);
+}
+
 export async function canAdminReviewMessage(adminId, channelKey) {
   if (isOwner(adminId)) return true;
-  const keys = await activeShiftChannelKeys(adminId);
-  return keys.includes(channelKey);
+  const ck = String(channelKey || '');
+  const allowed = await allowedReviewChannels(adminId);
+  return allowed.includes(ck);
 }
 
 /* ---------- Lock مبتنی بر Timestamp در DB ---------- */
@@ -735,18 +752,10 @@ async function selectReviewablePending(adminId) {
     } catch (_e) {}
     return pending;
   }
-  // ساب‌لیدر + ادمین هیبرید: اسکوپ ساب‌لیدر ∪ کانال‌های شیفت فعال
-  const allowed = {};
-  try {
-    const slCh = await getActiveSubLeaderChannel(adminId);
-    if (slCh) allowed[String(slCh)] = true;
-  } catch (_e) {}
-  try {
-    const keys = await activeShiftChannelKeys(adminId);
-    for (const k of keys || []) allowed[String(k)] = true;
-  } catch (_e) {}
-  const allowList = Object.keys(allowed);
+  const allowList = await allowedReviewChannels(adminId);
   if (!allowList.length) return [];
+  const allowed = {};
+  for (const k of allowList) allowed[String(k)] = true;
   return pending.filter(function (m) {
     return !!allowed[msgCh(m)];
   });
@@ -815,8 +824,13 @@ export async function createReviewBatch(adminId) {
         if (row && String(row.status) === 'pending') pendingRows.push(row);
       }
       if (!owner) {
-        const keys = await activeShiftChannelKeys(adminId);
-        pendingRows = pendingRows.filter((r) => keys.includes(r.channelKey));
+        const allowed = await allowedReviewChannels(adminId);
+        const allowSet = {};
+        for (const k of allowed) allowSet[String(k)] = true;
+        pendingRows = pendingRows.filter(function (r) {
+          const ck = String((r.channelKey ?? r.channel_key) || '');
+          return !!allowSet[ck];
+        });
       }
       if (pendingRows.length) {
         const batch = pruned.batch || (await getReviewBatch(adminId));
@@ -902,21 +916,18 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
  */
 export async function checkReviewAccess(adminId, row) {
   if (isOwner(adminId)) return { ok: true };
-  const slCh = await getActiveSubLeaderChannel(adminId);
-  if (slCh) {
-    if (!row || row.channelKey !== slCh) {
-      return { ok: false, code: 'channel', text: '⛔ این پیام خارج از محدوده کانال شماست.' };
-    }
-    const batch = await getReviewBatch(adminId);
-    if (!batch || !batch.ids.map(Number).includes(Number(row.id))) {
-      return { ok: false, code: 'not_in_batch', text: '⛔ این پیام در Batch فعلی شما نیست.' };
-    }
-    return { ok: true };
+  if (!row) return { ok: false, code: 'missing', text: 'پیام یافت نشد.' };
+  const ch = String((row.channelKey ?? row.channel_key) || '');
+  const allowed = await allowedReviewChannels(adminId);
+  if (!allowed.length) {
+    return { ok: false, code: 'shift_ended', text: '❌ شیفت فعالی ندارید و اسکوپ ساب‌لیدر هم نیست.' };
   }
-  const keys = await activeShiftChannelKeys(adminId);
-  if (!keys.length) return { ok: false, code: 'shift_ended', text: '❌ شیفت شما تمام شده است.' };
-  if (!row || !keys.includes(row.channelKey)) {
-    return { ok: false, code: 'channel', text: '⛔ این پیام مربوط به کانال شیفت فعلی شما نیست.' };
+  if (!allowed.includes(ch)) {
+    return {
+      ok: false,
+      code: 'channel',
+      text: '⛔ این پیام خارج از محدوده شماست (نه کانال ساب‌لیدری‌تان است نه شیفت فعال).',
+    };
   }
   const batch = await getReviewBatch(adminId);
   if (!batch || !batch.ids.map(Number).includes(Number(row.id))) {
