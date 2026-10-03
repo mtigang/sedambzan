@@ -37,6 +37,7 @@ export function channelMessageLink(chatId, messageId, channelKey) {
   if (!messageId) return null;
   const uname = channelKey && CHANNEL_USERNAMES ? CHANNEL_USERNAMES[channelKey] : null;
   if (uname) return 'https://t.me/' + uname + '/' + messageId;
+  // بدون یوزرنیم عمومی فقط در صورت اجبار /c/ (ترجیح: resolveChannelMessageLink)
   const s = String(chatId || '');
   if (s.startsWith('-100')) return 'https://t.me/c/' + s.slice(4) + '/' + messageId;
   return null;
@@ -45,5 +46,29 @@ export function channelMessageLink(chatId, messageId, channelKey) {
 export function channelPublicBase(channelKey) {
   const uname = CHANNEL_USERNAMES && CHANNEL_USERNAMES[channelKey];
   if (uname) return 'https://t.me/' + uname + '/';
+  return null;
+}
+
+/**
+ * لینک عمومی پیام کانال.
+ * اگر CHANNEL_USERNAMES خالی بود، از getChat یوزرنیم را می‌گیرد.
+ * هرگز ترجیح نمی‌دهد /c/ را اگر username پیدا شود.
+ */
+export async function resolveChannelMessageLink(chatId, messageId, channelKey) {
+  if (!messageId) return null;
+  let uname = channelKey && CHANNEL_USERNAMES ? CHANNEL_USERNAMES[channelKey] : null;
+  if (!uname && chatId) {
+    try {
+      const chat = await api.getChat({ chat_id: chatId });
+      if (chat && chat.username) uname = chat.username;
+    } catch (e) {
+      console.error('resolveChannelMessageLink getChat', e);
+    }
+  }
+  if (uname) return 'https://t.me/' + uname + '/' + messageId;
+  // کانال خصوصی بدون username — ناگزیر /c/
+  const s = String(chatId || '');
+  if (s.startsWith('-100')) return 'https://t.me/c/' + s.slice(4) + '/' + messageId;
+  if (s.startsWith('-')) return 'https://t.me/c/' + s.replace(/^-100/, '').replace(/^-/, '') + '/' + messageId;
   return null;
 }
