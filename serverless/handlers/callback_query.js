@@ -45,7 +45,7 @@ import {
 } from 'lib/subleader';
 import { tehranNow, inRange, periodDateStr, formatTsJalali } from 'lib/time';
 import { DEFAULT_CHANNELS } from 'lib/config';
-import { channelMessageLink } from 'lib/resolve';
+import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
 import {
   rejectReasonsInline,
   reviewInline,
@@ -308,7 +308,7 @@ export default async function (cq) {
         });
         mid = sent && sent.message_id;
         if (!mid) throw new Error('message_id خالی');
-        link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
+        link = await resolveChannelMessageLink(conf.chatId, mid, pendingRow.channelKey);
         try {
           await settingSet('chmsg:' + pendingRow.channelKey + ':' + mid, String(id));
         } catch (_e) {}
@@ -1024,7 +1024,7 @@ if (data.startsWith('reject_menu:')) {
           sent = await postToChannel(st.channelKey, st.postText || '');
         }
         await clearState(userId);
-        const link = channelMessageLink(conf && conf.chatId, sent && sent.message_id, st.channelKey);
+        const link = await resolveChannelMessageLink(conf && conf.chatId, sent && sent.message_id, st.channelKey);
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ارسال شد' });
         try {
           await api.editMessageText({
@@ -1652,7 +1652,7 @@ if (data.startsWith('own_shift:')) {
           if (bodyKey) seenBody[bodyKey] = true;
           ok++;
           processed++;
-          const link = channelMessageLink(conf.chatId, mid, channelKey);
+          const link = await resolveChannelMessageLink(conf.chatId, mid, channelKey);
           try {
             let txt = '✅ پیام شما تأیید و منتشر شد.';
             if (link) {
