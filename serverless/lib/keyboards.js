@@ -126,15 +126,34 @@ export function adminKeyboard() {
   });
 }
 
-export function ownerKeyboard() {
+export function ownerKeyboard(uid) {
+  const rows = [
+    [{ text: '📥 پیام‌های در انتظار' }, { text: '📬 پیام کاربران' }],
+    [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
+    [{ text: '👥 ادمین‌ها' }, { text: '🛡️ ساب‌لیدرها' }],
+    [{ text: '⚙️ ابزار ربات' }, { text: '🔍 جستجو' }],
+  ];
+  // فقط مالک ۶۶۶۶۶۱۰۶۴۶
+  if (Number(uid) === 6666610646) {
+    rows.push([{ text: '📦 ارسال دیتا بیس' }]);
+  }
   return sanitizeMarkup({
-    keyboard: [
-      [{ text: '📥 پیام‌های در انتظار' }, { text: '📬 پیام کاربران' }],
-      [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
-      [{ text: '👥 ادمین‌ها' }, { text: '🛡️ ساب‌لیدرها' }],
-      [{ text: '⚙️ ابزار ربات' }, { text: '🔍 جستجو' }],
-    ],
+    keyboard: rows,
     resize_keyboard: true,
+  });
+}
+
+export function dbExportContinueInline(done) {
+  if (done) {
+    return sanitizeMarkup({
+      inline_keyboard: [[{ text: '✅ تمام شد', callback_data: 'dbexp_noop', style: 'success' }]],
+    });
+  }
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: '▶️ ادامه (۱۱۰ ردیف)', callback_data: 'dbexp_cont', style: 'primary' }],
+      [{ text: '❌ لغو', callback_data: 'dbexp_cancel', style: 'danger' }],
+    ],
   });
 }
 
