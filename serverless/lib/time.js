@@ -113,44 +113,23 @@ export function isWorkHours(now) {
  */
 export function buildAvailableShiftSlots(now) {
   if (!now) now = tehranNow();
+  // انتخاب شیفت همیشه فعال (۲۴ ساعته) — همه بازه‌های دوره ۱۲:۰۰→۰۳:۰۰
   const slots = [];
   const pad = (n) => String(n).padStart(2, '0');
   const hours = [];
   for (let h = 12; h <= 23; h++) hours.push(h);
   for (let h = 0; h <= 2; h++) hours.push(h);
 
-  const inPeriod = isWorkHours(now);
-  const nowM = periodOrd(now.hm);
-
   for (const h of hours) {
     const start = pad(h) + ':00';
     const endH = (h + 1) % 24;
     const end = pad(endH) + ':00';
-
-    if (inPeriod) {
-      const sOrd = periodOrd(start);
-      let eOrd = periodOrd(end);
-      if (eOrd <= sOrd) eOrd += 24 * 60;
-      if (eOrd <= nowM) continue;
-      let labelStart = start;
-      if (sOrd < nowM && nowM < eOrd) {
-        labelStart = now.hm;
-      }
-      slots.push({
-        start: labelStart,
-        end: end,
-        label: labelStart + '–' + end,
-        hourKey: start,
-      });
-    } else {
-      // قبل از ۱۲:۰۰ یا خارج دوره: همه دکمه‌ها دیده شوند
-      slots.push({
-        start: start,
-        end: end,
-        label: start + '–' + end,
-        hourKey: start,
-      });
-    }
+    slots.push({
+      start: start,
+      end: end,
+      label: start + '–' + end,
+      hourKey: start,
+    });
   }
   return slots;
 }
