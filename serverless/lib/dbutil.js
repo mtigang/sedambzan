@@ -206,13 +206,22 @@ export async function getActiveSubLeaderChannel(userId) {
 
 export async function adminChannels(userId) {
   try {
-    const rows = await db
-      .select()
-      .from(channelAdmins)
-      .where(eq(channelAdmins.userId, userId))
-      .all();
-    return (rows || []).map((r) => r.channelKey);
-  } catch (_) {
+    const uid = Number(userId);
+    // select-all + فیلتر عددی — مقاوم به mismatch نوع و نام فیلد
+    const all = (await db.select().from(channelAdmins).all()) || [];
+    const out = [];
+    const seen = {};
+    for (const r of all) {
+      const rid = Number(r.userId ?? r.user_id);
+      if (!Number.isFinite(rid) || rid !== uid) continue;
+      const key = r.channelKey ?? r.channel_key;
+      if (!key || seen[key]) continue;
+      seen[key] = true;
+      out.push(String(key));
+    }
+    return out;
+  } catch (e) {
+    console.error('adminChannels', e);
     return [];
   }
 }
@@ -437,12 +446,21 @@ export async function shiftPickChannels(userId) {
   const set = new Set();
   try {
     const chs = await adminChannels(userId);
-    for (const c of chs || []) set.add(c);
+    for (const c of chs || []) if (c) set.add(String(c));
   } catch (_e) {}
   try {
     const sl = await getActiveSubLeaderChannel(userId);
-    if (sl) set.add(sl);
+    if (sl) set.add(String(sl));
   } catch (_e) {}
+  // اگر role=admin در users ولی ردیف channel_admins خالی/خراب بود — لاگ
+  if (!set.size) {
+    try {
+      const u = await getUser(userId);
+      if (u && u.role === 'admin') {
+        console.error('shiftPickChannels: admin role but no channel_admins', userId);
+      }
+    } catch (_e) {}
+  }
   return [...set];
 }
 
