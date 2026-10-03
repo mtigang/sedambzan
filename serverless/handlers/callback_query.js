@@ -4,6 +4,9 @@ import { eq, and } from 'sdk/db';
 import { messages, feedback, shifts, settings, users, channelAdmins } from 'schema';
 import {
   isOwner,
+  setChannelEnabled,
+  setChannelAdMode,
+  isChannelAdMode,
   getActiveSubLeaderChannel,
   removeChannelAdmin,
   listAdminsByChannel,
@@ -861,6 +864,71 @@ if (data.startsWith('reject_menu:')) {
     }
 
     
+    
+    if (data.startsWith('choff:') || data.startsWith('chon:') || data.startsWith('chad:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const parts = data.split(':');
+      const mode = parts[0]; // choff | chon | chad
+      const key = parts[1];
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      if (key === 'cancel') {
+        try {
+          await api.editMessageText({ chat_id: cq.message.chat.id, message_id: cq.message.message_id, text: 'لغو شد.' });
+        } catch (_e) {}
+        return;
+      }
+      const keys = key === 'all' ? Object.keys(DEFAULT_CHANNELS) : [key];
+      if (mode === 'choff') {
+        for (const k of keys) await setChannelEnabled(k, false);
+        if (key === 'all') await settingSet('bot_enabled', '0');
+        const names = keys.map(function (k) { return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k; }).join('، ');
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: '🔴 خاموش شد: ' + names,
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (mode === 'chon') {
+        for (const k of keys) await setChannelEnabled(k, true);
+        await settingSet('bot_enabled', '1');
+        const names = keys.map(function (k) { return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k; }).join('، ');
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: '🟢 روشن شد: ' + names,
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (mode === 'chad') {
+        for (const k of keys) {
+          const cur = await isChannelAdMode(k);
+          await setChannelAdMode(k, !cur);
+        }
+        let lines = [];
+        for (const k of keys) {
+          const on = await isChannelAdMode(k);
+          lines.push(((DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k) + ': ' + (on ? '📢 تب روشن' : '✅ تب خاموش'));
+        }
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: '📢 حالت تب\n' + lines.join('\n'),
+          });
+        } catch (_e) {}
+        return;
+      }
+      return;
+    }
+
     if (data.startsWith('send_dest:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
