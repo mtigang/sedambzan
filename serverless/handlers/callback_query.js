@@ -2608,7 +2608,10 @@ if (data === 'ann_continue') {
         } catch (_e) {
           allowed = [];
         }
-        if (!allowed.includes(channelKey)) {
+        const ck = String(channelKey || '');
+        const ok = (allowed || []).some(function (x) { return String(x) === ck; });
+        if (!ok) {
+          console.error('shift_pick denied', { userId, channelKey: ck, allowed });
           await api.answerCallbackQuery({
             callback_query_id: cq.id,
             text: '⛔ برای این کانال اجازه شیفت ندارید',
