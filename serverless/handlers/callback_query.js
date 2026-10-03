@@ -261,6 +261,17 @@ export default async function (cq) {
         );
         return;
       }
+      try {
+        const ckAd = String((pendingRow.channelKey ?? pendingRow.channel_key) || '');
+        if (ckAd && (await isChannelAdMode(ckAd))) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: '📢 کانال در حالت تب است؛ تأیید و انتشار فعلاً ممکن نیست.',
+            show_alert: true,
+          });
+          return;
+        }
+      } catch (_e) {}
       const acc = await checkReviewAccess(userId, pendingRow);
       if (!acc.ok) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: acc.text, show_alert: true });
