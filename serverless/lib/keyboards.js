@@ -170,13 +170,28 @@ export function backKeyboard() {
 export function settingsKeyboard(botOn) {
   return sanitizeMarkup({
     keyboard: [
-      [{ text: '🧪 تست کانال‌ها' }, { text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
+      [{ text: '📢 حالت تب' }, { text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
       [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
-      [{ text: '📤 انتشار مستقیم صف' }, { text: '🗑 پاک‌سازی pending کاربر' }],
-      [{ text: '🧹 پاک‌سازی صف' }],
+      [{ text: '🗑 پاک‌سازی pending کاربر' }, { text: '🧹 پاک‌سازی صف' }],
+      [{ text: '🧪 تست کانال‌ها' }, { text: '📤 انتشار مستقیم صف' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
+  });
+}
+
+/** انتخاب کانال برای خاموش/تب — رنگی */
+export function channelPickFlagsInline(prefix) {
+  // prefix: choff | chon | chad | chad_off
+  const style = { sadambazan: 'success', inkarbar: 'primary', zendegi: 'primary', all: 'danger' };
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: 'صدام بزن', callback_data: prefix + ':sadambazan', style: style.sadambazan }],
+      [{ text: 'این کاربر', callback_data: prefix + ':inkarbar', style: style.inkarbar }],
+      [{ text: 'تو زندگی بعدی', callback_data: prefix + ':zendegi', style: style.zendegi }],
+      [{ text: 'همه کانال‌ها', callback_data: prefix + ':all', style: style.all }],
+      [{ text: 'انصراف', callback_data: prefix + ':cancel', style: 'danger' }],
+    ],
   });
 }
 
