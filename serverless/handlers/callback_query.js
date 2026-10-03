@@ -70,18 +70,20 @@ import {
 } from 'lib/keyboards';
 
 async function refreshAllShiftBoards(channelKey, date) {
-  const dayShifts =
+  const allActive =
     (await db
       .select()
       .from(shifts)
-      .where(
-        and(
-          eq(shifts.channelKey, channelKey),
-          eq(shifts.shiftDate, date),
-          eq(shifts.status, 'active')
-        )
-      )
+      .where(and(eq(shifts.channelKey, channelKey), eq(shifts.status, 'active')))
       .all()) || [];
+  // روزانه + دائمی
+  const dayShifts = allActive.filter(function (s) {
+    return (
+      s.shiftDate === date ||
+      s.shiftDate === 'perm' ||
+      s.shiftDate === 'permanent'
+    );
+  });
   const takenMap = {};
   for (const s of dayShifts) {
           if (String(s.startHm) === String(s.endHm)) continue;
@@ -2715,7 +2717,7 @@ if (data === 'ann_continue') {
         return;
       }
 
-      const ownConflict = await findAdminShiftConflict(userId, pdate, startHm, endHm);
+      const ownConflict = await findAdminShiftConflict(userId, 'perm', startHm, endHm);
       if (ownConflict) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
@@ -2748,47 +2750,48 @@ if (data === 'ann_continue') {
         });
         return;
       }
+      // شیفت ادمین همیشه دائمی (هر روز همان ساعت)
       await db
         .insert(shifts)
         .values({
           channelKey,
           adminId: userId,
-          shiftDate: pdate,
+          shiftDate: 'perm',
           startHm,
           endHm,
           status: 'active',
         })
         .run();
 
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت شد ✅' });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت دائمی ✅' });
       try {
         await refreshAllShiftBoards(channelKey, pdate);
       } catch (e) {
         console.error('refresh', e);
       }
       try {
-        // also edit THIS message keyboard immediately
         const dayShifts =
           (await db
             .select()
             .from(shifts)
-            .where(
-              and(
-                eq(shifts.channelKey, channelKey),
-                eq(shifts.shiftDate, pdate),
-                eq(shifts.status, 'active')
-              )
-            )
+            .where(and(eq(shifts.channelKey, channelKey), eq(shifts.status, 'active')))
             .all()) || [];
+        const active = dayShifts.filter(function (s) {
+          return (
+            s.shiftDate === pdate ||
+            s.shiftDate === 'perm' ||
+            s.shiftDate === 'permanent' ||
+            s.shiftDate === now.date
+          );
+        });
         const takenMap = {};
-        for (const s of dayShifts) {
+        for (const s of active) {
           if (String(s.startHm) === String(s.endHm)) continue;
           takenMap[s.startHm] = s.adminId;
         }
         const myStarts = new Set(
-          dayShifts.filter((s) => s.adminId === userId).map((s) => s.startHm)
+          active.filter((s) => Number(s.adminId) === Number(userId)).map((s) => s.startHm)
         );
-        // include current pick even if startHm partial
         myStarts.add(startHm);
         takenMap[startHm] = userId;
         await api.editMessageReplyMarkup({
@@ -2802,15 +2805,13 @@ if (data === 'ann_continue') {
       await api.sendMessage({
         chat_id: userId,
         text:
-          '✅ شیفت «' +
+          '✅ شیفت دائمی «' +
           (DEFAULT_CHANNELS[channelKey]?.title || channelKey) +
           '» ' +
           startHm +
           '–' +
           endHm +
-          ' ثبت شد (دوره ' +
-          pdate +
-          ').\n\nبرای دریافت پیام‌ها «📥 پیام‌های در انتظار» را بزنید.',
+          ' ثبت شد.\nهر روز در همین ساعت فعال است.\n\nوقتی ساعت شیفت رسید «📥 پیام‌های در انتظار» را بزنید.',
       });
       return;
     }
