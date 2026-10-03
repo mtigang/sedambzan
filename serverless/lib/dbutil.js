@@ -428,14 +428,16 @@ function reviewBatchKey(adminId) {
 
 /** آیا این رکورد shift همین الان (تهران) فعال است؟ */
 function shiftActiveNow(s, now, pdate) {
-  if (!s || s.status !== 'active') return false;
-  const start = String(s.startHm || '');
-  const end = String(s.endHm || '');
+  if (!s || String(s.status) !== 'active') return false;
+  const start = normHm(s.startHm || s.start_hm || '');
+  const end = normHm(s.endHm || s.end_hm || '');
   if (!start || !end || start === end) return false;
-  if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
+  const sd = String(s.shiftDate ?? s.shift_date ?? '');
+  if (sd === 'perm' || sd === 'permanent') {
     return inRange(now.hm, start, end);
   }
-  if (s.shiftDate !== pdate && s.shiftDate !== now.date) return false;
+  // روزانه: دوره فعلی یا تاریخ تقویم امروز
+  if (sd !== String(pdate) && sd !== String(now.date)) return false;
   return inRange(now.hm, start, end);
 }
 
@@ -511,13 +513,22 @@ export async function activeShiftChannelKeys(adminId) {
   try {
     const now = tehranNow();
     const pdate = periodDateStr(now);
-    const rows =
-      (await db
-        .select()
-        .from(shifts)
-        .where(and(eq(shifts.adminId, Number(adminId)), eq(shifts.status, 'active')))
-        .all()) || [];
-    return [...new Set(rows.filter((s) => shiftActiveNow(s, now, pdate)).map((s) => s.channelKey))];
+    const uid = Number(adminId);
+    // select-all مقاوم به mismatch نوع
+    const all = (await db.select().from(shifts).all()) || [];
+    const rows = all.filter(function (s) {
+      return Number(s.adminId ?? s.admin_id) === uid && String(s.status) === 'active';
+    });
+    const keys = [];
+    const seen = {};
+    for (const s of rows) {
+      if (!shiftActiveNow(s, now, pdate)) continue;
+      const ck = String((s.channelKey ?? s.channel_key) || '');
+      if (!ck || seen[ck]) continue;
+      seen[ck] = true;
+      keys.push(ck);
+    }
+    return keys;
   } catch (e) {
     console.error('activeShiftChannelKeys', e);
     return [];
@@ -700,28 +711,49 @@ export async function isReviewBatchComplete(adminId) {
 
 /** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول */
 async function selectReviewablePending(adminId) {
-  const pending = (await db.select().from(messages).where(eq(messages.status, 'pending')).all()) || [];
-  // publishing عمداً نیست — رزرو شده
-  pending.sort((a, b) => a.id - b.id);
+  let allMsg = [];
+  try {
+    allMsg = (await db.select().from(messages).all()) || [];
+  } catch (e) {
+    console.error('selectReviewablePending all', e);
+    return [];
+  }
+  const pending = allMsg
+    .filter(function (m) {
+      return String(m.status) === 'pending';
+    })
+    .sort(function (a, b) {
+      return (a.id || 0) - (b.id || 0);
+    });
+  function msgCh(m) {
+    return String((m.channelKey ?? m.channel_key) || '');
+  }
   if (isOwner(adminId)) {
     try {
       const ch = await settingGet('owner_pend_ch:' + adminId, '');
-      if (ch) return pending.filter((m) => m.channelKey === ch);
+      if (ch) return pending.filter(function (m) { return msgCh(m) === String(ch); });
     } catch (_e) {}
     return pending;
   }
-  // ساب‌لیدر: فقط کانال Scope — بدون نیاز به شیفت
-  const slCh = await getActiveSubLeaderChannel(adminId);
-  if (slCh) return pending.filter((m) => m.channelKey === slCh);
-  const keys = await activeShiftChannelKeys(adminId);
-  if (!keys.length) return [];
-  return pending.filter((m) => keys.includes(m.channelKey));
+  // ساب‌لیدر + ادمین هیبرید: اسکوپ ساب‌لیدر ∪ کانال‌های شیفت فعال
+  const allowed = {};
+  try {
+    const slCh = await getActiveSubLeaderChannel(adminId);
+    if (slCh) allowed[String(slCh)] = true;
+  } catch (_e) {}
+  try {
+    const keys = await activeShiftChannelKeys(adminId);
+    for (const k of keys || []) allowed[String(k)] = true;
+  } catch (_e) {}
+  const allowList = Object.keys(allowed);
+  if (!allowList.length) return [];
+  return pending.filter(function (m) {
+    return !!allowed[msgCh(m)];
+  });
 }
 
-/**
- * وضعیت Batch بعد از هر تأیید/رد (فقط‌خواندنی).
- * messageId اختیاری: اگر پیام عضو Batch نباشد inBatch=false.
- */
+
+
 export async function finishReviewBatchIfComplete(adminId, messageId) {
   try {
     const batch = await getReviewBatch(adminId);
@@ -765,8 +797,10 @@ export async function createReviewBatch(adminId) {
   try {
     const owner = isOwner(adminId);
     if (!owner) {
+      const slCh = await getActiveSubLeaderChannel(adminId);
       const keys = await activeShiftChannelKeys(adminId);
-      if (!keys.length) {
+      // ساب‌لیدر بدون شیفت هم می‌تواند صف کانال خودش را ببیند
+      if (!slCh && !(keys && keys.length)) {
         await clearReviewBatch(adminId);
         return { status: 'no_shift' };
       }
