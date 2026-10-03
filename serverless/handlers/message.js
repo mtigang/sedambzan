@@ -50,7 +50,7 @@ import {
 // sanitize imported below
 import { validateAndFix, normalizeBody, exactBodyKey } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm } from 'lib/time';
+import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm, sortShiftsByPeriod, periodOrd } from 'lib/time';
 // normHm via time
 import { resolveUserId, channelMessageLink, channelPublicBase } from 'lib/resolve';
 import {
@@ -939,27 +939,38 @@ export default async function (message) {
               s.shiftDate === now.date)
           );
         });
-        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۱۲:۰۰–۰۳:۰۰)\n\n';
+        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۱۲:۰۰–۰۳:۰۰)\n';
         if (!today.length) {
-          t += 'هنوز شیفتی ثبت نشده.\n';
+          t += '\nهنوز شیفتی ثبت نشده.\n';
         } else {
-          for (const s of today) {
-            let name = String(s.adminId);
-            try {
-              name = displayName(await getUser(s.adminId), s.adminId);
-            } catch (_e) {}
-            t +=
-              '• ' +
-              ((DEFAULT_CHANNELS[s.channelKey] && DEFAULT_CHANNELS[s.channelKey].title) ||
-                s.channelKey) +
-              ' | ' +
-              String(s.startHm).slice(0, 5) +
-              '–' +
-              String(s.endHm).slice(0, 5) +
-              ' | ' +
-              name +
-              (s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' (دائم)' : '') +
-              '\n';
+          const order = Object.keys(DEFAULT_CHANNELS);
+          for (const ck of order) {
+            const group = sortShiftsByPeriod(
+              today.filter(function (s) {
+                return String(s.channelKey || s.channel_key) === ck;
+              })
+            );
+            if (!group.length) continue;
+            const title =
+              (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+            t += '\n—— «' + title + '» ——\n';
+            for (const s of group) {
+              let name = String(s.adminId);
+              try {
+                name = displayName(await getUser(s.adminId), s.adminId);
+              } catch (_e) {}
+              const tag =
+                s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' · دائم' : '';
+              t +=
+                '▫️ ' +
+                String(s.startHm).slice(0, 5) +
+                '–' +
+                String(s.endHm).slice(0, 5) +
+                '  ·  ' +
+                name +
+                tag +
+                '\n';
+            }
           }
         }
         t += '\nاز دکمه‌های زیر:\n• تخصیص روزانه/دائمی\n• لیست و لغو تک‌تک\n• لغو همه شیفت‌های دوره';
