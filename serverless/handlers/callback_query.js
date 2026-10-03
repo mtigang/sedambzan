@@ -50,6 +50,7 @@ import {
   adminListInline,
   userOpenInline,
   shiftSlotsInline,
+  shiftModePickInline,
   announceProgressInline,
   subLeaderPickChannelInline,
   subLeaderManageInline,
@@ -2559,6 +2560,84 @@ if (data === 'ann_continue') {
     }
 
 
+    
+    if (data.startsWith('shift_mode|') || data.startsWith('shift_mode:')) {
+      const parts = data.indexOf('|') >= 0 ? data.split('|') : data.split(':');
+      const mode = parts[1]; // daily | perm
+      const channelKey = parts[2];
+      if (!channelKey || (mode !== 'daily' && mode !== 'perm')) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
+        return;
+      }
+      const now = tehranNow();
+      const date = periodDateStr(now);
+      const dayShifts =
+        (await db.select().from(shifts).where(eq(shifts.channelKey, channelKey)).all()) || [];
+      // پر بودن: هم روزانه همین دوره هم دائمی
+      const occupied = dayShifts.filter(function (s) {
+        if (s.status !== 'active') return false;
+        if (String(s.startHm) === String(s.endHm)) return false;
+        return (
+          s.shiftDate === date ||
+          s.shiftDate === 'perm' ||
+          s.shiftDate === 'permanent' ||
+          s.shiftDate === now.date
+        );
+      });
+      const takenMap = {};
+      const myStarts = new Set();
+      for (const s of occupied) {
+        const key = String(s.startHm);
+        takenMap[key] = s.adminId;
+        if (Number(s.adminId) === Number(userId)) myStarts.add(key);
+      }
+      await setState(userId, 'pick_shift_slot', { channelKey, mode });
+      const title = (DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey;
+      const modeLabel = mode === 'perm' ? 'دائمی (هر روز)' : 'روزانه (فقط دوره ' + date + ')';
+      let head =
+        '⏰ شیفت‌های «' +
+        title +
+        '»\nنوع: ' +
+        modeLabel +
+        '\nساعت کاری: ۱۲:۰۰ تا ۰۳:۰۰\nحداکثر ۳ بازه\n🟢 خالی  ·  🔴 پر (روزانه یا دائمی)\n\n';
+      if (occupied.length) {
+        head += 'اشغال‌شده‌ها:\n';
+        for (const s of occupied) {
+          let who = Number(s.adminId) === Number(userId) ? 'شما' : String(s.adminId);
+          try {
+            if (Number(s.adminId) !== Number(userId)) {
+              who = displayName(await getUser(s.adminId), s.adminId);
+            }
+          } catch (_e) {}
+          const tag =
+            s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? 'دائم' : 'روزانه';
+          head += '• ' + s.startHm + '–' + s.endHm + ' | ' + who + ' (' + tag + ')\n';
+        }
+      } else {
+        head += 'هنوز شیفتی ثبت نشده — همه خالی‌اند.';
+      }
+      let manageMode = isOwner(userId);
+      try {
+        manageMode = manageMode || (await canManageOthersShifts(userId, channelKey));
+      } catch (_e) {}
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: head,
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, manageMode)),
+        });
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: head,
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, manageMode)),
+        });
+      }
+      return;
+    }
+
     if (data.startsWith('shift_pick|') || data.startsWith('shift_pick:')) {
       // فرمت درست: shift_pick|channel|HH:MM|HH:MM  (نه split روی :)
       let channelKey, startHm, endHm;
@@ -2732,7 +2811,17 @@ if (data === 'ann_continue') {
         return;
       }
 
-      const ownConflict = await findAdminShiftConflict(userId, 'perm', startHm, endHm);
+      let _modeForConflict = 'daily';
+      try {
+        const _stc = await getState(userId);
+        if (_stc && _stc.kind === 'pick_shift_slot' && _stc.mode === 'perm') _modeForConflict = 'perm';
+      } catch (_e) {}
+      const ownConflict = await findAdminShiftConflict(
+        userId,
+        _modeForConflict === 'perm' ? 'perm' : pdate,
+        startHm,
+        endHm
+      );
       if (ownConflict) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
@@ -2765,20 +2854,31 @@ if (data === 'ann_continue') {
         });
         return;
       }
-      // شیفت ادمین همیشه دائمی (هر روز همان ساعت)
+      // نوع از state: daily → فقط دوره فعلی | perm → دائمی
+      let pickMode = 'daily';
+      try {
+        const stPick = await getState(userId);
+        if (stPick && stPick.kind === 'pick_shift_slot' && stPick.mode) {
+          pickMode = stPick.mode === 'perm' ? 'perm' : 'daily';
+        }
+      } catch (_e) {}
+      const shiftDateVal = pickMode === 'perm' ? 'perm' : pdate;
       await db
         .insert(shifts)
         .values({
           channelKey,
           adminId: userId,
-          shiftDate: 'perm',
+          shiftDate: shiftDateVal,
           startHm,
           endHm,
           status: 'active',
         })
         .run();
 
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت دائمی ✅' });
+      await api.answerCallbackQuery({
+        callback_query_id: cq.id,
+        text: pickMode === 'perm' ? 'ثبت دائمی ✅' : 'ثبت روزانه ✅',
+      });
       try {
         await refreshAllShiftBoards(channelKey, pdate);
       } catch (e) {
@@ -2820,13 +2920,16 @@ if (data === 'ann_continue') {
       await api.sendMessage({
         chat_id: userId,
         text:
-          '✅ شیفت دائمی «' +
+          '✅ شیفت «' +
           (DEFAULT_CHANNELS[channelKey]?.title || channelKey) +
           '» ' +
           startHm +
           '–' +
           endHm +
-          ' ثبت شد.\nهر روز در همین ساعت فعال است.\n\nوقتی ساعت شیفت رسید «📥 پیام‌های در انتظار» را بزنید.',
+          (pickMode === 'perm'
+            ? ' به‌صورت دائمی ثبت شد (هر روز).'
+            : ' فقط برای دوره ' + pdate + ' ثبت شد (فردا اعمال نمی‌شود).') +
+          '\n\nوقتی ساعت شیفت رسید «📥 پیام‌های در انتظار» را بزنید.',
       });
       return;
     }
