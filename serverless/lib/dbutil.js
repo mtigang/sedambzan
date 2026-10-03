@@ -227,68 +227,104 @@ export async function adminChannels(userId) {
 }
 
 export async function addChannelAdmin(userId, channelKey) {
-  if (isOwner(userId)) return;
+  const uid = Number(userId);
+  const ck = String(channelKey || '');
+  if (!uid || !ck) return { ok: false, reason: 'bad_args' };
+  if (isOwner(uid)) return { ok: true, reason: 'owner' };
+
+  // همیشه فلگ حذف را بردار تا دوباره قابل‌افزودن باشد
   try {
-    const removed = await settingGet('admin_removed:' + channelKey + ':' + Number(userId), '');
-    if (removed === '1') return;
+    await settingSet('admin_removed:' + ck + ':' + uid, '0');
   } catch (_e) {}
+
   try {
-    const u0 = await getUser(userId);
-    if (u0 && Number(u0.blocked) === 1) return;
+    const u0 = await getUser(uid);
+    if (u0 && Number(u0.blocked) === 1) return { ok: false, reason: 'blocked' };
   } catch (_e) {}
+
+  let exists = false;
   try {
     const all = (await db.select().from(channelAdmins).all()) || [];
-    const exists = all.some(
-      (r) =>
-        Number(r.userId ?? r.user_id) === Number(userId) &&
-        (r.channelKey === channelKey || r.channel_key === channelKey)
-    );
-    if (exists) return;
-    await db.insert(channelAdmins).values({ userId: Number(userId), channelKey }).run();
+    exists = all.some(function (r) {
+      return (
+        Number(r.userId ?? r.user_id) === uid &&
+        String(r.channelKey ?? r.channel_key) === ck
+      );
+    });
   } catch (e) {
-    console.error('addChannelAdmin insert', e);
-    // retry once
+    console.error('addChannelAdmin list', e);
+  }
+
+  if (!exists) {
     try {
-      await db.insert(channelAdmins).values({ userId: Number(userId), channelKey }).run();
-    } catch (e2) {
-      console.error('addChannelAdmin retry', e2);
-      return;
+      await db.insert(channelAdmins).values({ userId: uid, channelKey: ck }).run();
+    } catch (e) {
+      console.error('addChannelAdmin insert', e);
+      try {
+        await db.insert(channelAdmins).values({ userId: uid, channelKey: ck }).run();
+      } catch (e2) {
+        console.error('addChannelAdmin retry', e2);
+        return { ok: false, reason: 'insert_fail' };
+      }
     }
   }
+
   try {
-    const u = await getUser(userId);
+    const u = await getUser(uid);
     if (u) {
-      if (u.role !== 'owner' && u.role !== 'admin') {
-        await db.update(users).set({ role: 'admin' }).where(eq(users.userId, userId)).run();
+      if (u.role !== 'owner' && u.role !== 'admin' && u.role !== 'subleader') {
+        await db.update(users).set({ role: 'admin' }).where(eq(users.userId, uid)).run();
       }
     } else {
-      await db.insert(users).values({ userId: Number(userId), role: 'admin', started: 0 }).run();
+      await db.insert(users).values({ userId: uid, role: 'admin', started: 0 }).run();
     }
   } catch (e) {
     console.error('addChannelAdmin role', e);
   }
+  return { ok: true, reason: exists ? 'already' : 'added' };
 }
 
 export async function removeChannelAdmin(userId, channelKey) {
+  const uid = Number(userId);
+  const ck = String(channelKey || '');
+  if (!uid || !ck) return { ok: false };
   try {
-    await db
-      .delete(channelAdmins)
-      .where(and(eq(channelAdmins.userId, userId), eq(channelAdmins.channelKey, channelKey)))
-      .run();
-    // جلوگیری از بازگشت با sync گروه
-    try {
-      const key = 'admin_removed:' + channelKey + ':' + Number(userId);
-      await settingSet(key, '1');
-    } catch (_e) {}
-    const left = await adminChannels(userId);
-    if (!left.length) {
-      const u = await getUser(userId);
-      if (u && u.role === 'admin') {
-        await db.update(users).set({ role: 'user' }).where(eq(users.userId, userId)).run();
+    const all = (await db.select().from(channelAdmins).all()) || [];
+    for (const r of all) {
+      const rid = Number(r.userId ?? r.user_id);
+      const rck = String(r.channelKey ?? r.channel_key || '');
+      if (rid === uid && rck === ck) {
+        const id = r.id;
+        try {
+          if (id != null) {
+            await db.delete(channelAdmins).where(eq(channelAdmins.id, id)).run();
+          } else {
+            await db
+              .delete(channelAdmins)
+              .where(and(eq(channelAdmins.userId, uid), eq(channelAdmins.channelKey, ck)))
+              .run();
+          }
+        } catch (e) {
+          console.error('removeChannelAdmin row', e);
+        }
       }
     }
+    try {
+      await settingSet('admin_removed:' + ck + ':' + uid, '1');
+    } catch (_e) {}
+    const left = await adminChannels(uid);
+    if (!left.length) {
+      try {
+        const u = await getUser(uid);
+        if (u && u.role === 'admin') {
+          await db.update(users).set({ role: 'user' }).where(eq(users.userId, uid)).run();
+        }
+      } catch (_e) {}
+    }
+    return { ok: true };
   } catch (e) {
     console.error('removeChannelAdmin', e);
+    return { ok: false };
   }
 }
 
