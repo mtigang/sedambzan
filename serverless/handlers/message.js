@@ -16,6 +16,7 @@ import {
   ownerKeyboard,
   backKeyboard,
   settingsKeyboard,
+  channelPickFlagsInline,
   searchKeyboard,
   channelAdminPickKeyboard,
   shiftChannelPickKeyboard,
@@ -70,6 +71,12 @@ import {
   getChannels,
   getChannel,
   isBotOn,
+  isChannelOpen,
+  isChannelAdMode,
+  setChannelEnabled,
+  setChannelAdMode,
+  nextShiftAfterNow,
+  activeShiftAdmins,
   settingSet,
   isOwner,
   upsertUser,
@@ -421,6 +428,61 @@ export default async function (message) {
         } catch (_) {}
 
         // —— ضدتکرار بدنه دقیق (بین پیشوند و نقطه پایانی) — حداکثر ۲۰۰ پیام اخیر
+
+        // —— کانال خاموش / حالت تب
+        try {
+          if (!(await isChannelOpen(v.channelKey))) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '🔴 دریافت پیام برای «' + ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) + '» فعلاً غیرفعال است.\nبعداً دوباره تلاش کنید.',
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          }
+          if (await isChannelAdMode(v.channelKey)) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text:
+                '📢 «' +
+                ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
+                '» الان درگیر تبلیغات یا تبادل است.\n' +
+                'پیام‌های جدید موقتاً پذیرفته نمی‌شوند.\nکمی بعد دوباره سر بزن 🌸',
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          }
+        } catch (e) {
+          console.error('ch flags', e);
+        }
+
+        // —— شیفت فعال برای کانال؟
+        if (!owner) {
+          try {
+            const activeAds = await activeShiftAdmins(v.channelKey);
+            if (!activeAds || !activeAds.length) {
+              const nxt = await nextShiftAfterNow(v.channelKey);
+              let t =
+                '⏰ الان شیفت فعالی برای «' +
+                ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
+                '» نیست؛ پیام ثبت نمی‌شود.\n';
+              if (nxt && nxt.current) {
+                t += 'در حال انتقال شیفت… چند لحظه بعد دوباره بفرستید.';
+              } else if (nxt && nxt.start) {
+                t += 'نزدیک‌ترین شیفت بعدی از ساعت ' + toFaDigits(nxt.start) + ' تا ' + toFaDigits(nxt.end) + ' است.';
+              } else {
+                t += 'هنوز شیفتی برای ادامه امروز ثبت نشده. لطفاً در ساعت کاری و با شیفت فعال ارسال کنید.';
+              }
+              await api.sendMessage({
+                chat_id: chatId,
+                text: t,
+                reply_markup: sanitizeMarkup(backKeyboard()),
+              });
+              return;
+            }
+          } catch (e) {
+            console.error('shift gate', e);
+          }
+        }
         const bodyKey = exactBodyKey(v.content);
         if (bodyKey) {
           let dup = null;
@@ -538,8 +600,29 @@ export default async function (message) {
         }
 
         // keep user_send state for continuous
+        let ahead = 0;
+        try {
+          const pend = (await db.select().from(messages).all()) || [];
+          ahead = pend.filter(function (x) {
+            return (
+              String(x.status) === 'pending' &&
+              String((x.channelKey ?? x.channel_key) || '') === String(v.channelKey) &&
+              Number(x.id) < Number(msgId)
+            );
+          }).length;
+        } catch (_e) {}
         let note =
           '✅ ثبت شد.\n🆔 #' + (msgId != null ? msgId : '?') + '\n🟡 در انتظار بررسی ادمین';
+        if (ahead > 0) {
+          note += '\n📋 حدود ' + toFaDigits(String(ahead)) + ' پیام جلوتر از شما در صف «' + ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || '') + '» است.';
+          if (ahead % 30 === 0) {
+            note += '\n⏳ هر ۳۰ پیام یک‌بار وضعیت صف به شما یادآوری می‌شود — الان دقیقاً روی مرز ' + toFaDigits(String(ahead)) + ' هستید.';
+          } else if (ahead <= 30) {
+            note += '\n🔔 کمتر از ۳۰ پیام تا نوبت بررسی شما مانده.';
+          }
+        } else {
+          note += '\n🔔 پیام شما نزدیک ابتدای صف است.';
+        }
         note += '\n\nپیام بعدی را بفرستید یا ◀️ بازگشت';
         if (v.autoFixed) note += '\n\nℹ️ متن کمی اصلاح شد و ارسال گردید.';
         await api.sendMessage({
@@ -661,30 +744,103 @@ export default async function (message) {
 
     
     // ========== ADMIN: performance ==========
-    if ((role === 'admin' || owner) && text === '📊 عملکرد من') {
-      const all =
-        (await db.select().from(messages).where(eq(messages.reviewedBy, userId)).all()) || [];
-      const { date } = tehranNow();
-      // approx today by reviewedAt string not reliable — count all
-      const ap = all.filter((m) => m.status === 'approved').length;
-      const rj = all.filter((m) => m.status === 'rejected').length;
-      const keys = await adminChannels(userId);
-      await api.sendMessage({
-        chat_id: chatId,
-        text:
-          '📊 عملکرد شما\n\n' +
-          'کانال‌ها: ' +
-          (keys.map((k) => DEFAULT_CHANNELS[k]?.title || k).join('، ') || '—') +
-          '\nتأیید کل: ' +
-          ap +
-          '\nرد کل: ' +
-          rj +
-          '\nمجموع بررسی: ' +
-          all.length +
-          '\n📅 امروز (تهران): ' +
-          date,
-        reply_markup: await roleKb(userId),
-      });
+    
+    if ((role === 'admin' || role === 'subleader' || owner) && text === '📊 عملکرد من') {
+      try {
+        const now = tehranNow();
+        const allMsg = (await db.select().from(messages).all()) || [];
+        const mine = allMsg.filter(function (m) {
+          return Number(m.reviewedBy ?? m.reviewed_by) === Number(userId);
+        });
+        function isToday(m) {
+          const ra = m.reviewedAt ?? m.reviewed_at;
+          if (!ra) return false;
+          try {
+            const d = ra instanceof Date ? ra : new Date(ra);
+            if (isNaN(d.getTime())) return false;
+            const fmt = new Intl.DateTimeFormat('en-GB', {
+              timeZone: 'Asia/Tehran',
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+            });
+            const parts = Object.fromEntries(fmt.formatToParts(d).map(function (p) { return [p.type, p.value]; }));
+            const ds = parts.year + '-' + parts.month + '-' + parts.day;
+            return ds === now.date;
+          } catch (_e) {
+            return false;
+          }
+        }
+        const mineToday = mine.filter(isToday);
+        const keys = await adminChannels(userId);
+        const sl = await getActiveSubLeaderChannel(userId);
+        const chans = [...new Set([...(keys || []), ...(sl ? [sl] : [])])];
+
+        function rankIn(list, channelKey, todayOnly) {
+          const pool = list.filter(function (m) {
+            const ck = String((m.channelKey ?? m.channel_key) || '');
+            if (channelKey && ck !== channelKey) return false;
+            if (todayOnly && !isToday(m)) return false;
+            const st = String(m.status || '');
+            return st === 'approved' || st === 'rejected';
+          });
+          const counts = {};
+          for (const m of pool) {
+            const id = Number(m.reviewedBy ?? m.reviewed_by);
+            if (!id) continue;
+            counts[id] = (counts[id] || 0) + 1;
+          }
+          const ranked = Object.keys(counts)
+            .map(function (id) { return { id: Number(id), n: counts[id] }; })
+            .sort(function (a, b) { return b.n - a.n; });
+          const myN = counts[Number(userId)] || 0;
+          let rank = 0;
+          for (let i = 0; i < ranked.length; i++) {
+            if (ranked[i].id === Number(userId)) {
+              rank = i + 1;
+              break;
+            }
+          }
+          return { rank: rank || (myN ? ranked.length : 0), totalAdmins: ranked.length, count: myN };
+        }
+
+        let body = '📊 عملکرد شما\n';
+        body += '📅 امروز تهران: ' + now.date + ' — ' + now.hm + '\n';
+        body += 'کانال‌ها: ' + (chans.map(function (k) { return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k; }).join('، ') || '—') + '\n\n';
+
+        const apAll = mine.filter(function (m) { return m.status === 'approved'; }).length;
+        const rjAll = mine.filter(function (m) { return m.status === 'rejected'; }).length;
+        const apTd = mineToday.filter(function (m) { return m.status === 'approved'; }).length;
+        const rjTd = mineToday.filter(function (m) { return m.status === 'rejected'; }).length;
+        body += '—— کلی ——\n';
+        body += '🟢 تأیید کل: ' + apAll + ' | امروز: ' + apTd + '\n';
+        body += '🔴 رد کل: ' + rjAll + ' | امروز: ' + rjTd + '\n';
+        body += 'Σ بررسی کل: ' + mine.length + ' | امروز: ' + mineToday.length + '\n';
+
+        const rAllToday = rankIn(allMsg, null, true);
+        const rAllTotal = rankIn(allMsg, null, false);
+        body += '🏆 رتبه امروز (همه کانال‌ها): ' + (rAllToday.rank || '—') + ' از ' + (rAllToday.totalAdmins || 0) + ' (بررسی: ' + rAllToday.count + ')\n';
+        body += '🏆 رتبه کل: ' + (rAllTotal.rank || '—') + ' از ' + (rAllTotal.totalAdmins || 0) + ' (بررسی: ' + rAllTotal.count + ')\n';
+
+        for (const ck of chans.length ? chans : Object.keys(DEFAULT_CHANNELS)) {
+          const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+          const chMine = mine.filter(function (m) { return String((m.channelKey ?? m.channel_key) || '') === ck; });
+          const chToday = chMine.filter(isToday);
+          const rt = rankIn(allMsg, ck, true);
+          const rT = rankIn(allMsg, ck, false);
+          body += '\n—— «' + title + '» ——\n';
+          body += '🟢' + chMine.filter(function (m) { return m.status === 'approved'; }).length;
+          body += ' 🔴' + chMine.filter(function (m) { return m.status === 'rejected'; }).length;
+          body += ' | امروز 🟢' + chToday.filter(function (m) { return m.status === 'approved'; }).length;
+          body += ' 🔴' + chToday.filter(function (m) { return m.status === 'rejected'; }).length + '\n';
+          body += 'رتبه امروز: ' + (rt.rank || '—') + '/' + (rt.totalAdmins || 0) + ' · رتبه کل: ' + (rT.rank || '—') + '/' + (rT.totalAdmins || 0) + '\n';
+        }
+
+        await api.sendMessage({ chat_id: chatId, text: body.slice(0, 4000), reply_markup: await roleKb(userId) });
+      } catch (e) {
+        console.error('perf', e);
+        await api.sendMessage({ chat_id: chatId, text: 'خطا در آمار عملکرد', reply_markup: await roleKb(userId) });
+      }
       return;
     }
 
@@ -1760,7 +1916,7 @@ export default async function (message) {
       return;
     }
 
-    if (owner && text === '⚙️ ابزار ربات' || text === '⚙️ تنظیمات') {
+    if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظیمات')) {
       const on = await isBotOn();
       await api.sendMessage({
         chat_id: chatId,
@@ -1770,22 +1926,30 @@ export default async function (message) {
       return;
     }
 
-    if (owner && text === '🟢 روشن کردن ربات') {
-      await settingSet('bot_enabled', '1');
+
+    if (owner && text === '🔴 خاموش کردن ربات') {
       await api.sendMessage({
         chat_id: chatId,
-        text: '🟢 ربات روشن شد',
-        reply_markup: settingsKeyboard(true),
+        text: '🔴 کدام کانال(ها) خاموش شوند؟',
+        reply_markup: sanitizeMarkup(channelPickFlagsInline('choff')),
       });
       return;
     }
 
-    if (owner && text === '🔴 خاموش کردن ربات') {
-      await settingSet('bot_enabled', '0');
+    if (owner && text === '🟢 روشن کردن ربات') {
       await api.sendMessage({
         chat_id: chatId,
-        text: '🔴 ربات خاموش شد',
-        reply_markup: settingsKeyboard(false),
+        text: '🟢 کدام کانال(ها) روشن شوند؟',
+        reply_markup: sanitizeMarkup(channelPickFlagsInline('chon')),
+      });
+      return;
+    }
+
+    if (owner && text === '📢 حالت تب') {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '📢 حالت تب (تبلیغات/تبادل) برای کدام کانال؟\nدر این حالت کاربر پیام جدید برای آن کانال ثبت نمی‌کند.',
+        reply_markup: sanitizeMarkup(channelPickFlagsInline('chad')),
       });
       return;
     }
