@@ -8,7 +8,7 @@ import {
   CHANNEL_IDS,
   ADMIN_GROUP_IDS,
 } from 'lib/config';
-import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf, periodOrd } from 'lib/time';
 import { reviewInline, sanitizeMarkup } from 'lib/keyboards';
 
 export async function ensureChannelsSeeded() {
@@ -115,6 +115,66 @@ export async function settingSet(key, value) {
 export async function isBotOn() {
   return (await settingGet('bot_enabled', '1')) !== '0';
 }
+
+
+/** کانال برای دریافت پیام باز است؟ (سراسری + per-channel) */
+export async function isChannelOpen(channelKey) {
+  if ((await settingGet('bot_enabled', '1')) === '0') return false;
+  const v = await settingGet('ch_enabled:' + channelKey, '1');
+  return v !== '0';
+}
+
+/** حالت تب/تبلیغات برای کانال */
+export async function isChannelAdMode(channelKey) {
+  return (await settingGet('ch_ad:' + channelKey, '0')) === '1';
+}
+
+export async function setChannelEnabled(channelKey, on) {
+  await settingSet('ch_enabled:' + channelKey, on ? '1' : '0');
+}
+
+export async function setChannelAdMode(channelKey, on) {
+  await settingSet('ch_ad:' + channelKey, on ? '1' : '0');
+}
+
+/** نزدیک‌ترین شیفت فعال بعدی برای کانال (بعد از الان) */
+export async function nextShiftAfterNow(channelKey) {
+  try {
+    const now = tehranNow();
+    const pdate = periodDateStr(now);
+    const all = (await db.select().from(shifts).all()) || [];
+    const rows = all.filter(function (s) {
+      if (String(s.status) !== 'active') return false;
+      const ck = String((s.channelKey ?? s.channel_key) || '');
+      if (ck !== String(channelKey)) return false;
+      const sd = String((s.shiftDate ?? s.shift_date) || '');
+      return sd === pdate || sd === 'perm' || sd === 'permanent' || sd === now.date;
+    });
+    const nowM = periodOrd(now.hm);
+    let best = null;
+    let bestOrd = null;
+    for (const s of rows) {
+      const start = normHm(s.startHm || s.start_hm);
+      const end = normHm(s.endHm || s.end_hm);
+      if (!start || start === end) continue;
+      let sOrd = periodOrd(start);
+      // اگر الان داخل بازه است، همین الان فعال است
+      if (inRange(now.hm, start, end)) {
+        return { start, end, current: true, adminId: s.adminId ?? s.admin_id };
+      }
+      if (sOrd <= nowM) continue; // گذشته در این دوره
+      if (bestOrd == null || sOrd < bestOrd) {
+        bestOrd = sOrd;
+        best = { start, end, current: false, adminId: s.adminId ?? s.admin_id };
+      }
+    }
+    return best;
+  } catch (e) {
+    console.error('nextShiftAfterNow', e);
+    return null;
+  }
+}
+
 
 export function isOwner(id) {
   return OWNER_IDS.map(Number).includes(Number(id));
