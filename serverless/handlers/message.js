@@ -25,6 +25,7 @@ import {
   feedbackInline,
   userOpenInline,
   shiftSlotsInline,
+  shiftModePickInline,
   adminListInline,
   announceTargetInline,
   ownerShiftMenuInline,
@@ -678,89 +679,20 @@ export default async function (message) {
         });
         return;
       }
-      const now = tehranNow();
-      const date = periodDateStr(now);
-      const dayShifts =
-        (await db
-          .select()
-          .from(shifts)
-          .where(eq(shifts.channelKey, entry.key))
-          .all()) || [];
-      const todayRaw = dayShifts.filter(
-        (s) =>
-          (s.shiftDate === date ||
-            s.shiftDate === 'permanent' ||
-            s.shiftDate === 'perm' ||
-            s.shiftDate === now.date) &&
-          s.status === 'active'
-      );
-      const today = todayRaw.filter(function (s) {
-        try {
-          const a = normHm(s.startHm);
-          const b = normHm(s.endHm);
-          return a && b && a !== b;
-        } catch (_e) {
-          return false;
-        }
-      });
-      const takenMap = {};
-      const myStarts = new Set();
-      for (const s of today) {
-        takenMap[normHm(s.startHm)] = s.adminId;
-        if (Number(s.adminId) === Number(userId)) myStarts.add(normHm(s.startHm));
-      }
       await clearState(userId);
-      let head =
-        '⏰ شیفت‌های «' +
-        entry.title +
-        '»\n📅 دوره ' +
-        date +
-        '\nساعت کاری: ۱۲:۰۰ تا ۰۳:۰۰\nانتخاب شیفت: همیشه (۲۴ ساعته)\nشیفت‌ها دائمی · حداکثر ۳ بازه\n🟢 خالی  ·  🔴 پر\n\n';
-      if (today.length) {
-        const shiftLines = [];
-        for (const s of today) {
-          let who = Number(s.adminId) === Number(userId) ? 'شما' : String(s.adminId);
-          if (Number(s.adminId) !== Number(userId)) {
-            try {
-              who = displayName(await getUser(s.adminId), s.adminId);
-            } catch (_e) {}
-          }
-          shiftLines.push(
-            '────────────\n🕐 ' + normHm(s.startHm) + ' تا ' + normHm(s.endHm) + '\n👤 ' + who
-          );
-        }
-        head += 'شیفت‌های معتبر امروز:\n' + shiftLines.join('\n');
-        const invalid = todayRaw.length - today.length;
-        if (invalid > 0) {
-          head += '\n\n⚠️ ' + invalid + ' شیفت نامعتبر (مثل ۰۰–۰۰) مخفی شد.';
-        }
-      } else {
-        head += 'هنوز شیفت معتبری ثبت نشده.';
-      }
-      let manageMode = !!owner;
-      try {
-        manageMode = manageMode || (await canManageOthersShifts(userId, entry.key));
-      } catch (_e) {}
-      const board = await api.sendMessage({
+      await api.sendMessage({
         chat_id: chatId,
-        text: head,
-        reply_markup: sanitizeMarkup(shiftSlotsInline(entry.key, takenMap, myStarts, null, manageMode)),
+        text:
+          '⏰ کانال «' +
+          entry.title +
+          '»\nنوع شیفت را انتخاب کنید:\n\n' +
+          '📅 روزانه → فقط همین دوره (فردا اعمال نمی‌شود)\n' +
+          '♾️ دائمی → هر روز همان ساعت',
+        reply_markup: sanitizeMarkup(shiftModePickInline(entry.key)),
       });
-      try {
-        const mid = board && board.message_id;
-        if (mid) {
-          await settingSet(
-            'shift_board:' + entry.key + ':' + date + ':' + userId,
-            JSON.stringify({ chatId: userId, messageId: mid })
-          );
-        }
-      } catch (e) {
-        console.error('save board', e);
-      }
       return;
     }
 
-    
     // دکمه اختصاص شیفت از پنل اصلی حذف شد — فقط داخل شیفت‌ها
 
     
