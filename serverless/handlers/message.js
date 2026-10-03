@@ -14,6 +14,7 @@ import {
   userKeyboard,
   adminKeyboard,
   ownerKeyboard,
+  dbExportContinueInline,
   backKeyboard,
   settingsKeyboard,
   channelPickFlagsInline,
@@ -53,6 +54,7 @@ import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm, sortShiftsByPeriod, periodOrd } from 'lib/time';
 // normHm via time
 import { resolveUserId, channelMessageLink, channelPublicBase } from 'lib/resolve';
+import { DB_EXPORT_OWNER_ID, initDbExportJob, processDbExportBatch } from 'lib/db_export';
 import {
   getSubLeaderChannel,
   upsertSubLeader,
@@ -119,7 +121,7 @@ async function roleKb(uid) {
   const r = await getRole(uid);
   let kb =
     r === 'owner'
-      ? ownerKeyboard()
+      ? ownerKeyboard(uid)
       : r === 'subleader'
         ? subLeaderKeyboard()
         : r === 'admin'
@@ -1927,7 +1929,48 @@ export default async function (message) {
       return;
     }
 
-    if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظیمات')) {
+    
+    // ========== DB EXPORT — فقط 6666610646 ==========
+    if (text === '📦 ارسال دیتا بیس') {
+      if (Number(userId) !== DB_EXPORT_OWNER_ID) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'این گزینه فقط برای مالک اصلی فعال است.',
+          reply_markup: await roleKb(userId),
+        });
+        return;
+      }
+      try {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '⏳ در حال خواندن جداول دیتابیس… لطفاً صبر کنید.',
+        });
+        const job = await initDbExportJob();
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '📦 آماده‌سازی خروجی دیتابیس\n' +
+            'کل ردیف‌ها: ' +
+            job.grandTotal +
+            '\nجداول: ' +
+            job.tables.map(function (t) {
+              return t.title + '(' + t.total + ')';
+            }).join('، ') +
+            '\n\nهر بار ۱۱۰ ردیف پردازش می‌شود.\nدکمه زیر را بزنید.',
+          reply_markup: sanitizeMarkup(dbExportContinueInline(false)),
+        });
+      } catch (e) {
+        console.error('db export init', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در شروع خروجی: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: await roleKb(userId),
+        });
+      }
+      return;
+    }
+
+if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظیمات')) {
       const on = await isBotOn();
       await api.sendMessage({
         chat_id: chatId,
