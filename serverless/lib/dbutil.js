@@ -1010,6 +1010,20 @@ export async function decideMessage(adminId, id, decision, reason) {
     return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
   }
 
+  // حالت تب: تأیید و انتشار ممنوع (رد همچنان مجاز)
+  if (decision === 'approve') {
+    try {
+      const ck = String((row.channelKey ?? row.channel_key) || '');
+      if (ck && (await isChannelAdMode(ck))) {
+        return {
+          ok: false,
+          code: 'ad_mode',
+          text: '📢 کانال در حالت تب است؛ فعلاً نمی‌توان پیام را تأیید و منتشر کرد.',
+        };
+      }
+    } catch (_e) {}
+  }
+
   const access = await checkReviewAccess(adminId, row);
   if (!access.ok) return access;
 
