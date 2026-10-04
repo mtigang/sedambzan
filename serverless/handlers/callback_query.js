@@ -268,10 +268,12 @@ export default async function (cq) {
         }
       }
       const conf = DEFAULT_CHANNELS[channelKey];
+      const prefixName =
+        (conf.prefixes && conf.prefixes[0]) || conf.title || channelKey;
       const html =
         '<b>سلام خانومیای خوشگل و نانازی 🎀</b>\n\n' +
         'با رعایت قوانین پیام های خودتونو ارسال کنید\n\n' +
-        '<blockquote>1. پیامتون با صدام بزن شروع بشه</blockquote>\n' +
+        '<blockquote>1. پیامتون با ' + prefixName + ' شروع بشه</blockquote>\n' +
         '<blockquote>2. پیام خودتون رو برجسته کنید</blockquote>\n' +
         '<blockquote>3. با یک فاصله از متن نقطه بذارید.</blockquote>\n' +
         '<blockquote>4. محتوای پیامتون فحش و هیت و تکراری نباشه !</blockquote>\n\n' +
