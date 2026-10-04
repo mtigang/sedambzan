@@ -145,12 +145,8 @@ export function validateAndFix(message) {
     return { ok: false, error: '🚫 ایموجی در پیام مجاز نیست.' };
   }
 
-  // نقطه آخر (فارسی . و انگلیسی .)
-  if (!/[.]\s*$/.test(text)) {
-    text = text.replace(/\s*$/, '') + ' .';
-  } else if (/[.]\s*$/.test(text) && !/\s[.]\s*$/.test(text)) {
-    text = text.replace(/[.]\s*$/, ' .');
-  }
+  // نقطه آخر: دقیقاً یک فاصله قبل از نقطه — فاصله‌های اضافه حذف
+  text = text.replace(/\s*[.]\s*$/, '').replace(/\s+$/, '') + ' .';
 
   // متن ذخیره‌شده: پیشوند استاندارد کانال + بقیه متن نرمال‌شده
   const rest = text.slice(normalizeForPrefix(ch.prefix).length).replace(/^\s+/, ' ');
