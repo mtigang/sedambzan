@@ -277,6 +277,55 @@ export default async function (message) {
       return;
     }
 
+
+    // ——— مالک: دریافت متن/مدیا برای ارسال به کانال (اولویت بالا) ———
+    if (owner && state && state.kind === 'post_text') {
+      const hasContent =
+        !!(text && String(text).trim()) ||
+        !!(message.photo || message.video || message.voice || message.audio ||
+          message.document || message.video_note || message.sticker);
+      if (!hasContent) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'متن یا مدیا بفرستید، یا ◀️ بازگشت.',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+        return;
+      }
+      const media = extractMedia(message);
+      const chKey = String(state.channelKey || '');
+      await setState(userId, 'post_confirm', {
+        channelKey: chKey,
+        postText: text || message.caption || '',
+        media: media,
+        fromChatId: chatId,
+        fromMsgId: message.message_id,
+      });
+      const preview =
+        media && media.type
+          ? '[' + media.type + '] ' + (text || message.caption || '')
+          : text || '(مدیا)';
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          'ارسال به «' +
+          ((DEFAULT_CHANNELS[chKey] && DEFAULT_CHANNELS[chKey].title) || chKey) +
+          '»:\n\n' +
+          String(preview).slice(0, 3500) +
+          '\n\nتأیید می‌کنید؟',
+        reply_markup: sanitizeMarkup({
+          inline_keyboard: [
+            [
+              { text: '✅ تأیید ارسال', callback_data: 'post_yes', style: 'success' },
+              { text: '❌ انصراف', callback_data: 'post_no', style: 'danger' },
+            ],
+          ],
+        }),
+      });
+      return;
+    }
+
+
     // ========== USER ==========
     if (text === '📝 ارسال پیام') {
       if (!(await isBotOn()) && !owner) {
@@ -1138,38 +1187,7 @@ export default async function (message) {
       return;
     }
 
-    if (owner && state?.kind === 'post_text' && (text || message.photo || message.video || message.voice || message.audio || message.document || message.video_note || message.sticker)) {
-      const media = extractMedia(message);
-      await setState(userId, 'post_confirm', {
-        channelKey: state.channelKey,
-        postText: text || message.caption || '',
-        media: media,
-        fromChatId: chatId,
-        fromMsgId: message.message_id,
-      });
-      const preview =
-        media && media.type
-          ? '[' + media.type + '] ' + (text || message.caption || '')
-          : text || '';
-      await api.sendMessage({
-        chat_id: chatId,
-        text:
-          'ارسال به «' +
-          (DEFAULT_CHANNELS[state.channelKey]?.title || state.channelKey) +
-          '»:\n\n' +
-          (preview || '(مدیا)') +
-          '\n\nتأیید می‌کنید؟',
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '✅ تأیید ارسال', callback_data: 'post_yes' },
-              { text: '❌ انصراف', callback_data: 'post_no' },
-            ],
-          ],
-        },
-      });
-      return;
-    }
+
 
     // ========== OWNER: stats / feedback / search / announce / settings ==========
 
