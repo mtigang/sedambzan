@@ -26,6 +26,7 @@ import {
   pruneReviewBatchToPending,
   clearReviewBatch,
   checkReviewAccess,
+  activeShiftChannelKeys,
   canManageOthersShifts,
   createReviewBatch,
   sendReviewBatch,
@@ -78,6 +79,7 @@ import {
   postChannelInline,
   sendDestInline,
   confirmPostInline,
+  activeShiftChannelsInline,
 } from 'lib/keyboards';
 
 async function refreshAllShiftBoards(channelKey, date) {
@@ -243,6 +245,123 @@ export default async function (cq) {
       }
       return;
     }
+
+    
+    // فراخوان قوانین در کانال + سنجاق
+    if (data.startsWith('callout:')) {
+      const channelKey = data.split(':')[1];
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      if (!channelKey || !DEFAULT_CHANNELS[channelKey]) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
+        return;
+      }
+      // فقط اگر همین الان شیفت فعال دارد (مالک آزاد)
+      if (!isOwner(userId)) {
+        const keys = await activeShiftChannelKeys(userId);
+        if (!keys.includes(channelKey)) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'الان شیفت این کانال را ندارید',
+            show_alert: true,
+          });
+          return;
+        }
+      }
+      const conf = DEFAULT_CHANNELS[channelKey];
+      const html =
+        '<b>سلام خانومیای خوشگل و نانازی 🎀</b>\n\n' +
+        'با رعایت قوانین پیام های خودتونو ارسال کنید\n\n' +
+        '<blockquote>1. پیامتون با صدام بزن شروع بشه</blockquote>\n' +
+        '<blockquote>2. پیام خودتون رو برجسته کنید</blockquote>\n' +
+        '<blockquote>3. با یک فاصله از متن نقطه بذارید.</blockquote>\n' +
+        '<blockquote>4. محتوای پیامتون فحش و هیت و تکراری نباشه !</blockquote>\n\n' +
+        'ایدی ربات :\n\n@Arail_bot';
+      try {
+        const sent = await api.sendMessage({
+          chat_id: conf.chatId,
+          text: html,
+          parse_mode: 'HTML',
+        });
+        let pinned = false;
+        try {
+          await api.pinChatMessage({
+            chat_id: conf.chatId,
+            message_id: sent.message_id,
+            disable_notification: true,
+          });
+          pinned = true;
+        } catch (_pin) {
+          pinned = false;
+        }
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text:
+              '✅ فراخوان در «' +
+              conf.title +
+              '» ارسال شد.' +
+              (pinned ? '\n📌 سنجاق شد.' : '\n⚠️ سنجاق ممکن نبود (دسترسی پین ندارید).'),
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text:
+              '✅ فراخوان ارسال شد.' +
+              (pinned ? ' 📌 سنجاق شد.' : ' (بدون سنجاق)'),
+          });
+        }
+      } catch (e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '❌ ارسال ناموفق: ' + (e.description || e.message || e),
+        });
+      }
+      return;
+    }
+
+    if (data === 'callout_cancel') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: 'لغو شد.',
+        });
+      } catch (_e) {}
+      return;
+    }
+
+    if (data.startsWith('edit_msg:')) {
+      const id = Number(data.split(':')[1]);
+      try { await api.answerCallbackQuery({ callback_query_id: cq.id }); } catch (_e) {}
+      const rows = (await db.select().from(messages).where(eq(messages.id, id)).all()) || [];
+      const row = rows[0];
+      if (!row || String(row.status) !== 'pending') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دیگر در انتظار نیست', show_alert: true });
+        return;
+      }
+      if (!isOwner(userId)) {
+        const acc = await checkReviewAccess(userId, row);
+        if (!acc.ok) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: acc.text || 'دسترسی ندارید', show_alert: true });
+          return;
+        }
+      }
+      await setState(userId, 'edit_msg', { msgId: id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '✏️ متن ویرایش‌شده را برای پیام #' +
+          id +
+          ' بفرستید:\n\nمتن فعلی:\n' +
+          String(row.content || '').slice(0, 1500) +
+          '\n\nبعد از ارسال، مستقیم در کانال منتشر می‌شود.',
+        reply_markup: sanitizeMarkup({ keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true }),
+      });
+      return;
+    }
+
 
     if (data.startsWith('approve:')) {
       const id = Number(data.split(':')[1]);
