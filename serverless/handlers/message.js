@@ -101,6 +101,7 @@ import {
   finishReviewBatchIfComplete,
   testChannels,
   displayName,
+  formatReviewerLabel,
   settingGet,
 } from 'lib/dbutil';
 
@@ -1264,7 +1265,7 @@ export default async function (message) {
 
     if (role === 'subleader' && state?.kind === 'sl_search_msg' && text) {
       const myCh = await getActiveSubLeaderChannel(userId);
-      await clearState(userId);
+      // state نگه داشته می‌شود برای جستجوی بعدی
       let id = null;
       const linkM = text.match(/t\.me\/[^/]+\/(\d+)/) || text.match(/t\.me\/c\/\d+\/(\d+)/);
       if (linkM) {
@@ -1292,10 +1293,13 @@ export default async function (message) {
         });
         return;
       }
-      let reviewer = '—';
+      let reviewer = '— (هنوز بررسی نشده)';
       if (row.reviewedBy) {
-        try { reviewer = displayName(await getUser(row.reviewedBy), row.reviewedBy) + ' (' + row.reviewedBy + ')'; }
-        catch (_e) { reviewer = String(row.reviewedBy); }
+        try {
+          reviewer = formatReviewerLabel(await getUser(row.reviewedBy), row.reviewedBy);
+        } catch (_e) {
+          reviewer = String(row.reviewedBy);
+        }
       }
       const body =
         '#' +
@@ -1724,7 +1728,7 @@ export default async function (message) {
       if (linkMatch) {
         const uname = linkMatch[1];
         const mid = Number(linkMatch[2]);
-        const nameMap = { callmearail: 'sadambazan', inkarbariral: 'inkarbar' };
+        const nameMap = { callmearail: 'sadambazan', inkarbariral: 'inkarbar', arialcuple: 'zendegi' };
         const key = nameMap[String(uname).toLowerCase()] || null;
         if (key && mid) {
           try {
@@ -1774,8 +1778,7 @@ export default async function (message) {
       let reviewerLabel = '';
       if (row.reviewedBy) {
         try {
-          const ru = await getUser(row.reviewedBy);
-          reviewerLabel = displayName(ru, row.reviewedBy) + ' | ' + row.reviewedBy;
+          reviewerLabel = formatReviewerLabel(await getUser(row.reviewedBy), row.reviewedBy);
         } catch (_e) {
           reviewerLabel = String(row.reviewedBy);
         }
