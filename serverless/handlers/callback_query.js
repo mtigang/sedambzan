@@ -907,7 +907,7 @@ if (data.startsWith('reject_menu:')) {
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پردازش…' });
       try {
         const res = await processDbExportBatch();
-        if (res.status === 'complete' && res.xml) {
+        if (res.status === 'complete' && res.files && res.files.length) {
           try {
             await api.editMessageText({
               chat_id: cq.message.chat.id,
@@ -916,42 +916,101 @@ if (data.startsWith('reject_menu:')) {
               reply_markup: sanitizeMarkup(dbExportContinueInline(true)),
             });
           } catch (_e) {}
-          // ارسال فایل
-          const fname = 'aral_database_full.xls';
-          let sent = false;
-          try {
-            await api.sendDocument({
-              chat_id: cq.message.chat.id,
-              document: res.xml,
-              caption: '📦 بکاپ کامل دیتابیس آرال (Excel XML)\nبا Excel یا LibreOffice باز کنید.',
-            });
-            sent = true;
-          } catch (e1) {
-            console.error('sendDocument raw', e1);
+
+          async function sendOneFile(filename, content, caption) {
+            const bytes =
+              typeof TextEncoder !== 'undefined'
+                ? new TextEncoder().encode(content)
+                : content;
+            const attempts = [
+              async function () {
+                await api.sendDocument({
+                  chat_id: cq.message.chat.id,
+                  document: bytes,
+                  caption: caption,
+                });
+              },
+              async function () {
+                await api.sendDocument({
+                  chat_id: cq.message.chat.id,
+                  document: content,
+                  caption: caption,
+                });
+              },
+              async function () {
+                await api.sendDocument({
+                  chat_id: cq.message.chat.id,
+                  document: { filename: filename, content: content },
+                  caption: caption,
+                });
+              },
+              async function () {
+                await api.sendDocument({
+                  chat_id: cq.message.chat.id,
+                  document: { filename: filename, bytes: bytes },
+                  caption: caption,
+                });
+              },
+              async function () {
+                if (typeof Blob === 'undefined') throw new Error('no Blob');
+                const blob = new Blob([content], { type: 'text/csv;charset=utf-8' });
+                await api.sendDocument({
+                  chat_id: cq.message.chat.id,
+                  document: blob,
+                  caption: caption,
+                });
+              },
+            ];
+            let lastErr = null;
+            for (const fn of attempts) {
+              try {
+                await fn();
+                return true;
+              } catch (e) {
+                lastErr = e;
+                console.error('sendOneFile try', filename, e && (e.message || e.description || e));
+              }
+            }
+            throw lastErr || new Error('send failed');
+          }
+
+          let ok = 0;
+          let fail = 0;
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: '📤 در حال ارسال ' + res.files.length + ' فایل CSV (هر شیت/جدول جدا)...',
+          });
+          for (let i = 0; i < res.files.length; i++) {
+            const f = res.files[i];
+            const cap =
+              '📦 ' +
+              f.filename +
+              ' (' +
+              (i + 1) +
+              '/' +
+              res.files.length +
+              ')\nبکاپ دیتابیس آرال — با Excel باز کنید';
             try {
-              await api.sendDocument({
+              await sendOneFile(f.filename, f.content, cap);
+              ok += 1;
+            } catch (e) {
+              fail += 1;
+              console.error('file fail', f.filename, e);
+              await api.sendMessage({
                 chat_id: cq.message.chat.id,
-                document: { filename: fname, content: res.xml },
-                caption: '📦 بکاپ کامل دیتابیس آرال',
+                text:
+                  '⚠️ ارسال ناموفق: ' +
+                  f.filename +
+                  '\n' +
+                  (e && (e.description || e.message) ? e.description || e.message : String(e)),
               });
-              sent = true;
-            } catch (e2) {
-              console.error('sendDocument obj', e2);
             }
           }
-          if (!sent) {
-            // fallback: چند پیام متنی از متادیتا
-            await api.sendMessage({
-              chat_id: cq.message.chat.id,
-              text:
-                '⚠️ ارسال فایل پشتیبانی نشد.\nحجم XML: ' +
-                res.xml.length +
-                ' کاراکتر.\nاز طریق CLI یا نسخه بعدی فایل را بگیرید.\n' +
-                (res.text || ''),
-            });
-          } else {
-            await clearDbExportJob();
-          }
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: '✅ ارسال تمام شد. موفق: ' + ok + ' | ناموفق: ' + fail,
+          });
+          if (ok > 0) await clearDbExportJob();
           return;
         }
         try {
