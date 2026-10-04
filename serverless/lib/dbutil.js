@@ -102,12 +102,14 @@ export async function settingGet(key, def = null) {
 }
 
 export async function settingSet(key, value) {
+  const v = String(value);
   try {
-    const rows = await db.select().from(settings).where(eq(settings.key, key)).all();
-    if (rows?.length) {
-      await db.update(settings).set({ value: String(value) }).where(eq(settings.key, key)).run();
-    } else {
-      await db.insert(settings).values({ key, value: String(value) }).run();
+    // اول insert؛ اگر تکراری بود update — یک رفت‌وبرگشت کمتر در حالت رایج
+    try {
+      await db.insert(settings).values({ key, value: v }).run();
+      return;
+    } catch (_ins) {
+      await db.update(settings).set({ value: v }).where(eq(settings.key, key)).run();
     }
   } catch (e) {
     console.error('settingSet', e);
@@ -716,6 +718,20 @@ async function saveReviewBatch(adminId, batch) {
   } else {
     await db.insert(settings).values({ key, value }).run();
   }
+
+  try {
+    const raw = await settingGet('review_batch_index', '[]');
+    let arr = [];
+    try { arr = JSON.parse(raw || '[]') || []; } catch (_e) { arr = []; }
+    if (!Array.isArray(arr)) arr = [];
+    const aid = Number(adminId);
+    if (!arr.map(Number).includes(aid)) {
+      arr.push(aid);
+      if (arr.length > 500) arr = arr.slice(-500);
+      await settingSet('review_batch_index', JSON.stringify(arr));
+    }
+  } catch (_e) {}
+
 }
 
 /** فقط state Batch را پاک می‌کند؛ هیچ پیامی تغییر نمی‌کند */
@@ -731,10 +747,15 @@ export async function clearReviewBatch(adminId) {
 export async function pruneReviewBatchToPending(adminId) {
   const old = await getReviewBatch(adminId);
   if (!old || !old.ids || !old.ids.length) return { cleared: true, ids: [] };
+  const rows = await Promise.all(
+    old.ids.map(function (id) {
+      return getMessageById(Number(id));
+    })
+  );
   const alive = [];
-  for (const id of old.ids) {
-    const row = await getMessageById(Number(id));
-    if (row && String(row.status) === 'pending') alive.push(Number(id));
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (row && String(row.status) === 'pending') alive.push(Number(old.ids[i]));
   }
   if (!alive.length) {
     await clearReviewBatch(adminId);
@@ -769,31 +790,36 @@ export async function dropMessageFromReviewBatch(adminId, msgId) {
 export async function dropMessageFromAllReviewBatches(msgId) {
   msgId = Number(msgId);
   try {
-    // فقط کلیدهای review_batch — valueهای بزرگ export را لمس نکن در حلقهٔ سنگین
-    const all = (await db.select().from(settings).all()) || [];
-    const tasks = [];
-    for (const row of all) {
-      const key = row && row.key != null ? String(row.key) : '';
-      if (!key.startsWith('review_batch:')) continue;
-      // value خیلی بزرگ = داده خراب/غیرBatch — رد شو
-      if (row.value && String(row.value).length > 5000) continue;
-      let b;
-      try {
-        b = JSON.parse(row.value || '');
-      } catch (_e) {
-        continue;
-      }
-      if (!b || !Array.isArray(b.ids)) continue;
-      const next = b.ids.map(Number).filter(function (id) { return id !== msgId; });
-      if (next.length === b.ids.length) continue;
-      const adminId = key.replace('review_batch:', '');
-      if (!next.length) tasks.push(clearReviewBatch(adminId));
-      else {
-        b.ids = next;
-        tasks.push(saveReviewBatch(adminId, b));
-      }
+    // ایندکس سبک به‌جای اسکن کل settings (شامل exportهای چندمگابایتی)
+    let adminIds = [];
+    try {
+      const raw = await settingGet('review_batch_index', '[]');
+      adminIds = JSON.parse(raw || '[]') || [];
+      if (!Array.isArray(adminIds)) adminIds = [];
+    } catch (_e) {
+      adminIds = [];
     }
-    if (tasks.length) await Promise.all(tasks);
+    // اگر ایندکس خالی بود، فقط کلیدهای review_batch را از لیست فیلتر کن ولی value بزرگ را نخوان
+    if (!adminIds.length) {
+      try {
+        const all = (await db.select().from(settings).all()) || [];
+        for (const row of all) {
+          const key = row && row.key != null ? String(row.key) : '';
+          if (!key.startsWith('review_batch:')) continue;
+          const aid = Number(key.slice('review_batch:'.length));
+          if (Number.isFinite(aid)) adminIds.push(aid);
+        }
+        adminIds = Array.from(new Set(adminIds));
+        try {
+          await settingSet('review_batch_index', JSON.stringify(adminIds.slice(0, 500)));
+        } catch (_e) {}
+      } catch (_e) {}
+    }
+    for (const aid of adminIds) {
+      try {
+        await dropMessageFromReviewBatch(aid, msgId);
+      } catch (_e) {}
+    }
   } catch (e) {
     console.error('dropMessageFromAllReviewBatches', e);
   }
@@ -821,14 +847,15 @@ export async function isReviewBatchComplete(adminId) {
   const batch = await getReviewBatch(adminId);
   if (!batch || !batch.ids || !batch.ids.length) return true;
   const rows = await Promise.all(batch.ids.map(function (id) { return getMessageById(Number(id)); }));
-  for (const row of rows) {
-    if (row && String(row.status) === 'pending') return false;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i] && String(rows[i].status) === 'pending') return false;
   }
   return true;
 }
 
 /** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول */
 async function selectReviewablePending(adminId) {
+  return memo('srp:' + Number(adminId), async function () {
   let allMsg = [];
   try {
     allMsg = (await db.select().from(messages).all()) || [];
@@ -859,6 +886,7 @@ async function selectReviewablePending(adminId) {
   for (const k of allowList) allowed[String(k)] = true;
   return pending.filter(function (m) {
     return !!allowed[msgCh(m)];
+  });
   });
 }
 
@@ -1051,7 +1079,6 @@ export async function decideMessage(adminId, id, decision, reason) {
     return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
   }
 
-  // اگر از مسیر approve رزرو publishing شده، access قبلاً چک شده — دوباره نرو
   const alreadyReserved = st0 === 'publishing';
   if (!alreadyReserved && decision === 'approve') {
     try {
@@ -1069,6 +1096,24 @@ export async function decideMessage(adminId, id, decision, reason) {
   if (!alreadyReserved) {
     const access = await checkReviewAccess(adminId, row);
     if (!access.ok) return access;
+  }
+
+  // مسیر سریع: از قبل publishing رزرو شده — بدون قفل و بدون خواندن دوباره
+  if (alreadyReserved && decision === 'approve') {
+    const patch = {
+      status: 'approved',
+      reviewedBy: Number(adminId),
+      reviewedAt: new Date(),
+    };
+    await db.update(messages).set(patch).where(eq(messages.id, id)).run();
+    // فقط Batch خود ادمین فوری؛ بقیه در پس‌زمینه
+    try {
+      await dropMessageFromReviewBatch(adminId, id);
+    } catch (_e) {}
+    try {
+      dropMessageFromAllReviewBatches(id).catch(function () {});
+    } catch (_e) {}
+    return { ok: true, row: row };
   }
 
   const lockKey = 'review_msg_lock:' + id;
@@ -1089,10 +1134,12 @@ export async function decideMessage(adminId, id, decision, reason) {
             reviewedBy: Number(adminId),
             reviewedAt: new Date(),
           };
-    // از pending یا publishing نهایی کن
     await db.update(messages).set(patch).where(eq(messages.id, id)).run();
     try {
-      await dropMessageFromAllReviewBatches(id);
+      await dropMessageFromReviewBatch(adminId, id);
+    } catch (_e) {}
+    try {
+      dropMessageFromAllReviewBatches(id).catch(function () {});
     } catch (_e) {}
     return { ok: true, row: fresh };
   } finally {
