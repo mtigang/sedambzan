@@ -11,40 +11,42 @@ import {
 import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf, periodOrd } from 'lib/time';
 import { reviewInline, sanitizeMarkup } from 'lib/keyboards';
 
+const __reqMemo = Object.create(null);
+function memo(key, fn) {
+  if (Object.prototype.hasOwnProperty.call(__reqMemo, key)) return __reqMemo[key];
+  const p = fn();
+  __reqMemo[key] = p;
+  return p;
+}
+
+let _channelsSeededAt = 0;
 export async function ensureChannelsSeeded() {
   try {
-    // فقط در صورت نبود ردیف، seed کن — enabled/work را overwrite نکن
+    // هر ۶ ساعت یک‌بار کافی است — هر پیام ۳ آپدیت نزن
+    if (_channelsSeededAt && Date.now() - _channelsSeededAt < 6 * 3600 * 1000) {
+      return Object.values(DEFAULT_CHANNELS);
+    }
     for (const c of Object.values(DEFAULT_CHANNELS)) {
       try {
         const exist = await db.select().from(channels).where(eq(channels.key, c.key)).all();
-        if (exist?.length) {
-          // فقط title/link ثابت؛ enabled دست‌نخورده بماند
-          await db
-            .update(channels)
-            .set({
-              title: c.title,
-              link: String(c.chatId),
-            })
-            .where(eq(channels.key, c.key))
-            .run();
-        } else {
-          await db
-            .insert(channels)
-            .values({
-              key: c.key,
-              title: c.title,
-              link: String(c.chatId),
-              enabled: 1,
-              workStart: c.workStart || '12:00',
-              workEnd: c.workEnd || '03:00',
-            })
-            .run();
-        }
+        if (exist && exist.length) continue; // موجود است — دست نزن
+        await db
+          .insert(channels)
+          .values({
+            key: c.key,
+            title: c.title,
+            link: String(c.chatId),
+            enabled: 1,
+            workStart: c.workStart || '12:00',
+            workEnd: c.workEnd || '03:00',
+          })
+          .run();
       } catch (e) {
         console.error('seed', c.key, e);
       }
     }
-    return (await db.select().from(channels).all()) || [];
+    _channelsSeededAt = Date.now();
+    return Object.values(DEFAULT_CHANNELS);
   } catch (e) {
     console.error('ensureChannelsSeeded', e);
     return Object.values(DEFAULT_CHANNELS).map((c) => ({
@@ -583,10 +585,11 @@ export async function canManageOthersShifts(userId, channelKey) {
 }
 
 export async function activeShiftChannelKeys(adminId) {
+  const uid = Number(adminId);
+  return memo('ask:' + uid, async function () {
   try {
     const now = tehranNow();
     const pdate = periodDateStr(now);
-    const uid = Number(adminId);
     // select-all مقاوم به mismatch نوع
     const all = (await db.select().from(shifts).all()) || [];
     const rows = all.filter(function (s) {
@@ -606,6 +609,7 @@ export async function activeShiftChannelKeys(adminId) {
     console.error('activeShiftChannelKeys', e);
     return [];
   }
+  });
 }
 
 /** مالک همیشه true. ادمین: شیفت فعال (اختیاری: برای کانال مشخص) */
@@ -744,12 +748,35 @@ export async function pruneReviewBatchToPending(adminId) {
 }
 
 /** بعد از approve/reject/flush این id را از Batch همه ادمین‌ها بردار */
+/** فقط Batch همین ادمین — سریع */
+export async function dropMessageFromReviewBatch(adminId, msgId) {
+  msgId = Number(msgId);
+  try {
+    const old = await getReviewBatch(adminId);
+    if (!old || !Array.isArray(old.ids)) return;
+    const next = old.ids.map(Number).filter(function (id) { return id !== msgId; });
+    if (next.length === old.ids.length) return;
+    if (!next.length) await clearReviewBatch(adminId);
+    else {
+      old.ids = next;
+      await saveReviewBatch(adminId, old);
+    }
+  } catch (e) {
+    console.error('dropMessageFromReviewBatch', e);
+  }
+}
+
 export async function dropMessageFromAllReviewBatches(msgId) {
   msgId = Number(msgId);
   try {
+    // فقط کلیدهای review_batch — valueهای بزرگ export را لمس نکن در حلقهٔ سنگین
     const all = (await db.select().from(settings).all()) || [];
+    const tasks = [];
     for (const row of all) {
-      if (!row.key || !String(row.key).startsWith('review_batch:')) continue;
+      const key = row && row.key != null ? String(row.key) : '';
+      if (!key.startsWith('review_batch:')) continue;
+      // value خیلی بزرگ = داده خراب/غیرBatch — رد شو
+      if (row.value && String(row.value).length > 5000) continue;
       let b;
       try {
         b = JSON.parse(row.value || '');
@@ -757,15 +784,16 @@ export async function dropMessageFromAllReviewBatches(msgId) {
         continue;
       }
       if (!b || !Array.isArray(b.ids)) continue;
-      const next = b.ids.map(Number).filter((id) => id !== msgId);
+      const next = b.ids.map(Number).filter(function (id) { return id !== msgId; });
       if (next.length === b.ids.length) continue;
-      const adminId = String(row.key).replace('review_batch:', '');
-      if (!next.length) await clearReviewBatch(adminId);
+      const adminId = key.replace('review_batch:', '');
+      if (!next.length) tasks.push(clearReviewBatch(adminId));
       else {
         b.ids = next;
-        await saveReviewBatch(adminId, b);
+        tasks.push(saveReviewBatch(adminId, b));
       }
     }
+    if (tasks.length) await Promise.all(tasks);
   } catch (e) {
     console.error('dropMessageFromAllReviewBatches', e);
   }
@@ -790,10 +818,10 @@ export async function getReviewBatchMessages(adminId) {
 
 /** Batch کامل است اگر هیچ‌کدام از IDها دیگر pending نباشد (بدون Batch = کامل) */
 export async function isReviewBatchComplete(adminId) {
-  const b = await getReviewBatch(adminId);
-  if (!b || !b.ids || !b.ids.length) return true;
-  for (const id of b.ids) {
-    const row = await getMessageById(Number(id));
+  const batch = await getReviewBatch(adminId);
+  if (!batch || !batch.ids || !batch.ids.length) return true;
+  const rows = await Promise.all(batch.ids.map(function (id) { return getMessageById(Number(id)); }));
+  for (const row of rows) {
     if (row && String(row.status) === 'pending') return false;
   }
   return true;
@@ -840,21 +868,21 @@ export async function finishReviewBatchIfComplete(adminId, messageId) {
   try {
     const batch = await getReviewBatch(adminId);
     if (!batch) {
-      // Batch قبلاً پاک شده — ممکن است hasMore هنوز باشد
-      const hasMore = (await selectReviewablePending(adminId)).length > 0;
-      return { inBatch: false, complete: true, hasMore, batch: null };
+      // بدون اسکن کامل صف — hasMore را true فرض کن تا دکمه Batch بعدی بماند
+      return { inBatch: false, complete: true, hasMore: true, batch: null };
     }
-    // حتی اگر messageId دیگر در لیست نباشد (drop شده)، وضعیت کامل بودن را چک کن
-    const inBatch =
-      messageId == null || batch.ids.map(Number).includes(Number(messageId));
+    const ids = (batch.ids || []).map(Number);
+    const inBatch = messageId == null || ids.includes(Number(messageId));
+    // سریع: فقط اگر همه idها از لیست رفته‌اند complete است (بعد از drop)
+    // isReviewBatchComplete همچنان دقیق است ولی سبک‌تر از selectReviewablePending
     const complete = await isReviewBatchComplete(adminId);
     let hasMore = false;
     if (complete) {
-      hasMore = (await selectReviewablePending(adminId)).length > 0;
-      // آزاد کردن Batch تا گیر نکند — شماره Batch را برای دکمه نگه می‌داریم
       try {
         await clearReviewBatch(adminId);
       } catch (_e) {}
+      // اسکن کامل صف را نکن — دکمه «Batch بعدی» را نشان بده؛ اگر خالی باشد بعداً empty می‌گوید
+      hasMore = true;
     }
     return { inBatch: inBatch || complete, complete, hasMore, batch };
   } catch (e) {
@@ -1023,8 +1051,9 @@ export async function decideMessage(adminId, id, decision, reason) {
     return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
   }
 
-  // حالت تب: تأیید و انتشار ممنوع (رد همچنان مجاز)
-  if (decision === 'approve') {
+  // اگر از مسیر approve رزرو publishing شده، access قبلاً چک شده — دوباره نرو
+  const alreadyReserved = st0 === 'publishing';
+  if (!alreadyReserved && decision === 'approve') {
     try {
       const ck = String((row.channelKey ?? row.channel_key) || '');
       if (ck && (await isChannelAdMode(ck))) {
@@ -1037,8 +1066,10 @@ export async function decideMessage(adminId, id, decision, reason) {
     } catch (_e) {}
   }
 
-  const access = await checkReviewAccess(adminId, row);
-  if (!access.ok) return access;
+  if (!alreadyReserved) {
+    const access = await checkReviewAccess(adminId, row);
+    if (!access.ok) return access;
+  }
 
   const lockKey = 'review_msg_lock:' + id;
   const lock = await acquireLock(lockKey);
