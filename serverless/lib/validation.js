@@ -33,14 +33,12 @@ function hasLink(entities, text) {
 
 function hasEmoji(text) {
   if (!text) return false;
-  // بدون flag u برای سازگاری بیشتر — بازه‌های surrogate
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
     if (c >= 0xd800 && c <= 0xdbff) {
       const c2 = text.charCodeAt(i + 1);
       if (c2 >= 0xdc00 && c2 <= 0xdfff) {
         const cp = ((c - 0xd800) << 10) + (c2 - 0xdc00) + 0x10000;
-        // emoji ranges rough
         if (
           (cp >= 0x1f300 && cp <= 0x1faff) ||
           (cp >= 0x1f600 && cp <= 0x1f64f) ||
@@ -52,17 +50,36 @@ function hasEmoji(text) {
       }
     }
   }
-  // misc symbols
   if (/[\u2600-\u27BF]/.test(text)) return true;
   return false;
 }
 
+/**
+ * نرمال‌سازی برای تشخیص پیشوند:
+ * - حذف کاراکترهای نامرئی / RTL / LTR / BOM
+ * - یکسان‌سازی ی/ک عربی و فارسی
+ * - یکسان‌سازی فاصله‌ها
+ */
+export function normalizeForPrefix(text) {
+  let t = String(text || '');
+  // BOM, zero-width, directional marks, soft hyphen
+  t = t.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF\u00AD]/g, '');
+  // انواع فاصله → space معمولی
+  t = t.replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ');
+  // ی عربی → ی فارسی ، ك عربی → ک فارسی
+  t = t.replace(/\u064A/g, '\u06CC').replace(/\u0643/g, '\u06A9');
+  // فاصله‌های تکراری
+  t = t.replace(/[ \t]+/g, ' ');
+  return t.trim();
+}
+
 /** بدنه پیام بعد از پیشوند تا قبل از نقطه پایانی — برای تشخیص تکراری */
 export function normalizeBody(text) {
-  let t = String(text || '').trim();
+  let t = normalizeForPrefix(text);
   for (const { prefix } of CHANNEL_PREFIXES) {
-    if (t.startsWith(prefix)) {
-      t = t.slice(prefix.length);
+    const p = normalizeForPrefix(prefix);
+    if (t.startsWith(p)) {
+      t = t.slice(p.length);
       break;
     }
   }
@@ -72,39 +89,47 @@ export function normalizeBody(text) {
 
 /**
  * کلید تکراری سخت‌گیرانه:
- * فقط متن بین «پیشوند کانال» و «نقطه پایانی» — بدون فشرده‌سازی فاصله‌های وسط.
- * مثال: صدام بزن | نیلسا چون ... | .
- * فقط اگر همان وسط دقیقاً یکی باشد → تکراری
+ * فقط متن بین «پیشوند کانال» و «نقطه پایانی»
  */
 export function exactBodyKey(text) {
-  let t = String(text || '').trim();
-  // حذف HTML بولد احتمالی
+  let t = normalizeForPrefix(String(text || ''));
   t = t.replace(/<\/?b>/gi, '');
   for (const { prefix } of CHANNEL_PREFIXES) {
-    if (t.startsWith(prefix)) {
-      t = t.slice(prefix.length);
+    const p = normalizeForPrefix(prefix);
+    if (t.startsWith(p)) {
+      t = t.slice(p.length);
       break;
     }
   }
-  // فقط نقطه/فاصله انتهایی
-  t = t.replace(/[\s.．.]+$/u, '');
-  // فقط trim دو سر — فاصله‌های وسط دست نخورند
-  t = t.replace(/^\s+/, '').replace(/\s+$/, '');
+  t = t.replace(/[\s.]+$/g, '').trim();
+  // فاصله ابتدا بعد از پیشوند
+  if (t.startsWith(' ')) t = t.slice(1);
   return t;
 }
 
 export function detectChannel(text) {
-
-  const t = (text || '').trim();
+  const t = normalizeForPrefix(text);
+  if (!t) return null;
   for (const { key, prefix } of CHANNEL_PREFIXES) {
-    if (t.startsWith(prefix)) return { key, prefix };
+    const p = normalizeForPrefix(prefix);
+    if (t.startsWith(p)) {
+      // بعد از پیشوند یا فاصله یا پایان
+      const next = t.charAt(p.length);
+      if (!next || next === ' ' || next === '.' || next === '،' || next === ',') {
+        return { key, prefix };
+      }
+      // اگر بلافاصله حرف چسبیده بود هم قبول (بعضی موبایل‌ها)
+      if (p.length >= 3) return { key, prefix };
+    }
   }
   return null;
 }
 
 export function validateAndFix(message) {
-  let text = (message.text || '').trim();
-  const entities = message.entities || [];
+  // text یا caption
+  let raw = message.text || message.caption || '';
+  let text = normalizeForPrefix(raw);
+  const entities = message.entities || message.caption_entities || [];
   const ch = detectChannel(text);
   if (!ch) {
     return {
@@ -120,18 +145,22 @@ export function validateAndFix(message) {
     return { ok: false, error: '🚫 ایموجی در پیام مجاز نیست.' };
   }
 
-  // نقطه آخر
-  if (!/\s+\.\s*$/.test(text) && !/\.\s*$/.test(text)) {
+  // نقطه آخر (فارسی . و انگلیسی .)
+  if (!/[.]\s*$/.test(text)) {
     text = text.replace(/\s*$/, '') + ' .';
-  } else if (text.endsWith('.') && !/\s\.\s*$/.test(text)) {
-    text = text.replace(/\.\s*$/, ' .');
+  } else if (/[.]\s*$/.test(text) && !/\s[.]\s*$/.test(text)) {
+    text = text.replace(/[.]\s*$/, ' .');
   }
 
-  const wasBold = isFullyBold(message.text || '', entities);
+  // متن ذخیره‌شده: پیشوند استاندارد کانال + بقیه متن نرمال‌شده
+  const rest = text.slice(normalizeForPrefix(ch.prefix).length).replace(/^\s+/, ' ');
+  const content = ch.prefix + (rest.startsWith(' ') || rest.startsWith('.') ? rest : ' ' + rest);
+
+  const wasBold = isFullyBold(raw, entities);
   return {
     ok: true,
     channelKey: ch.key,
-    content: text,
-    autoFixed: !wasBold || text !== (message.text || '').trim(),
+    content: content.trim(),
+    autoFixed: !wasBold || content.trim() !== normalizeForPrefix(raw),
   };
 }
