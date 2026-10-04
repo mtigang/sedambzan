@@ -224,11 +224,24 @@ export async function getUser(id) {
 }
 
 export function displayName(u, id) {
-  if (!u || Number(u.started) !== 1) return String(id);
-  const n = [u.firstName, u.lastName].filter(Boolean).join(' ');
+  if (!u) return String(id);
+  const n = [u.firstName, u.lastName].filter(Boolean).join(' ').trim();
   if (n) return n;
   if (u.username) return '@' + u.username;
   return String(u.userId || id);
+}
+
+/** نام + @یوزرنیم + آیدی — برای نمایش بررسی‌کننده */
+export function formatReviewerLabel(u, id) {
+  const uid = Number(id);
+  if (!u) return String(uid);
+  const name = [u.firstName, u.lastName].filter(Boolean).join(' ').trim();
+  const uname = u.username ? '@' + String(u.username).replace(/^@/, '') : '';
+  const parts = [];
+  if (name) parts.push(name);
+  if (uname) parts.push(uname);
+  if (!parts.length) parts.push('کاربر');
+  return parts.join(' ') + ' | ' + uid;
 }
 
 export async function getRole(id) {
