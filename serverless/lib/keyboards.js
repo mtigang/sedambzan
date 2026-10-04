@@ -483,26 +483,46 @@ export function ownerShiftMenuInline() {
   });
 }
 
-/** دکمه‌های لغو برای لیست شیفت مالک — هر شیفت یک دکمه */
+/** متن دکمه را به String امن تلگرام تبدیل می‌کند */
+function safeBtnLabel(v, maxLen) {
+  maxLen = maxLen || 60;
+  let s = v == null ? '' : String(v);
+  // حذف کاراکترهای کنترل و صفرعرض که گاهی text را خراب می‌کنند
+  s = s.replace(/[\u0000-\u001F\u200B-\u200F\u202A-\u202E\uFEFF]/g, '');
+  s = s.replace(/\s+/g, ' ').trim();
+  if (!s) s = '—';
+  if (s.length > maxLen) s = s.slice(0, maxLen - 1) + '…';
+  return s;
+}
+
+/** دکمه‌های لغو — قرمز، ساعت داخل دکمه، کلیک = لغو کامل */
 export function ownerCancelShiftsInline(shiftRows) {
   const rows = [];
-  const list = (shiftRows || []).slice(0, 40);
+  const list = (shiftRows || []).slice(0, 35);
   for (const s of list) {
-    const title =
-      (s.channelTitle || s.channelKey || '').toString().slice(0, 12);
-    const who = (s.name || String(s.adminId || '')).toString().slice(0, 18);
-    const tm =
-      String(s.startHm || '').slice(0, 5) + '–' + String(s.endHm || '').slice(0, 5);
+    const id = Number(s && s.id);
+    if (!Number.isFinite(id) || id <= 0) continue;
+    const start = safeBtnLabel(s.startHm != null ? s.startHm : '', 5);
+    const end = safeBtnLabel(s.endHm != null ? s.endHm : '', 5);
+    const whoRaw = s.name != null ? s.name : s.adminId != null ? s.adminId : '';
+    const who = safeBtnLabel(whoRaw, 16);
+    // فقط ساعت + نام کوتاه — بدون کاراکتر عجیب
+    const label = safeBtnLabel('❌ ' + start + '-' + end + ' | ' + who, 64);
     rows.push([
       {
-        text: '❌ ' + title + ' | ' + tm + ' | ' + who,
-        callback_data: 'own_sc:' + s.id,
+        text: label,
+        callback_data: 'own_sc:' + String(id),
         style: 'danger',
       },
     ]);
   }
+  if (!rows.length) {
+    return sanitizeMarkup({
+      inline_keyboard: [[{ text: 'بستن', callback_data: 'shift_close', style: 'primary' }]],
+    });
+  }
   rows.push([
-    { text: '🗑 لغو همه', callback_data: 'own_cancel_all', style: 'danger' },
+    { text: '🗑 لغو همه دوره', callback_data: 'own_cancel_all', style: 'danger' },
     { text: 'بستن', callback_data: 'shift_close', style: 'primary' },
   ]);
   return sanitizeMarkup({ inline_keyboard: rows });
