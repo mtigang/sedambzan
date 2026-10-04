@@ -120,7 +120,7 @@ export function adminKeyboard() {
   return sanitizeMarkup({
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '⏰ شیفت من' }],
-      [{ text: '📊 عملکرد من' }],
+      [{ text: '📊 عملکرد من' }, { text: '📌 فراخوان کانال' }],
     ],
     resize_keyboard: true,
   });
@@ -164,7 +164,7 @@ export function subLeaderKeyboard() {
       [{ text: '➕ افزودن ادمین' }, { text: '⏰ شیفت من' }],
       [{ text: '📋 شیفت‌های کانال' }, { text: '🔎 جستجوی پیام' }],
       [{ text: '📊 آمار کانال' }, { text: '📢 اطلاعیه برای ادمین‌ها' }],
-      [{ text: 'ℹ️ اطلاعات کانال' }],
+      [{ text: '📌 فراخوان کانال' }, { text: 'ℹ️ اطلاعات کانال' }],
     ],
     resize_keyboard: true,
   });
@@ -276,6 +276,7 @@ export function ownerReviewInline(id) {
         { text: '✅ تأیید', callback_data: 'approve:' + id, style: 'success' },
         { text: '❌ رد', callback_data: 'reject_direct:' + id, style: 'danger' },
       ],
+      [{ text: '✏️ ویرایش و ارسال', callback_data: 'edit_msg:' + id, style: 'primary' }],
     ],
   });
 }
@@ -286,6 +287,7 @@ export function reviewInline(id, showNext, batchNumber) {
       { text: 'تأیید', callback_data: 'approve:' + id, style: 'success' },
       { text: 'رد', callback_data: 'reject_menu:' + id, style: 'danger' },
     ],
+    [{ text: '✏️ ویرایش و ارسال', callback_data: 'edit_msg:' + id, style: 'primary' }],
   ];
   if (showNext) {
     rows.push([
@@ -721,4 +723,20 @@ export function purgeUserProgressInline(targetId, finished) {
       ],
     ],
   });
+}
+
+/** کانال‌هایی که همین الان شیفت فعال دارند */
+export function activeShiftChannelsInline(channels) {
+  const rows = [];
+  for (const c of channels || []) {
+    rows.push([
+      {
+        text: String('📌 ' + (c.title || c.key || '')),
+        callback_data: 'callout:' + String(c.key || ''),
+        style: 'success',
+      },
+    ]);
+  }
+  rows.push([{ text: 'انصراف', callback_data: 'callout_cancel', style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
