@@ -74,6 +74,9 @@ import {
   reviewTakenInline,
   sanitizeMarkup,
   dbExportContinueInline,
+  postChannelInline,
+  sendDestInline,
+  confirmPostInline,
 } from 'lib/keyboards';
 
 async function refreshAllShiftBoards(channelKey, date) {
@@ -862,18 +865,43 @@ if (data.startsWith('reject_menu:')) {
         return;
       }
       const channelKey = data.split(':')[1];
-      await setState(userId, 'post_text', { channelKey });
+      if (!channelKey || !DEFAULT_CHANNELS[channelKey]) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
+        return;
+      }
+      await setState(userId, 'post_text', { channelKey: String(channelKey) });
       await api.answerCallbackQuery({ callback_query_id: cq.id });
-      await api.sendMessage({
-        chat_id: cq.message.chat.id,
-        text: 'متن برای «' + (DEFAULT_CHANNELS[channelKey]?.title || channelKey) + '»:',
-      });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text:
+            '📢 کانال: «' +
+            (DEFAULT_CHANNELS[channelKey].title || channelKey) +
+            '»\n\nمتن یا مدیا را بفرستید (عکس/ویدیو/ویس هم مجاز است).',
+        });
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text:
+            '📢 کانال: «' +
+            (DEFAULT_CHANNELS[channelKey].title || channelKey) +
+            '»\n\nمتن یا مدیا را بفرستید.',
+        });
+      }
       return;
     }
 
     if (data === 'postch_cancel' || data === 'post_no') {
       await clearState(userId);
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: 'لغو شد.',
+        });
+      } catch (_e) {}
       return;
     }
 
