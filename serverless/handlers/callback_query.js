@@ -289,7 +289,7 @@ export default async function (cq) {
         return;
       }
 
-      // ۱) رزرو اتمیک pending → publishing تا کسی موازی منتشر نکند
+      // ۱) رزرو اتمیک pending → publishing
       try {
         await db
           .update(messages)
@@ -299,16 +299,20 @@ export default async function (cq) {
       } catch (e) {
         console.error('reserve', e);
       }
+      // یک خواندن سبک فقط وقتی لازم؛ در اکثر موارد همان pendingRow کافی است
       {
         const check = (await db.select().from(messages).where(eq(messages.id, id)).all()) || [];
         if (!check[0] || String(check[0].status) !== 'publishing') {
-          await api.answerCallbackQuery({
-            callback_query_id: cq.id,
-            text: 'این پیام توسط شخص دیگری در حال بررسی/انتشار است',
-            show_alert: true,
-          });
+          try {
+            await api.answerCallbackQuery({
+              callback_query_id: cq.id,
+              text: 'این پیام توسط شخص دیگری در حال بررسی/انتشار است',
+              show_alert: true,
+            });
+          } catch (_e) {}
           return;
         }
+        pendingRow.status = 'publishing';
       }
       const conf = DEFAULT_CHANNELS[pendingRow.channelKey];
       if (!conf || !conf.chatId) {
@@ -330,7 +334,13 @@ export default async function (cq) {
         });
         mid = sent && sent.message_id;
         if (!mid) throw new Error('message_id خالی');
-        link = await resolveChannelMessageLink(conf.chatId, mid, pendingRow.channelKey);
+        link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
+        if (!link || link.indexOf('/c/') >= 0) {
+          try {
+            const alt = await resolveChannelMessageLink(conf.chatId, mid, pendingRow.channelKey);
+            if (alt) link = alt;
+          } catch (_e) {}
+        }
         try {
           await settingSet('chmsg:' + pendingRow.channelKey + ':' + mid, String(id));
         } catch (_e) {}
@@ -368,19 +378,24 @@ export default async function (cq) {
         return;
       }
       const row = dec.row || pendingRow;
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'تأیید و منتشر شد' });
-      const fin = await finishReviewBatchIfComplete(userId, id);
+      // موازی: نتیجه UI + نوتیف کاربر (منتظر نمان برای نوتیف)
+      const finP = finishReviewBatchIfComplete(userId, id);
+      const notifyP = (async function () {
+        try {
+          const title = conf.title || row.channelKey;
+          let txt = '✅ پیام شما تأیید و منتشر شد.';
+          if (link) txt += '\n\nمشاهده در کانال «' + title + '»:\n' + link;
+          await api.sendMessage({
+            chat_id: row.userId,
+            text: txt,
+            link_preview_options: link ? { is_disabled: false, url: link } : undefined,
+          });
+        } catch (_e) {}
+      })();
+      const fin = await finP;
       await editReviewResult(cq, '🟢 تأیید و منتشر شد #' + id, fin);
-      try {
-        const title = conf.title || row.channelKey;
-        let txt = '✅ پیام شما تأیید و منتشر شد.';
-        if (link) txt += '\n\nمشاهده در کانال «' + title + '»:\n' + link;
-        await api.sendMessage({
-          chat_id: row.userId,
-          text: txt,
-          link_preview_options: link ? { is_disabled: false, url: link } : undefined,
-        });
-      } catch (_e) {}
+      // نوتیف را block نکن
+      try { notifyP.catch(function () {}); } catch (_e) {}
       return;
     }
 
