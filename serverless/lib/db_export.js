@@ -62,6 +62,61 @@ function sheetXml(name, headers, rows) {
   return xml;
 }
 
+export function rowsToCsv(headers, rows) {
+  function esc(v) {
+    let s = v == null ? '' : String(v);
+    if (s.length > 20000) s = s.slice(0, 20000) + '…';
+    if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+  const lines = [headers.map(esc).join(',')];
+  for (const r of rows) {
+    lines.push(headers.map(function (h) { return esc(r[h]); }).join(','));
+  }
+  return '\ufeff' + lines.join('\n');
+}
+
+/** تقسیم ردیف‌ها به چند CSV اگر بزرگ بود */
+export function splitCsvFiles(baseName, headers, rows, maxChars) {
+  maxChars = maxChars || 450000;
+  const files = [];
+  let part = 1;
+  let buf = [];
+  let size = 0;
+  const headerLine = rowsToCsv(headers, []).length;
+  for (const r of rows) {
+    const line = rowsToCsv(headers, [r]).length - headerLine + 20;
+    if (buf.length && size + line > maxChars) {
+      files.push({
+        filename: files.length === 0 && rows.length <= buf.length
+          ? baseName + '.csv'
+          : baseName + '_part' + part + '.csv',
+        content: rowsToCsv(headers, buf),
+      });
+      part += 1;
+      buf = [];
+      size = 0;
+    }
+    buf.push(r);
+    size += line;
+  }
+  if (buf.length) {
+    const name =
+      part === 1
+        ? baseName + '.csv'
+        : baseName + '_part' + part + '.csv';
+    // اگر چند پارت، نام پارت اول را هم اصلاح کن
+    files.push({ filename: name, content: rowsToCsv(headers, buf) });
+    if (files.length > 1 && !files[0].filename.includes('_part')) {
+      files[0].filename = baseName + '_part1.csv';
+    }
+  }
+  if (!files.length) {
+    files.push({ filename: baseName + '.csv', content: rowsToCsv(headers, []) });
+  }
+  return files;
+}
+
 export function buildWorkbookXml(sheets) {
   // sheets: [{ name, headers, rows }]
   let body = '';
@@ -201,17 +256,16 @@ export async function processDbExportBatch() {
       ? job.tables[job.tableIndex].title + ' @ ' + job.offset
       : 'پایان جداول';
 
-  if (job.tableIndex >= job.tables.length) {
-    // ساخت فایل نهایی
-    const sheets = [];
+    if (job.tableIndex >= job.tables.length) {
+    const files = [];
     for (const t of job.tables) {
       const objs = await readTableObjs(t.key);
-      sheets.push({ name: t.title, headers: t.headers, rows: objs });
+      const headers = t.headers && t.headers.length ? t.headers : ['_empty'];
+      const parts = splitCsvFiles(t.title, headers, objs, 450000);
+      for (const f of parts) files.push(f);
     }
-    const xml = buildWorkbookXml(sheets);
     job.status = 'done';
     await settingSet('dbexp_job', JSON.stringify(job));
-    // پاکسازی تکه‌های موقت
     for (const t of job.tables) {
       const parts = Number(await settingGet('dbexp_tbl_' + t.key + '_parts', '1')) || 1;
       for (let i = 0; i < parts; i++) {
@@ -231,11 +285,13 @@ export async function processDbExportBatch() {
         job.done +
         ' / ' +
         job.grandTotal +
-        ' ردیف',
-      xml: xml,
+        ' ردیف\n📁 تعداد فایل: ' +
+        files.length,
+      files: files,
       job: job,
     };
   }
+
 
   return {
     status: 'running',
