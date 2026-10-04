@@ -1333,13 +1333,13 @@ export default async function (message) {
             who = displayName(await getUser(uid), uid);
           } catch (_e) {}
           cancelRows.push({
-            id: s.id,
-            channelKey: myCh,
-            channelTitle: chTitle,
-            startHm: s.startHm,
-            endHm: s.endHm,
-            adminId: s.adminId != null ? s.adminId : s.admin_id,
-            name: who,
+            id: Number(s.id),
+            channelKey: String(myCh),
+            channelTitle: String(chTitle || ''),
+            startHm: String(s.startHm || s.start_hm || ''),
+            endHm: String(s.endHm || s.end_hm || ''),
+            adminId: Number(s.adminId != null ? s.adminId : s.admin_id) || 0,
+            name: String(who || ''),
           });
         }
 
@@ -1350,11 +1350,40 @@ export default async function (message) {
         });
 
         if (cancelRows.length) {
-          await api.sendMessage({
-            chat_id: chatId,
-            text: '❌ لغو شیفت‌های دوره فعلی («' + chTitle + '»):',
-            reply_markup: ownerCancelShiftsInline(cancelRows),
-          });
+          try {
+            const markup = ownerCancelShiftsInline(cancelRows);
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '❌ لغو شیفت دوره فعلی — روی ساعت بزنید تا از بیخ لغو شود:',
+              reply_markup: markup,
+            });
+          } catch (eBtn) {
+            console.error('cancel buttons', eBtn);
+            // fallback: دکمه‌های خیلی ساده فقط با ساعت
+            const simple = { inline_keyboard: [] };
+            for (let i = 0; i < cancelRows.length && i < 30; i++) {
+              const s = cancelRows[i];
+              const id = Number(s.id);
+              if (!id) continue;
+              const st = String(s.startHm || '').slice(0, 5);
+              const en = String(s.endHm || '').slice(0, 5);
+              simple.inline_keyboard.push([
+                {
+                  text: String('❌ ' + st + '-' + en),
+                  callback_data: String('own_sc:' + id),
+                  style: 'danger',
+                },
+              ]);
+            }
+            simple.inline_keyboard.push([
+              { text: 'بستن', callback_data: 'shift_close', style: 'primary' },
+            ]);
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '❌ لغو شیفت (ساده):',
+              reply_markup: sanitizeMarkup(simple),
+            });
+          }
         }
       } catch (e) {
         console.error('sl channel shifts', e);
