@@ -15,6 +15,7 @@ import {
   adminKeyboard,
   ownerKeyboard,
   dbExportContinueInline,
+  ownerCancelShiftsInline,
   backKeyboard,
   settingsKeyboard,
   channelPickFlagsInline,
@@ -1308,8 +1309,10 @@ export default async function (message) {
         row.status +
         '\nکاربر: ' +
         row.userId +
-        '\nبررسی‌کننده: ' +
+        '\nبررسی‌کننده (کسی که دکمه را زد): ' +
         reviewer +
+        (row.reviewedAt ? '\n🕐 زمان بررسی: ' + formatTsJalali(row.reviewedAt) : '') +
+        (row.submittedAt ? '\n🕐 زمان ارسال: ' + formatTsJalali(row.submittedAt) : '') +
         (row.rejectReason ? '\nدلیل رد: ' + row.rejectReason : '') +
         '\n\n' +
         String(row.content || '').slice(0, 500);
@@ -1491,16 +1494,71 @@ export default async function (message) {
       }
 
       if (text === '⏰ مدیریت شیفت‌ها') {
-        await setState(userId, 'pick_shift_ch');
-        // فقط کانال خودش
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'شیفت کانال «' + chTitle + '»',
-          reply_markup: {
-            keyboard: [[{ text: 'شیفت: ' + chTitle }], [{ text: '◀️ بازگشت' }]],
-            resize_keyboard: true,
-          },
-        });
+        try {
+          const now = tehranNow();
+          const pdate = periodDateStr(now);
+          const allSh = (await db.select().from(shifts).all()) || [];
+          const list = allSh.filter(function (s) {
+            if (String(s.status) !== 'active') return false;
+            if (String(s.channelKey || s.channel_key) !== String(myCh)) return false;
+            if (String(s.startHm) === String(s.endHm)) return false;
+            const sd = String(s.shiftDate || s.shift_date || '');
+            return sd === pdate || sd === 'perm' || sd === 'permanent' || sd === now.date;
+          });
+          const sorted = sortShiftsByPeriod(list);
+          let t =
+            '⏰ مدیریت شیفت‌های «' +
+            chTitle +
+            '»\n📅 دوره ' +
+            pdate +
+            '\nلغو شیفت دیگران یا مشاهده لیست — بدون انتخاب نوع روزانه/دائمی.\n';
+          const rows = [];
+          if (!sorted.length) {
+            t += '\nهنوز شیفتی ثبت نشده.';
+          } else {
+            for (const s of sorted) {
+              let who = String(s.adminId);
+              try {
+                who = displayName(await getUser(s.adminId), s.adminId);
+              } catch (_e) {}
+              const tag =
+                s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' · دائم' : '';
+              t +=
+                '\n▫️ #' +
+                s.id +
+                '  ' +
+                String(s.startHm).slice(0, 5) +
+                '–' +
+                String(s.endHm).slice(0, 5) +
+                '  ·  ' +
+                who +
+                tag;
+              rows.push({
+                id: s.id,
+                channelKey: myCh,
+                channelTitle: chTitle,
+                startHm: s.startHm,
+                endHm: s.endHm,
+                adminId: s.adminId,
+                name: who,
+              });
+            }
+          }
+          await api.sendMessage({
+            chat_id: chatId,
+            text: t.slice(0, 4000),
+            reply_markup: rows.length
+              ? sanitizeMarkup(ownerCancelShiftsInline(rows))
+              : await roleKb(userId),
+          });
+        } catch (e) {
+          console.error('sl manage shifts', e);
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'خطا در لیست شیفت‌ها',
+            reply_markup: await roleKb(userId),
+          });
+        }
         return;
       }
 
@@ -1796,7 +1854,7 @@ export default async function (message) {
           '\nuser: ' +
           row.userId +
           (uu ? ' (' + displayName(uu, row.userId) + ')' : '') +
-          (reviewerLabel ? '\nبررسی‌کننده: ' + reviewerLabel : '') +
+          (reviewerLabel ? '\nبررسی‌کننده (کسی که دکمه را زد): ' + reviewerLabel : '') +
           (row.rejectReason ? '\nدلیل رد: ' + row.rejectReason : '') +
           '\n🕐 ارسال: ' +
           formatTsJalali(row.submittedAt) +
