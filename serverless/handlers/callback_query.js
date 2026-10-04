@@ -22,6 +22,7 @@ import {
   getRole,
   decideMessage,
   dropMessageFromAllReviewBatches,
+  dropMessageFromReviewBatch,
   pruneReviewBatchToPending,
   clearReviewBatch,
   checkReviewAccess,
@@ -245,12 +246,16 @@ export default async function (cq) {
 
     if (data.startsWith('approve:')) {
       const id = Number(data.split(':')[1]);
+      // پاسخ فوری به تلگرام تا دکمه حس کندگی ندهد
+      try {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '…' });
+      } catch (_e) {}
       const rows0 = await db.select().from(messages).where(eq(messages.id, id)).all();
       const pendingRow = rows0 && rows0[0];
       if (!pendingRow || String(pendingRow.status) !== 'pending') {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'قبلاً بررسی شده', show_alert: true });
         try {
-          await dropMessageFromAllReviewBatches(id);
+          await dropMessageFromReviewBatch(userId, id).catch(function(){}); await dropMessageFromAllReviewBatches(id);
         } catch (_e) {}
         try {
           await api.editMessageReplyMarkup({
@@ -381,6 +386,7 @@ export default async function (cq) {
 
     
     if (data.startsWith('reject_direct:')) {
+      try { await api.answerCallbackQuery({ callback_query_id: cq.id, text: '…' }); } catch (_e) {}
       const id = Number(data.split(':')[1]);
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
@@ -491,7 +497,7 @@ if (data.startsWith('reject_menu:')) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: dec.text, show_alert: true });
         if (dec.code === 'done') {
           try {
-            await dropMessageFromAllReviewBatches(id);
+            await dropMessageFromReviewBatch(userId, id).catch(function(){}); await dropMessageFromAllReviewBatches(id);
           } catch (_e) {}
           const fin = await finishReviewBatchIfComplete(userId, id);
           await editReviewResult(
