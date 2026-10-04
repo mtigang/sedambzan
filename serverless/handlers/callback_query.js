@@ -25,6 +25,7 @@ import {
   pruneReviewBatchToPending,
   clearReviewBatch,
   checkReviewAccess,
+  canManageOthersShifts,
   createReviewBatch,
   sendReviewBatch,
   finishReviewBatchIfComplete,
@@ -1545,10 +1546,6 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
 
 
     if (data.startsWith('own_sc:')) {
-      if (!isOwner(userId)) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
-        return;
-      }
       const sid = Number(data.split(':')[1]);
       if (!sid) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
@@ -1560,6 +1557,16 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پیدا نشد / قبلاً لغو', show_alert: true });
         return;
       }
+      if (!isOwner(userId)) {
+        let ok = false;
+        try {
+          ok = await canManageOthersShifts(userId, row.channelKey);
+        } catch (_e) {}
+        if (!ok) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+          return;
+        }
+      }
       await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, sid)).run();
       let name = String(row.adminId);
       try {
@@ -1570,7 +1577,7 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
         await api.sendMessage({
           chat_id: row.adminId,
           text:
-            '⚠️ شیفت شما توسط مالک لغو شد:\n' +
+            '⚠️ شیفت شما توسط مدیریت لغو شد:\n' +
             ((DEFAULT_CHANNELS[row.channelKey] && DEFAULT_CHANNELS[row.channelKey].title) ||
               row.channelKey) +
             ' ' +
@@ -1602,21 +1609,32 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
     }
 
     if (data === 'own_cancel_all') {
-      if (!isOwner(userId)) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
-        return;
-      }
       const now = tehranNow();
       const pdate = periodDateStr(now);
+      let slCh = null;
+      if (!isOwner(userId)) {
+        try {
+          slCh = await getActiveSubLeaderChannel(userId);
+        } catch (_e) {}
+        if (!slCh) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک یا ساب‌لیدر', show_alert: true });
+          return;
+        }
+      }
       const all = (await db.select().from(shifts).all()) || [];
       const today = all.filter(function (s) {
-        return (
-          s.status === 'active' &&
-          (s.shiftDate === pdate ||
+        if (String(s.status) !== 'active') return false;
+        if (
+          !(
+            s.shiftDate === pdate ||
             s.shiftDate === 'perm' ||
             s.shiftDate === 'permanent' ||
-            s.shiftDate === now.date)
-        );
+            s.shiftDate === now.date
+          )
+        )
+          return false;
+        if (slCh && String(s.channelKey) !== String(slCh)) return false;
+        return true;
       });
       let n = 0;
       const notified = {};
