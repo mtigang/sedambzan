@@ -24,6 +24,7 @@ import {
   shiftChannelPickKeyboard,
   postChannelInline,
   sendDestInline,
+  activeShiftChannelsInline,
   reviewInline,
   ownerReviewInline,
   feedbackInline,
@@ -90,6 +91,11 @@ import {
   shiftPickChannels,
   canManageOthersShifts,
   getActiveSubLeaderChannel,
+  checkReviewAccess,
+  dropMessageFromAllReviewBatches,
+  dropMessageFromReviewBatch,
+  toBoldHtml,
+  activeShiftChannelKeys,
   listAdminsByChannel,
   syncAdminsFromGroup,
   syncAllAdminGroups,
@@ -327,6 +333,111 @@ export default async function (message) {
 
 
     // ========== USER ==========
+    
+    // ——— فراخوان کانال (ادمین / ساب‌لیدر با شیفت فعال) ———
+    if ((role === 'admin' || role === 'subleader') && text === '📌 فراخوان کانال') {
+      try {
+        const keys = await activeShiftChannelKeys(userId);
+        if (!keys || !keys.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '⏰ الان در هیچ کانالی شیفت فعال ندارید.\nوقتی شیفت‌تان شروع شد دوباره امتحان کنید.',
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+        const chans = keys.map(function (k) {
+          return { key: k, title: (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k };
+        });
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '📌 فراخوان در کدام کانال ارسال و سنجاق شود؟\n(فقط کانال‌هایی که همین الان شیفت دارید)',
+          reply_markup: sanitizeMarkup(activeShiftChannelsInline(chans)),
+        });
+      } catch (e) {
+        console.error('callout menu', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: await roleKb(userId),
+        });
+      }
+      return;
+    }
+
+    // ویرایش پیام توسط ادمین
+    if (state && state.kind === 'edit_msg' && text && text !== '◀️ بازگشت') {
+      const mid = Number(state.msgId);
+      await clearState(userId);
+      try {
+        const rows = (await db.select().from(messages).where(eq(messages.id, mid)).all()) || [];
+        const row = rows[0];
+        if (!row || String(row.status) !== 'pending') {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'این پیام دیگر در انتظار نیست.',
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+        // دسترسی
+        if (!isOwner(userId)) {
+          const acc = await checkReviewAccess(userId, row);
+          if (!acc.ok) {
+            await api.sendMessage({ chat_id: chatId, text: acc.text || 'دسترسی ندارید', reply_markup: await roleKb(userId) });
+            return;
+          }
+        }
+        let newText = String(text).trim().replace(/\s*[.]\s*$/, '').replace(/\s+$/, '') + ' .';
+        const conf = DEFAULT_CHANNELS[row.channelKey];
+        if (!conf || !conf.chatId) {
+          await api.sendMessage({ chat_id: chatId, text: 'کانال پیکربندی نشده', reply_markup: await roleKb(userId) });
+          return;
+        }
+        // رزرو + انتشار
+        try {
+          await db.update(messages).set({ status: 'publishing' }).where(and(eq(messages.id, mid), eq(messages.status, 'pending'))).run();
+        } catch (_e) {}
+        let sent = null;
+        try {
+          sent = await api.sendMessage({
+            chat_id: conf.chatId,
+            text: toBoldHtml(newText),
+            parse_mode: 'HTML',
+          });
+        } catch (e) {
+          try { await db.update(messages).set({ status: 'pending' }).where(eq(messages.id, mid)).run(); } catch (_e) {}
+          await api.sendMessage({ chat_id: chatId, text: 'ارسال ناموفق: ' + (e.message || e), reply_markup: await roleKb(userId) });
+          return;
+        }
+        await db.update(messages).set({
+          status: 'approved',
+          content: newText,
+          reviewedBy: Number(userId),
+          reviewedAt: new Date(),
+        }).where(eq(messages.id, mid)).run();
+        try { await dropMessageFromReviewBatch(userId, mid); } catch (_e) {}
+        try { dropMessageFromAllReviewBatches(mid).catch(function(){}); } catch (_e) {}
+        const link = channelMessageLink(conf.chatId, sent && sent.message_id, row.channelKey);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '✅ ویرایش و منتشر شد #' + mid + (link ? '\n' + link : ''),
+          reply_markup: await roleKb(userId),
+        });
+        try {
+          await api.sendMessage({
+            chat_id: row.userId,
+            text: '✅ پیام شما پس از ویرایش تأیید و منتشر شد.' + (link ? '\n' + link : ''),
+          });
+        } catch (_e) {}
+      } catch (e) {
+        console.error('edit_msg', e);
+        await api.sendMessage({ chat_id: chatId, text: 'خطا در ویرایش', reply_markup: await roleKb(userId) });
+      }
+      return;
+    }
+
+
     if (text === '📝 ارسال پیام') {
       if (!(await isBotOn()) && !owner) {
         await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
