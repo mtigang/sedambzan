@@ -2933,7 +2933,7 @@ if (data.startsWith('ann_target:')) {
           'این پیام سنجاق می‌شود و با پیشرفت صف به‌روز می‌گردد.',
         reply_markup: sanitizeMarkup(announceProgressInline(false)),
       });
-      const mid = progress && progress.message_id;
+      const mid = (progress && (progress.message_id || progress.messageId || progress.id)) || null;
       try {
         if (mid) {
           await api.pinChatMessage({
@@ -2979,7 +2979,9 @@ if (data === 'ann_continue') {
         return;
       }
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ادامه...' });
-      await runAnnounceBatch(cq.message.chat.id, cq.message.message_id);
+      const pMid = cq.message && (cq.message.message_id || cq.message.messageId);
+      const pChat = cq.message && cq.message.chat && cq.message.chat.id;
+      await runAnnounceBatch(pChat || userId, pMid);
       return;
     }
 
