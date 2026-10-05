@@ -2132,6 +2132,7 @@ async function loadAnnounceJob() {
     }
 
     async function runAnnounceBatch(chatId, progressMessageId) {
+      const BATCH = 80;
       const job = await loadAnnounceJob();
       if (!job || job.status !== 'running') {
         await api.sendMessage({
@@ -2146,30 +2147,22 @@ async function loadAnnounceJob() {
       let ok = Number(job.ok) || 0;
       let fail = Number(job.fail) || 0;
       const total = ids.length;
-      // یک کلیک تا نزدیک سقف زمان هندلر ادامه می‌دهد؛ دکمه ادامه فقط اگر زمان تمام شود
-      const deadline = Date.now() + 18000;
-      while (cursor < total && Date.now() < deadline) {
-        const end = Math.min(cursor + 25, total);
-        for (let i = cursor; i < end; i++) {
-          try {
-            await api.sendMessage({ chat_id: ids[i], text: text });
-            ok++;
-          } catch (_e) {
-            fail++;
-          }
+      const end = Math.min(cursor + BATCH, total);
+
+      for (let i = cursor; i < end; i++) {
+        try {
+          await api.sendMessage({ chat_id: ids[i], text: text });
+          ok++;
+        } catch (_e) {
+          fail++;
         }
-        cursor = end;
-        job.cursor = cursor;
-        job.ok = ok;
-        job.fail = fail;
-        if (cursor >= total) job.status = 'done';
-        try { await saveAnnounceJob(job); } catch (_e) {}
       }
-      const finished = cursor >= total;
-      if (finished) job.status = 'done';
+      cursor = end;
       job.cursor = cursor;
       job.ok = ok;
       job.fail = fail;
+      const finished = cursor >= total;
+      if (finished) job.status = 'done';
       await saveAnnounceJob(job);
 
       const pct = total ? Math.floor((cursor / total) * 10) : 10;
@@ -2186,7 +2179,7 @@ async function loadAnnounceJob() {
         ok +
         '  ❌ ' +
         fail +
-        (finished ? '' : '\n\nزمان این اجرا تمام شد. برای ادامهٔ خودکارِ بقیه یک‌بار «ادامه ارسال» را بزن؛ خودش تا سقف زمان می‌رود.');
+        (finished ? '' : '\n\nبرای دسته بعدی «ادامه ارسال» را بزن.');
 
       try {
         if (progressMessageId) {
