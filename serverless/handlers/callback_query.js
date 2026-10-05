@@ -1,5 +1,5 @@
 import { normalizeBody, exactBodyKey } from 'lib/validation';
-import { api, db } from 'sdk';
+import { api, db, InputFile } from 'sdk';
 import { eq, and } from 'sdk/db';
 import { messages, feedback, shifts, settings, users, channelAdmins } from 'schema';
 import {
@@ -1090,60 +1090,25 @@ if (data.startsWith('reject_menu:')) {
           } catch (_e) {}
 
           async function sendOneFile(filename, content, caption) {
+            // روش رسمی Telegram Serverless: InputFile(bytes, filename, { type })
             const bytes =
-              typeof TextEncoder !== 'undefined'
+              typeof content === 'string'
                 ? new TextEncoder().encode(content)
-                : content;
-            const attempts = [
-              async function () {
-                await api.sendDocument({
-                  chat_id: cq.message.chat.id,
-                  document: bytes,
-                  caption: caption,
-                });
-              },
-              async function () {
-                await api.sendDocument({
-                  chat_id: cq.message.chat.id,
-                  document: content,
-                  caption: caption,
-                });
-              },
-              async function () {
-                await api.sendDocument({
-                  chat_id: cq.message.chat.id,
-                  document: { filename: filename, content: content },
-                  caption: caption,
-                });
-              },
-              async function () {
-                await api.sendDocument({
-                  chat_id: cq.message.chat.id,
-                  document: { filename: filename, bytes: bytes },
-                  caption: caption,
-                });
-              },
-              async function () {
-                if (typeof Blob === 'undefined') throw new Error('no Blob');
-                const blob = new Blob([content], { type: 'text/csv;charset=utf-8' });
-                await api.sendDocument({
-                  chat_id: cq.message.chat.id,
-                  document: blob,
-                  caption: caption,
-                });
-              },
-            ];
-            let lastErr = null;
-            for (const fn of attempts) {
-              try {
-                await fn();
-                return true;
-              } catch (e) {
-                lastErr = e;
-                console.error('sendOneFile try', filename, e && (e.message || e.description || e));
-              }
-            }
-            throw lastErr || new Error('send failed');
+                : content instanceof Uint8Array
+                  ? content
+                  : new TextEncoder().encode(String(content));
+            const mime = filename.endsWith('.csv')
+              ? 'text/csv'
+              : filename.endsWith('.xml')
+                ? 'application/xml'
+                : 'application/octet-stream';
+            const doc = new InputFile(bytes, filename, { type: mime });
+            await api.sendDocument({
+              chat_id: cq.message.chat.id,
+              document: doc,
+              caption: String(caption || '').slice(0, 1000),
+            });
+            return true;
           }
 
           let ok = 0;
