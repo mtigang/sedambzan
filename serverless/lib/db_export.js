@@ -78,7 +78,7 @@ export function rowsToCsv(headers, rows) {
 
 /** تقسیم ردیف‌ها به چند CSV اگر بزرگ بود */
 export function splitCsvFiles(baseName, headers, rows, maxChars) {
-  maxChars = maxChars || 450000;
+  maxChars = maxChars || 350000;
   const files = [];
   let part = 1;
   let buf = [];
@@ -261,7 +261,7 @@ export async function processDbExportBatch() {
     for (const t of job.tables) {
       const objs = await readTableObjs(t.key);
       const headers = t.headers && t.headers.length ? t.headers : ['_empty'];
-      const parts = splitCsvFiles(t.title, headers, objs, 450000);
+      const parts = splitCsvFiles(t.title, headers, objs, 350000);
       for (const f of parts) files.push(f);
     }
     job.status = 'done';
