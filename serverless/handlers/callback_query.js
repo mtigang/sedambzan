@@ -2922,6 +2922,27 @@ if (data.startsWith('ann_target:')) {
         });
         return;
       }
+      const progress = await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '📣 ارسال اطلاعیه شروع شد\n' +
+          '░░░░░░░░░░ 0%\n' +
+          '0 / ' +
+          ids.length +
+          '\n✅ موفق: 0   ❌ ناموفق: 0\n\n' +
+          'این پیام سنجاق می‌شود و با پیشرفت صف به‌روز می‌گردد.',
+        reply_markup: sanitizeMarkup(announceProgressInline(false)),
+      });
+      const mid = progress && progress.message_id;
+      try {
+        if (mid) {
+          await api.pinChatMessage({
+            chat_id: cq.message.chat.id,
+            message_id: mid,
+            disable_notification: true,
+          });
+        }
+      } catch (_pin) {}
       const job = {
         status: 'running',
         text: annText,
@@ -2931,14 +2952,10 @@ if (data.startsWith('ann_target:')) {
         fail: 0,
         target: target,
         ownerId: userId,
+        progressChatId: cq.message.chat.id,
+        progressMessageId: mid || null,
       };
       await saveAnnounceJob(job);
-      const progress = await api.sendMessage({
-        chat_id: cq.message.chat.id,
-        text: '📣 صف آماده شد: ' + ids.length + ' نفر\nاولین دسته در حال ارسال...',
-        reply_markup: sanitizeMarkup(announceProgressInline(false)),
-      });
-      const mid = progress && progress.message_id;
       await runAnnounceBatch(cq.message.chat.id, mid);
       return;
     }
