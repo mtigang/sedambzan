@@ -34,6 +34,7 @@ import {
   getReviewBatch,
   findAdminShiftConflict,
 } from 'lib/dbutil';
+import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob } from 'lib/announce_drain';
 import { setState, getState, clearState } from 'lib/state';
 import {
   upsertSubLeader,
@@ -2117,92 +2118,9 @@ if (data.startsWith('own_shift:')) {
       }
     }
 
-async function loadAnnounceJob() {
-      const raw = await settingGet('announce_job', '');
-      if (!raw) return null;
-      try {
-        return JSON.parse(raw);
-      } catch (_e) {
-        return null;
-      }
-    }
-
-    async function saveAnnounceJob(job) {
-      await settingSet('announce_job', JSON.stringify(job));
-    }
 
     async function runAnnounceBatch(chatId, progressMessageId) {
-      const BATCH = 80;
-      const job = await loadAnnounceJob();
-      if (!job || job.status !== 'running') {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: job && job.status === 'done' ? '✅ اطلاعیه قبلاً تمام شده.' : 'هیچ ارسال فعالی نیست.',
-        });
-        return;
-      }
-      const ids = job.ids || [];
-      const text = job.text || '';
-      let cursor = Number(job.cursor) || 0;
-      let ok = Number(job.ok) || 0;
-      let fail = Number(job.fail) || 0;
-      const total = ids.length;
-      const end = Math.min(cursor + BATCH, total);
-
-      for (let i = cursor; i < end; i++) {
-        try {
-          await api.sendMessage({ chat_id: ids[i], text: text });
-          ok++;
-        } catch (_e) {
-          fail++;
-        }
-      }
-      cursor = end;
-      job.cursor = cursor;
-      job.ok = ok;
-      job.fail = fail;
-      const finished = cursor >= total;
-      if (finished) job.status = 'done';
-      await saveAnnounceJob(job);
-
-      const pct = total ? Math.floor((cursor / total) * 10) : 10;
-      let bar = '';
-      for (let i = 0; i < 10; i++) bar += i < pct ? '█' : '░';
-      const body =
-        (finished ? '✅ اطلاعیه تمام شد\n' : '📣 در حال ارسال (تکه‌تکه)\n') +
-        bar +
-        ' ' +
-        cursor +
-        '/' +
-        total +
-        '\n✅ ' +
-        ok +
-        '  ❌ ' +
-        fail +
-        (finished ? '' : '\n\nبرای دسته بعدی «ادامه ارسال» را بزن.');
-
-      try {
-        if (progressMessageId) {
-          await api.editMessageText({
-            chat_id: chatId,
-            message_id: progressMessageId,
-            text: body,
-            reply_markup: sanitizeMarkup(announceProgressInline(finished)),
-          });
-        } else {
-          await api.sendMessage({
-            chat_id: chatId,
-            text: body,
-            reply_markup: sanitizeMarkup(announceProgressInline(finished)),
-          });
-        }
-      } catch (_e) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: body,
-          reply_markup: sanitizeMarkup(announceProgressInline(finished)),
-        });
-      }
+      await drainAnnounceOwnerBurst(chatId, progressMessageId, 12000);
     }
 
 
@@ -3464,5 +3382,9 @@ if (data === 'ann_continue') {
         show_alert: true,
       });
     } catch (_) {}
+  } finally {
+    try {
+      await drainAnnouncePiggyback(35);
+    } catch (_d) {}
   }
 }
