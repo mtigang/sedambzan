@@ -1,9 +1,9 @@
 /**
- * صف اطلاعیه: تخلیهٔ سبک روی ترافیک طبیعی ربات
- * اولویت با کار هندلر است — این تابع بعد از آن صدا زده می‌شود.
+ * صف اطلاعیه + نوار پیشرفت سنجاق‌شده برای مالک
  */
 import { api } from 'sdk';
 import { settingGet, settingSet } from 'lib/dbutil';
+import { announceProgressInline, sanitizeMarkup } from 'lib/keyboards';
 
 const CHUNK = 35;
 const LOCK_MS = 4500;
@@ -20,6 +20,11 @@ export async function loadAnnounceJob() {
 
 export async function saveAnnounceJob(job) {
   await settingSet('announce_job', JSON.stringify(job));
+}
+
+function msgIdOf(msg) {
+  if (!msg) return null;
+  return msg.message_id || msg.messageId || msg.id || null;
 }
 
 export function buildAnnounceProgressText(job) {
@@ -40,47 +45,81 @@ export function buildAnnounceProgressText(job) {
     ' / ' +
     total +
     '\n✅ موفق: ' +
-    (job.ok || 0) +
+    (Number(job.ok) || 0) +
     '   ❌ ناموفق: ' +
-    (job.fail || 0);
+    (Number(job.fail) || 0);
   if (!finished) {
     body +=
-      '\n\nاین پیام سنجاق شده است و با پیشرفت صف به‌روز می‌شود.\n' +
-      'صف روی ترافیک ربات هم جلو می‌رود. برای سرعت بیشتر «ادامه ارسال» را بزن.';
+      '\n\n📌 این پیام سنجاق است و خودکار به‌روز می‌شود.\n' +
+      'صف روی ترافیک ربات هم جلو می‌رود.\nبرای سرعت بیشتر «ادامه ارسال» را بزن.';
   } else {
     body += '\n\nارسال کامل شد.';
   }
   return { body, finished, pct };
 }
 
-/** به‌روز کردن نوار سنجاق‌شدهٔ مالک (بدون پرتاب خطا) */
+/**
+ * ذخیرهٔ ارجاع نوار پیشرفت (برای پیام قدیمی هم کار می‌کند)
+ */
+export async function bindAnnounceProgress(chatId, messageId) {
+  if (!chatId || !messageId) return null;
+  const job = await loadAnnounceJob();
+  if (!job) return null;
+  job.progressChatId = Number(chatId);
+  job.progressMessageId = Number(messageId);
+  await saveAnnounceJob(job);
+  return job;
+}
+
 export async function updateAnnounceProgressBar(jobOverride) {
   try {
     const job = jobOverride || (await loadAnnounceJob());
-    if (!job) return;
+    if (!job) return false;
     const chatId = job.progressChatId || job.ownerId;
     const mid = job.progressMessageId;
-    if (!chatId || !mid) return;
+    if (!chatId || !mid) return false;
     const { body, finished } = buildAnnounceProgressText(job);
-    const { announceProgressInline, sanitizeMarkup } = await import('lib/keyboards');
     try {
       await api.editMessageText({
-        chat_id: chatId,
-        message_id: mid,
+        chat_id: Number(chatId),
+        message_id: Number(mid),
         text: body,
-        reply_markup: sanitizeMarkup(announceProgressInline(finished)),
+        reply_markup: sanitizeMarkup(announceProgressInline(!!finished)),
       });
-    } catch (_e) {
-      // پیام حذف شده یا یکسان — نادیده
+      return true;
+    } catch (e) {
+      // اگر ویرایش نشد، یک پیام جدید بفرست و آن را جایگزین نوار کن
+      try {
+        const sent = await api.sendMessage({
+          chat_id: Number(chatId),
+          text: body,
+          reply_markup: sanitizeMarkup(announceProgressInline(!!finished)),
+        });
+        const nid = msgIdOf(sent);
+        if (nid) {
+          job.progressMessageId = Number(nid);
+          job.progressChatId = Number(chatId);
+          await saveAnnounceJob(job);
+          try {
+            await api.pinChatMessage({
+              chat_id: Number(chatId),
+              message_id: Number(nid),
+              disable_notification: true,
+            });
+          } catch (_p) {}
+        }
+        return true;
+      } catch (e2) {
+        console.error('updateAnnounceProgressBar resend', e2 && (e2.description || e2.message || e2));
+        return false;
+      }
     }
   } catch (e) {
-    console.error('updateAnnounceProgressBar', e);
+    console.error('updateAnnounceProgressBar', e && (e.description || e.message || e));
+    return false;
   }
 }
 
-/**
- * رزرو اتمیک‌مانند: قفل کوتاه + جلو بردن cursor قبل از ارسال
- */
 export async function drainAnnouncePiggyback(maxN) {
   const n = Math.max(1, Math.min(Number(maxN) || CHUNK, 80));
   try {
@@ -110,7 +149,7 @@ export async function drainAnnouncePiggyback(maxN) {
       return { did: false };
     }
     const ids = job.ids || [];
-    let cursor = Number(job.cursor) || 0;
+    const cursor = Number(job.cursor) || 0;
     const total = ids.length;
     if (cursor >= total) {
       job.status = 'done';
@@ -122,6 +161,7 @@ export async function drainAnnouncePiggyback(maxN) {
 
     const end = Math.min(cursor + n, total);
     const slice = ids.slice(cursor, end);
+    // حفظ فیلدهای پیشرفت هنگام ذخیره
     job.cursor = end;
     if (end >= total) job.status = 'done';
     await saveAnnounceJob(job);
@@ -146,10 +186,14 @@ export async function drainAnnouncePiggyback(maxN) {
     const job2 = (await loadAnnounceJob()) || job;
     job2.ok = ok;
     job2.fail = fail;
+    // اگر load قبلی progress را از دست داد، از job نگه دار
+    if (!job2.progressMessageId && job.progressMessageId) {
+      job2.progressMessageId = job.progressMessageId;
+      job2.progressChatId = job.progressChatId || job.ownerId;
+    }
     if (Number(job2.cursor) >= (job2.ids || ids).length) job2.status = 'done';
     await saveAnnounceJob(job2);
     await settingSet('announce_lock', '0');
-    // به‌روز کردن نوار سنجاق‌شده
     await updateAnnounceProgressBar(job2);
 
     return {
@@ -170,10 +214,13 @@ export async function drainAnnouncePiggyback(maxN) {
   }
 }
 
-/** برای دکمهٔ ادامهٔ مالک */
 export async function drainAnnounceOwnerBurst(chatId, progressMessageId, maxMs) {
   const budget = Math.min(Number(maxMs) || 12000, 18000);
   const started = Date.now();
+  // همیشه ارجاع نوار را به پیام فعلی مالک بچسبان
+  if (chatId && progressMessageId) {
+    await bindAnnounceProgress(chatId, progressMessageId);
+  }
   let last = null;
   while (Date.now() - started < budget) {
     last = await drainAnnouncePiggyback(CHUNK);
@@ -183,15 +230,11 @@ export async function drainAnnounceOwnerBurst(chatId, progressMessageId, maxMs) 
   }
   try {
     const job = await loadAnnounceJob();
-    if (!job) return last;
-    if (progressMessageId && !job.progressMessageId) {
-      job.progressMessageId = progressMessageId;
-      job.progressChatId = chatId;
-      await saveAnnounceJob(job);
-    }
-    await updateAnnounceProgressBar(job);
+    if (job) await updateAnnounceProgressBar(job);
   } catch (e) {
     console.error('drainAnnounceOwnerBurst progress', e);
   }
   return last;
 }
+
+export { msgIdOf };
