@@ -33,7 +33,6 @@ import {
   shiftModePickInline,
   adminListInline,
   announceTargetInline,
-  announceProgressInline,
   ownerShiftMenuInline,
   reviewNextInline,
   subLeaderKeyboard,
@@ -2148,72 +2147,6 @@ export default async function (message) {
 
     
 
-    if (owner && text === '📌 فراخوان همه کاربران') {
-      try {
-        const all = (await db.select().from(users).all()) || [];
-        const seen = {};
-        const ids = [];
-        for (const u of all) {
-          const id = Number(u.userId || u.user_id);
-          if (!id || seen[id]) continue;
-          if (u.started != null && Number(u.started) === 0) continue;
-          seen[id] = true;
-          ids.push(id);
-        }
-        const annText =
-          'سلام خانومیای خوشگل و نانازی 🎀\n\n' +
-          'با رعایت قوانین پیام های خودتونو ارسال کنید\n\n' +
-          '1. پیامتون با «صدام بزن» یا «این کاربر» یا «تو زندگی بعدی» شروع بشه\n' +
-          '2. پیام خودتون رو برجسته کنید\n' +
-          '3. با یک فاصله از متن نقطه بذارید.\n' +
-          '4. محتوای پیامتون فحش و هیت و تکراری نباشه !\n\n' +
-          'ایدی ربات:\n@Arail_bot';
-        await settingSet('announce_job', JSON.stringify({
-          status: 'running',
-          text: annText,
-          ids: ids,
-          cursor: 0,
-          ok: 0,
-          fail: 0,
-          target: 'all',
-          ownerId: userId,
-        }));
-        const progress = await api.sendMessage({
-          chat_id: chatId,
-          text: '📌 فراخوان برای ' + ids.length + ' کاربر آماده شد.\nارسال خودکار شروع می‌شود (بدون توقف ۸۰تایی).',
-          reply_markup: sanitizeMarkup(announceProgressInline(false)),
-        });
-        // همان حلقهٔ زمانی داخل این هندلر
-        const deadline = Date.now() + 18000;
-        let cursor = 0, ok = 0, fail = 0;
-        const total = ids.length;
-        while (cursor < total && Date.now() < deadline) {
-          const end = Math.min(cursor + 25, total);
-          for (let i = cursor; i < end; i++) {
-            try { await api.sendMessage({ chat_id: ids[i], text: annText }); ok++; }
-            catch (_e) { fail++; }
-          }
-          cursor = end;
-          await settingSet('announce_job', JSON.stringify({
-            status: cursor >= total ? 'done' : 'running',
-            text: annText, ids: ids, cursor: cursor, ok: ok, fail: fail, target: 'all', ownerId: userId,
-          }));
-        }
-        const finished = cursor >= total;
-        await api.sendMessage({
-          chat_id: chatId,
-          text:
-            (finished ? '✅ فراخوان تمام شد\n' : '📣 این اجرا تمام شد\n') +
-            cursor + '/' + total + '\n✅ ' + ok + '  ❌ ' + fail +
-            (finished ? '' : '\n\nیک‌بار «ادامه ارسال» را بزن؛ خودش دوباره تا سقف زمان می‌رود، نه ۸۰ نفر.'),
-          reply_markup: sanitizeMarkup(announceProgressInline(finished)),
-        });
-      } catch (e) {
-        console.error('callout all', e);
-        await api.sendMessage({ chat_id: chatId, text: 'خطا: ' + (e.message || e), reply_markup: await roleKb(userId) });
-      }
-      return;
-    }
 
     if (owner && text === '📣 اطلاعیه') {
       try {
