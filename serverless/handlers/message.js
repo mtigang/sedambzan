@@ -111,6 +111,7 @@ import {
   formatReviewerLabel,
   settingGet,
 } from 'lib/dbutil';
+import { drainAnnouncePiggyback } from 'lib/announce_drain';
 
 async function checkRateLimit(uid) {
   const key = 'rate:' + uid;
@@ -2529,5 +2530,8 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
         await settingSet(idemKeyFinal, '1');
       } catch (_e) {}
     }
+    try {
+      await drainAnnouncePiggyback(35);
+    } catch (_d) {}
   }
 }
