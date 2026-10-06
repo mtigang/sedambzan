@@ -1858,31 +1858,58 @@ export default async function (message) {
     if (owner && text === '📊 آمار') {
       try {
         let all = [];
-        try { all = (await db.select().from(messages).all()) || []; } catch (e) { console.error(e); }
-        const pe = all.filter((x) => x.status === 'pending').length;
-        const ap = all.filter((x) => x.status === 'approved').length;
-        const rj = all.filter((x) => x.status === 'rejected').length;
+        let msgErr = null;
+        try {
+          all = (await db.select().from(messages).all()) || [];
+        } catch (e) {
+          msgErr = e;
+          console.error('stats messages', e);
+          all = [];
+        }
+        function stOf(x) {
+          return String((x && (x.status != null ? x.status : x.Status)) || '');
+        }
+        function chOf(x) {
+          return String((x && (x.channelKey ?? x.channel_key ?? '')) || '');
+        }
+        const pe = all.filter(function (x) { return stOf(x) === 'pending'; }).length;
+        const ap = all.filter(function (x) { return stOf(x) === 'approved'; }).length;
+        const rj = all.filter(function (x) { return stOf(x) === 'rejected'; }).length;
         let us = [];
         try { us = (await db.select().from(users).all()) || []; } catch (e) {}
         let ads = [];
         try {
           ads = (await db.select().from(channelAdmins).all()) || [];
         } catch (_e) {}
-        const adminIds = new Set(ads.map((a) => a.userId || a.user_id));
+        const adminIds = new Set(ads.map(function (a) { return a.userId || a.user_id; }));
         let shToday = 0;
         try {
-          const { date } = tehranNow();
+          const now = tehranNow();
+          const pdate = periodDateStr(now);
           const sh = (await db.select().from(shifts).all()) || [];
-          shToday = sh.filter((s) => s.shiftDate === date && s.status === 'active').length;
+          shToday = sh.filter(function (s) {
+            if (String(s.status) !== 'active') return false;
+            const sd = String(s.shiftDate ?? s.shift_date ?? '');
+            return sd === String(now.date) || sd === String(pdate) || sd === 'perm' || sd === 'permanent';
+          }).length;
         } catch (_) {}
         let by = '';
         for (const c of Object.values(DEFAULT_CHANNELS)) {
-          const cm = all.filter((x) => x.channelKey === c.key);
+          const cm = all.filter(function (x) { return chOf(x) === c.key; });
           by +=
             '• ' + c.title + ': ' + cm.length +
-            ' (🟡' + cm.filter((x) => x.status === 'pending').length +
-            ' 🟢' + cm.filter((x) => x.status === 'approved').length +
-            ' 🔴' + cm.filter((x) => x.status === 'rejected').length + ')\n';
+            ' (🟡' + cm.filter(function (x) { return stOf(x) === 'pending'; }).length +
+            ' 🟢' + cm.filter(function (x) { return stOf(x) === 'approved'; }).length +
+            ' 🔴' + cm.filter(function (x) { return stOf(x) === 'rejected'; }).length + ')\n';
+        }
+        let warn = '';
+        if (msgErr) {
+          warn =
+            '\n\n⚠️ خطا در خواندن جدول پیام‌ها:\n' +
+            String(msgErr.message || msgErr.description || msgErr).slice(0, 200);
+        } else if (!all.length) {
+          warn =
+            '\n\n⚠️ جدول پیام‌ها خالی برگشت. اگر قبلاً پیام داشتید، ممکن است داده پاک شده یا select ناموفق بوده باشد.';
         }
         await api.sendMessage({
           chat_id: chatId,
@@ -1895,14 +1922,15 @@ export default async function (message) {
             '👥 کاربران: ' + us.length + '\n' +
             '👮 ادمین‌ها (یکتا): ' + adminIds.size + '\n' +
             '⏰ شیفت فعال امروز: ' + shToday + '\n\n' +
-            '📺 تفکیک کانال:\n' + by,
-          reply_markup: {
-          inline_keyboard: [
-            [{ text: '👮 آمار ادمین‌ها (امروز)', callback_data: 'admin_stats:0', style: 'primary' }],
-            [{ text: '📅 دیروز', callback_data: 'admin_stats:1', style: 'primary' }],
-            [{ text: '📅 ۲ روز پیش', callback_data: 'admin_stats:2', style: 'primary' }],
-          ],
-        },
+            '📺 تفکیک کانال:\n' + by +
+            warn,
+          reply_markup: sanitizeMarkup({
+            inline_keyboard: [
+              [{ text: '👮 آمار ادمین‌ها (امروز)', callback_data: 'admin_stats:0', style: 'primary' }],
+              [{ text: '📅 دیروز', callback_data: 'admin_stats:1', style: 'primary' }],
+              [{ text: '📅 ۲ روز پیش', callback_data: 'admin_stats:2', style: 'primary' }],
+            ],
+          }),
         });
       } catch (e) {
         console.error('stats', e);
