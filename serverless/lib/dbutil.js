@@ -1021,41 +1021,83 @@ export async function isReviewBatchComplete(adminId) {
   return true;
 }
 
-/** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول */
+/** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول — بدون select همه‌ی content */
 async function selectReviewablePending(adminId) {
-  return memo('srp:' + Number(adminId), async function () {
-  let allMsg = [];
+  // اول فقط id/status/channel (سبک) تا timeout نشود
+  let light = [];
   try {
-    allMsg = (await db.select().from(messages).all()) || [];
-  } catch (e) {
-    console.error('selectReviewablePending all', e);
-    return [];
+    light =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+        })
+        .from(messages)
+        .where(eq(messages.status, 'pending'))
+        .all()) || [];
+  } catch (e1) {
+    console.error('selectReviewablePending light+where', e1);
+    try {
+      light =
+        (await db
+          .select({
+            id: messages.id,
+            status: messages.status,
+            channelKey: messages.channelKey,
+          })
+          .from(messages)
+          .all()) || [];
+      light = light.filter(function (m) {
+        return String(m.status) === 'pending';
+      });
+    } catch (e2) {
+      console.error('selectReviewablePending light all', e2);
+      return [];
+    }
   }
-  const pending = allMsg
-    .filter(function (m) {
-      return String(m.status) === 'pending';
-    })
-    .sort(function (a, b) {
-      return (a.id || 0) - (b.id || 0);
-    });
+
+  light.sort(function (a, b) {
+    return (Number(a.id) || 0) - (Number(b.id) || 0);
+  });
+
   function msgCh(m) {
     return String((m.channelKey ?? m.channel_key) || '');
   }
+
+  let filtered = light;
   if (isOwner(adminId)) {
     try {
       const ch = await settingGet('owner_pend_ch:' + adminId, '');
-      if (ch) return pending.filter(function (m) { return msgCh(m) === String(ch); });
+      if (ch) {
+        filtered = light.filter(function (m) {
+          return msgCh(m) === String(ch);
+        });
+      }
     } catch (_e) {}
-    return pending;
+  } else {
+    const allowList = await allowedReviewChannels(adminId);
+    if (!allowList.length) return [];
+    const allowed = {};
+    for (const k of allowList) allowed[String(k)] = true;
+    filtered = light.filter(function (m) {
+      return !!allowed[msgCh(m)];
+    });
   }
-  const allowList = await allowedReviewChannels(adminId);
-  if (!allowList.length) return [];
-  const allowed = {};
-  for (const k of allowList) allowed[String(k)] = true;
-  return pending.filter(function (m) {
-    return !!allowed[msgCh(m)];
+
+  // فقط به اندازه‌ی چند Batch ردیف کامل بگیر (نه کل صف)
+  const need = Math.max(REVIEW_BATCH_SIZE * 3, 48);
+  const ids = filtered.slice(0, need).map(function (m) {
+    return Number(m.id);
   });
-  });
+  const full = [];
+  for (let i = 0; i < ids.length; i++) {
+    try {
+      const row = await getMessageById(ids[i]);
+      if (row && String(row.status) === 'pending') full.push(row);
+    } catch (_e) {}
+  }
+  return full;
 }
 
 
