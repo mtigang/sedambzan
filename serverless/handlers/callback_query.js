@@ -2110,7 +2110,28 @@ if (data.startsWith('own_shift:')) {
         String(dt.getUTCMonth() + 1).padStart(2, '0') +
         '-' +
         String(dt.getUTCDate()).padStart(2, '0');
-      const allMsg = (await db.select().from(messages).all()) || [];
+      let allMsg = [];
+      try {
+        allMsg =
+          (await db
+            .select({
+              id: messages.id,
+              status: messages.status,
+              channelKey: messages.channelKey,
+              reviewedBy: messages.reviewedBy,
+              reviewedAt: messages.reviewedAt,
+            })
+            .from(messages)
+            .all()) || [];
+      } catch (e) {
+        console.error('admin_stats messages', e);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '⚠️ خطا در خواندن پیام‌ها (timeout). بعداً دوباره تلاش کنید.\n' + String(e.message || e).slice(0, 150),
+        });
+        return;
+      }
+
       const allSh = (await db.select().from(shifts).all()) || [];
       let body =
         '👮 آمار ادمین‌ها\n📅 ' +
