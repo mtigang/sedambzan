@@ -496,7 +496,7 @@ export async function activeShiftAdmins(channelKey) {
  *  - Batch state ≠ Message state: حذف Batch هیچ پیامی را تغییر نمی‌دهد.
  * ============================================================ */
 
-export const REVIEW_BATCH_SIZE = 10;
+export const REVIEW_BATCH_SIZE = 16;
 const REVIEW_LOCK_TTL_MS = 10 * 1000;
 
 function reviewBatchKey(adminId) {
