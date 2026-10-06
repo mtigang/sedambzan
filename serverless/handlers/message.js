@@ -96,6 +96,7 @@ import {
   dropMessageFromReviewBatch,
   toBoldHtml,
   activeShiftChannelKeys,
+  checkInactiveShiftAndCancel,
   listAdminsByChannel,
   syncAdminsFromGroup,
   syncAllAdminGroups,
@@ -795,6 +796,13 @@ export default async function (message) {
           text: note,
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
+
+        // اگر صف خیلی سنگین شد و ادمین شیفت هیچ فعالیتی نداشت → لغو شیفت
+        try {
+          await checkInactiveShiftAndCancel(v.channelKey);
+        } catch (_e) {
+          console.error('inactive shift check', _e);
+        }
 
         // batch only
         return;
