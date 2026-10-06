@@ -1,7 +1,7 @@
 import { api, db } from 'sdk';
 import {  channels, channelAdmins, shifts, settings, users, messages, subLeaders } from 'schema';
 // subLeaders used for role
-import { eq, and } from 'sdk/db';
+import { eq, and, sql } from 'sdk/db';
 import {
   DEFAULT_CHANNELS,
   OWNER_IDS,
@@ -498,6 +498,125 @@ export async function activeShiftAdmins(channelKey) {
  * (نسخه قبلی شیفت‌های فعال را اشتباه لغو می‌کرد و Batch می‌شکست).
  * فقط اگر صریحاً با force=true صدا زده شود کار می‌کند.
  */
+
+/** داشبورد آماری سبک — بدون خواندن content پیام‌ها */
+export async function getStatsDashboardText() {
+  let rows = [];
+  let msgErr = null;
+  try {
+    rows =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+        })
+        .from(messages)
+        .all()) || [];
+  } catch (e1) {
+    console.error('stats light select', e1);
+    msgErr = e1;
+    rows = [];
+    try {
+      const cAll = await db.select({ n: sql`count(*)` }).from(messages).all();
+      const totalGuess = Number(
+        (cAll && cAll[0] && (cAll[0].n != null ? cAll[0].n : Object.values(cAll[0])[0])) || 0
+      );
+      if (totalGuess) {
+        msgErr = new Error('select سبک timeout؛ count≈' + totalGuess);
+      }
+    } catch (_e2) {}
+  }
+  function stOf(x) {
+    return String((x && x.status) || '');
+  }
+  function chOf(x) {
+    return String((x && (x.channelKey ?? x.channel_key)) || '');
+  }
+  const pe = rows.filter(function (x) { return stOf(x) === 'pending'; }).length;
+  const ap = rows.filter(function (x) { return stOf(x) === 'approved'; }).length;
+  const rj = rows.filter(function (x) { return stOf(x) === 'rejected'; }).length;
+  let us = [];
+  try {
+    us = (await db.select().from(users).all()) || [];
+  } catch (_e) {}
+  let ads = [];
+  try {
+    ads = (await db.select().from(channelAdmins).all()) || [];
+  } catch (_e) {}
+  const adminIds = new Set(
+    ads.map(function (a) {
+      return a.userId || a.user_id;
+    })
+  );
+  let shToday = 0;
+  try {
+    const now = tehranNow();
+    const pdate = periodDateStr(now);
+    const sh = (await db.select().from(shifts).all()) || [];
+    shToday = sh.filter(function (s) {
+      if (String(s.status) !== 'active') return false;
+      const sd = String(s.shiftDate ?? s.shift_date ?? '');
+      return sd === String(now.date) || sd === String(pdate) || sd === 'perm' || sd === 'permanent';
+    }).length;
+  } catch (_e) {}
+  let by = '';
+  for (const c of Object.values(DEFAULT_CHANNELS)) {
+    const cm = rows.filter(function (x) {
+      return chOf(x) === c.key;
+    });
+    by +=
+      '• ' +
+      c.title +
+      ': ' +
+      cm.length +
+      ' (🟡' +
+      cm.filter(function (x) {
+        return stOf(x) === 'pending';
+      }).length +
+      ' 🟢' +
+      cm.filter(function (x) {
+        return stOf(x) === 'approved';
+      }).length +
+      ' 🔴' +
+      cm.filter(function (x) {
+        return stOf(x) === 'rejected';
+      }).length +
+      ')\n';
+  }
+  let text =
+    '📊 داشبورد آماری\n\n' +
+    '📨 کل پیام‌ها: ' +
+    rows.length +
+    '\n' +
+    '🟡 در انتظار: ' +
+    pe +
+    '\n' +
+    '🟢 تأیید شده: ' +
+    ap +
+    '\n' +
+    '🔴 رد شده: ' +
+    rj +
+    '\n\n' +
+    '👥 کاربران: ' +
+    us.length +
+    '\n' +
+    '👮 ادمین‌ها (یکتا): ' +
+    adminIds.size +
+    '\n' +
+    '⏰ شیفت فعال امروز: ' +
+    shToday +
+    '\n\n' +
+    '📺 تفکیک کانال:\n' +
+    by;
+  if (msgErr) {
+    text +=
+      '\n\n⚠️ خطا در خواندن پیام‌ها:\n' +
+      String(msgErr.message || msgErr.description || msgErr).slice(0, 220);
+  }
+  return text;
+}
+
 export async function checkInactiveShiftAndCancel(channelKey, opts) {
   // disabled — do nothing
   return { cancelled: [], disabled: true };
