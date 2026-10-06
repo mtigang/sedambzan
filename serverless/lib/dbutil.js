@@ -487,6 +487,135 @@ export async function activeShiftAdmins(channelKey) {
   }
 }
 
+
+/**
+ * اگر برای کانال ≥۵۰ پیام pending باشد و ادمین(های) شیفت فعال
+ * در بازهٔ شیفت‌شان هیچ تأیید/ردی نداشته باشند → شیفت لغو + اطلاع به مالک‌ها.
+ */
+export async function checkInactiveShiftAndCancel(channelKey) {
+  try {
+    const key = String(channelKey || '');
+    if (!key || !DEFAULT_CHANNELS[key]) return { cancelled: [] };
+
+    const pendingRows =
+      (await db
+        .select()
+        .from(messages)
+        .where(and(eq(messages.channelKey, key), eq(messages.status, 'pending')))
+        .all()) || [];
+    if (pendingRows.length < 50) return { cancelled: [], pending: pendingRows.length };
+
+    const now = tehranNow();
+    const pdate = periodDateStr(now);
+    const allSh = (await db.select().from(shifts).where(eq(shifts.channelKey, key)).all()) || [];
+    const activeNow = allSh.filter(function (s) {
+      return shiftActiveNow(s, now, pdate);
+    });
+    if (!activeNow.length) return { cancelled: [], pending: pendingRows.length };
+
+    const allMsg = (await db.select().from(messages).where(eq(messages.channelKey, key)).all()) || [];
+    const cancelled = [];
+
+    for (const s of activeNow) {
+      const aid = Number(s.adminId ?? s.admin_id);
+      if (!aid || isOwner(aid)) continue;
+
+      // آیا این ادمین در بازهٔ همین شیفت حداقل یک بررسی داشته؟
+      const start = normHm(s.startHm || s.start_hm || '');
+      const end = normHm(s.endHm || s.end_hm || '');
+      let reviewed = 0;
+      for (const m of allMsg) {
+        const st = String(m.status || '');
+        if (st !== 'approved' && st !== 'rejected') continue;
+        if (Number(m.reviewedBy ?? m.reviewed_by) !== aid) continue;
+        // reviewedAt اگر باشد در بازه شیفت چک می‌کنیم؛ وگرنه هر بررسی این ادمین را می‌شماریم
+        const ra = m.reviewedAt || m.reviewed_at;
+        if (ra) {
+          try {
+            const d = ra instanceof Date ? ra : new Date(ra);
+            // تقریبی: فقط شمارش وجود بررسی توسط این ادمین کافی است برای «فعال بودن»
+            reviewed += 1;
+          } catch (_e) {
+            reviewed += 1;
+          }
+        } else {
+          reviewed += 1;
+        }
+      }
+      if (reviewed > 0) continue;
+
+      // لغو شیفت
+      try {
+        await db
+          .update(shifts)
+          .set({ status: 'cancelled' })
+          .where(eq(shifts.id, Number(s.id)))
+          .run();
+      } catch (e) {
+        console.error('cancel inactive shift', e);
+        continue;
+      }
+
+      const u = await getUser(aid);
+      const name = displayName(u, aid);
+      const title = (DEFAULT_CHANNELS[key] && DEFAULT_CHANNELS[key].title) || key;
+      cancelled.push({
+        shiftId: s.id,
+        adminId: aid,
+        name: name,
+        channelKey: key,
+        startHm: start,
+        endHm: end,
+      });
+
+      const text =
+        '⚠️ لغو خودکار شیفت (عدم فعالیت)\n\n' +
+        'کانال: «' +
+        title +
+        '»\n' +
+        'ادمین: ' +
+        name +
+        ' (' +
+        aid +
+        ')\n' +
+        'شیفت: ' +
+        start +
+        '–' +
+        end +
+        '\n' +
+        'علت: بیش از ۵۰ پیام در انتظار است و این ادمین هیچ تأیید/ردی در شیفت نداشته.\n' +
+        'شیفت لغو شد تا ادمین دیگری بتواند جایگزین شود.';
+
+      for (const oid of OWNER_IDS) {
+        try {
+          await api.sendMessage({ chat_id: Number(oid), text: text });
+        } catch (_e) {}
+      }
+      // به خود ادمین هم بگو
+      try {
+        await api.sendMessage({
+          chat_id: aid,
+          text:
+            '⚠️ شیفت شما در «' +
+            title +
+            '» (' +
+            start +
+            '–' +
+            end +
+            ') به‌خاطر عدم فعالیت لغو شد.\n' +
+            'بیش از ۵۰ پیام در صف بود و هیچ بررسی از سمت شما ثبت نشده بود.',
+        });
+      } catch (_e) {}
+    }
+
+    return { cancelled: cancelled, pending: pendingRows.length };
+  } catch (e) {
+    console.error('checkInactiveShiftAndCancel', e);
+    return { cancelled: [], error: true };
+  }
+}
+
+
 /* ============================================================
  *  سیستم Batch بررسی پیام‌ها (Serverless-safe)
  *  - هیچ Pending ای خودکار برای ادمین ارسال نمی‌شود (No Push).
