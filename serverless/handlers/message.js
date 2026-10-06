@@ -97,6 +97,7 @@ import {
   toBoldHtml,
   activeShiftChannelKeys,
   checkInactiveShiftAndCancel,
+  restoreMistakenlyCancelledShifts,
   listAdminsByChannel,
   syncAdminsFromGroup,
   syncAllAdminGroups,
@@ -881,7 +882,11 @@ export default async function (message) {
         });
         return;
       }
-      // ادمین/ساب‌لیدر: ساخت/بازیابی Batch ده‌تایی
+      // ادمین/ساب‌لیدر: ساخت/بازیابی Batch
+      // اگر شیفت‌ها اشتباه لغو شده بودند، همان‌هایی که هنوز در بازه ساعت‌شان هستند برگردان
+      try {
+        await restoreMistakenlyCancelledShifts();
+      } catch (_e) {}
       const res = await createReviewBatch(userId);
       if (res.status === 'no_shift') {
         await api.sendMessage({
