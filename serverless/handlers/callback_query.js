@@ -29,6 +29,7 @@ import {
   activeShiftChannelKeys,
   canManageOthersShifts,
   createReviewBatch,
+  restoreMistakenlyCancelledShifts,
   sendReviewBatch,
   finishReviewBatchIfComplete,
   getReviewBatch,
@@ -680,6 +681,7 @@ if (data.startsWith('reject_menu:')) {
           await settingSet('owner_pend_ch:' + userId, '');
         }
       } catch (_e) {}
+      try { await restoreMistakenlyCancelledShifts(); } catch (_e) {}
       const res = await createReviewBatch(userId);
       if (res.status === 'empty') {
         await api.sendMessage({
@@ -745,6 +747,7 @@ if (data.startsWith('reject_menu:')) {
           return;
         }
       }
+      try { await restoreMistakenlyCancelledShifts(); } catch (_e) {}
       const res = await createReviewBatch(userId);
       if (res.status === 'no_shift') {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: '❌ شیفت شما تمام شده است.', show_alert: true });
