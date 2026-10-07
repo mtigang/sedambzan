@@ -99,6 +99,7 @@ import {
   checkInactiveShiftAndCancel,
   restoreMistakenlyCancelledShifts,
   getStatsDashboardText,
+  dedupeActiveShifts,
   listAdminsByChannel,
   syncAdminsFromGroup,
   syncAllAdminGroups,
@@ -1100,6 +1101,12 @@ export default async function (message) {
 
     if (owner && text === '⏰ شیفت‌ها') {
       try {
+try {
+        for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
+          try { await dedupeActiveShifts(ck); } catch (_e) {}
+        }
+      } catch (_e) {}
+      
         const now = tehranNow();
         const pdate = periodDateStr(now);
         let all = [];
@@ -2284,6 +2291,13 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
     
     
     if (owner && text === '🗑 پاک‌سازی pending کاربر') {
+
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'این گزینه حذف شده است.',
+        reply_markup: ownerKeyboard(userId),
+      });
+      return;
       await setState(userId, 'purge_user_wait_id');
       await api.sendMessage({
         chat_id: chatId,
@@ -2350,6 +2364,13 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
     }
 
     if (owner && text === '📤 انتشار مستقیم صف') {
+
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'این گزینه حذف شده است.',
+        reply_markup: ownerKeyboard(userId),
+      });
+      return;
       await api.sendMessage({
         chat_id: chatId,
         text:
@@ -2362,6 +2383,13 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
     }
 
     if (owner && text === '🧹 پاک‌سازی صف') {
+
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'این گزینه حذف شده است.',
+        reply_markup: ownerKeyboard(userId),
+      });
+      return;
       await setState(userId, 'clear_q');
       await api.sendMessage({
         chat_id: chatId,
