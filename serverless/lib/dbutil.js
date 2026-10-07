@@ -703,6 +703,118 @@ export function shiftIntervalOverlaps(startHm, endHm, otherStartHm, otherEndHm) 
   return s1 < e2 && s2 < e1;
 }
 
+
+/** آیا این بازه در کانال برای دوره/دائم توسط کسی اشغال است؟ */
+export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShiftId) {
+  try {
+    const rows =
+      (await db
+        .select()
+        .from(shifts)
+        .where(and(eq(shifts.channelKey, String(channelKey)), eq(shifts.status, 'active')))
+        .all()) || [];
+    const now = tehranNow();
+    const pdate = periodDateStr(now);
+    for (const s of rows) {
+      if (excludeShiftId != null && Number(s.id) === Number(excludeShiftId)) continue;
+      const sd = String(s.shiftDate ?? s.shift_date ?? '');
+      const relevant =
+        sd === 'perm' ||
+        sd === 'permanent' ||
+        sd === String(pdate) ||
+        sd === String(now.date);
+      if (!relevant) continue;
+      if (String(s.startHm) === String(s.endHm)) continue;
+      if (shiftIntervalOverlaps(startHm, endHm, s.startHm || s.start_hm, s.endHm || s.end_hm)) {
+        return s;
+      }
+    }
+    return null;
+  } catch (e) {
+    console.error('isChannelSlotTaken', e);
+    return null;
+  }
+}
+
+/**
+ * حذف شیفت‌های تکراری فعال در یک کانال:
+ * اگر دو رکورد با همان admin + همان بازه (+ همان نوع دوره) باشند، فقط قدیمی‌ترین می‌ماند.
+ * اگر دو ادمین مختلف روی بازه هم‌پوشان باشند، دومی (id بزرگ‌تر) لغو می‌شود.
+ */
+export async function dedupeActiveShifts(channelKey) {
+  try {
+    const rows =
+      (await db
+        .select()
+        .from(shifts)
+        .where(and(eq(shifts.channelKey, String(channelKey)), eq(shifts.status, 'active')))
+        .all()) || [];
+    const now = tehranNow();
+    const pdate = periodDateStr(now);
+    const relevant = rows
+      .filter(function (s) {
+        const sd = String(s.shiftDate ?? s.shift_date ?? '');
+        return (
+          sd === 'perm' ||
+          sd === 'permanent' ||
+          sd === String(pdate) ||
+          sd === String(now.date)
+        );
+      })
+      .sort(function (a, b) {
+        return Number(a.id) - Number(b.id);
+      });
+    let cancelled = 0;
+    const kept = [];
+    for (const s of relevant) {
+      if (String(s.startHm) === String(s.endHm)) continue;
+      let drop = false;
+      for (const k of kept) {
+        // تکراری دقیق همان ادمین + همان بازه
+        const sameAdmin = Number(k.adminId ?? k.admin_id) === Number(s.adminId ?? s.admin_id);
+        const sameRange =
+          String(k.startHm) === String(s.startHm) && String(k.endHm) === String(s.endHm);
+        const kPerm = String(k.shiftDate) === 'perm' || String(k.shiftDate) === 'permanent';
+        const sPerm = String(s.shiftDate) === 'perm' || String(s.shiftDate) === 'permanent';
+        // هر دو دائم یا هر دو روزانه دوره
+        if (sameAdmin && sameRange && kPerm === sPerm) {
+          drop = true;
+          break;
+        }
+        // هم‌پوشانی بین دو ادمین مختلف → دومی حذف
+        if (
+          !sameAdmin &&
+          shiftIntervalOverlaps(s.startHm, s.endHm, k.startHm, k.endHm)
+        ) {
+          drop = true;
+          break;
+        }
+        // همان ادمین بازه هم‌پوشان
+        if (
+          sameAdmin &&
+          shiftIntervalOverlaps(s.startHm, s.endHm, k.startHm, k.endHm)
+        ) {
+          drop = true;
+          break;
+        }
+      }
+      if (drop) {
+        try {
+          await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, Number(s.id))).run();
+          cancelled += 1;
+        } catch (_e) {}
+      } else {
+        kept.push(s);
+      }
+    }
+    return { cancelled: cancelled, kept: kept.length };
+  } catch (e) {
+    console.error('dedupeActiveShifts', e);
+    return { cancelled: 0 };
+  }
+}
+
+
 export async function findAdminShiftConflict(adminId, shiftDate, startHm, endHm, excludeId = null) {
   try {
     const rows = (await db.select().from(shifts).where(
