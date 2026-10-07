@@ -34,6 +34,9 @@ import {
   finishReviewBatchIfComplete,
   getReviewBatch,
   findAdminShiftConflict,
+  isChannelSlotTaken,
+  dedupeActiveShifts,
+  shiftIntervalOverlaps,
 } from 'lib/dbutil';
 import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob } from 'lib/announce_drain';
 import { setState, getState, clearState } from 'lib/state';
@@ -3174,7 +3177,26 @@ if (data === 'ann_continue') {
           });
           return;
         }
+        const slotTaken0 = await isChannelSlotTaken(channelKey, startHm, endHm, null);
+        if (slotTaken0 && Number(slotTaken0.adminId ?? slotTaken0.admin_id) !== Number(targetAdmin)) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'این بازه در کانال قبلاً پر شده است.',
+            show_alert: true,
+          });
+          return;
+        }
         await clearState(userId);
+        // double-check right before insert
+        const slotTaken1 = await isChannelSlotTaken(channelKey, startHm, endHm, null);
+        if (slotTaken1 && Number(slotTaken1.adminId ?? slotTaken1.admin_id) !== Number(targetAdmin)) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'این بازه همین الان پر شد.',
+            show_alert: true,
+          });
+          return;
+        }
         await db
           .insert(shifts)
           .values({
@@ -3310,6 +3332,19 @@ if (data === 'ann_continue') {
         }
       } catch (_e) {}
       const shiftDateVal = pickMode === 'perm' ? 'perm' : pdate;
+      // چک نهایی تداخل کانال (جلوگیری از دابل و race)
+      const slotFinal = await isChannelSlotTaken(channelKey, startHm, endHm, null);
+      if (slotFinal) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'این بازه پر است یا همزمان گرفته شد.',
+          show_alert: true,
+        });
+        try {
+          await refreshAllShiftBoards(channelKey, pdate);
+        } catch (_e) {}
+        return;
+      }
       await db
         .insert(shifts)
         .values({
@@ -3321,6 +3356,10 @@ if (data === 'ann_continue') {
           status: 'active',
         })
         .run();
+      // پاک‌سازی تکراری‌های احتمالی همین کانال
+      try {
+        await dedupeActiveShifts(channelKey);
+      } catch (_e) {}
 
       await api.answerCallbackQuery({
         callback_query_id: cq.id,
