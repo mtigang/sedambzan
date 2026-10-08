@@ -1065,9 +1065,7 @@ export default async function (message) {
         text:
           '⏰ کانال «' +
           entry.title +
-          '»\nنوع شیفت را انتخاب کنید:\n\n' +
-          '📅 روزانه → فقط همین دوره (فردا اعمال نمی‌شود)\n' +
-          '♾️ دائمی → هر روز همان ساعت',
+          '»\nشیفت فقط برای همین دوره است (یک‌بارمصرف، فردا تکرار نمی‌شود).\nحداکثر ۳ شیفت.\nساعت را انتخاب کنید:',
         reply_markup: sanitizeMarkup(shiftModePickInline(entry.key)),
       });
       return;
@@ -1087,7 +1085,7 @@ export default async function (message) {
       });
       return;
     }
-    if (owner && text === '📌 تخصیص شیفت دائمی') {
+    if (false && owner && text === '📌 تخصیص شیفت دائمی') {
       await setState(userId, 'own_assign', { mode: 'perm' });
       await api.sendMessage({
         chat_id: chatId,
@@ -1862,6 +1860,27 @@ try {
       }
     }
 
+
+
+    if ((owner || role === 'subleader') && text === '👮 آمار ادمین‌ها') {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '👮 آمار ادمین‌ها — بازه را انتخاب کنید:',
+        reply_markup: sanitizeMarkup({
+          inline_keyboard: [
+            [{ text: '📅 امروز', callback_data: 'admin_stats:0', style: 'primary' }],
+            [{ text: '📅 دیروز', callback_data: 'admin_stats:1', style: 'primary' }],
+            [{ text: '📅 ۲ روز پیش', callback_data: 'admin_stats:2', style: 'primary' }],
+            [{ text: '📅 ۳ روز پیش', callback_data: 'admin_stats:3', style: 'primary' }],
+            [{ text: '📅 ۴ روز پیش', callback_data: 'admin_stats:4', style: 'primary' }],
+            [{ text: '📅 ۵ روز پیش', callback_data: 'admin_stats:5', style: 'primary' }],
+            [{ text: '📅 ۶ روز پیش', callback_data: 'admin_stats:6', style: 'primary' }],
+            [{ text: '📅 ۷ روز پیش', callback_data: 'admin_stats:7', style: 'primary' }],
+          ],
+        }),
+      });
+      return;
+    }
 
     if (owner && text === '📊 آمار') {
       try {
