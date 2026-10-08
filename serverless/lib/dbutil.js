@@ -141,6 +141,22 @@ export async function setChannelAdMode(channelKey, on) {
   await settingSet('ch_ad:' + channelKey, on ? '1' : '0');
 }
 
+/** حالت جمعه — همه کانال‌ها؛ ادمین/مالک کار می‌کنند، کاربر پیام نمی‌فرستد */
+export async function isFridayMode() {
+  return (await settingGet('friday_mode', '0')) === '1';
+}
+
+export async function setFridayMode(on) {
+  await settingSet('friday_mode', on ? '1' : '0');
+}
+
+export const FRIDAY_MODE_TEXT =
+  '🌙 امروز جمعه‌ست…\n\n' +
+  'همه خوابیم 😴\n' +
+  'تکست و این حرفا کنسله.\n\n' +
+  'شنبه برگرد، با انرژی بیشتر منتظرتیم 🌸';
+
+
 /** نزدیک‌ترین شیفت فعال بعدی برای کانال (بعد از الان) */
 export async function nextShiftAfterNow(channelKey) {
   try {
