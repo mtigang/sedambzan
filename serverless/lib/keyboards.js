@@ -187,12 +187,12 @@ export function backKeyboard() {
   return { keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true };
 }
 
-export function settingsKeyboard(botOn) {
+export function settingsKeyboard(botOn, fridayOn) {
   return sanitizeMarkup({
     keyboard: [
       [{ text: '📢 حالت تب' }, { text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
-      [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
-      [{ text: '🧪 تست کانال‌ها' }],
+      [{ text: fridayOn ? '☀️ خاموش کردن حالت جمعه' : '🌙 حالت جمعه' }, { text: '📣 اطلاعیه' }],
+      [{ text: '📣 ارسال' }, { text: '🧪 تست کانال‌ها' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
