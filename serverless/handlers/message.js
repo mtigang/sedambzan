@@ -77,6 +77,9 @@ import {
   isBotOn,
   isChannelOpen,
   isChannelAdMode,
+  isFridayMode,
+  setFridayMode,
+  FRIDAY_MODE_TEXT,
   setChannelEnabled,
   setChannelAdMode,
   nextShiftAfterNow,
@@ -448,6 +451,14 @@ export default async function (message) {
         await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
         return;
       }
+      if (!owner && (await isFridayMode())) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: FRIDAY_MODE_TEXT,
+          reply_markup: await roleKb(userId),
+        });
+        return;
+      }
       if (!owner && !isWorkHours()) {
         await api.sendMessage({
           chat_id: chatId,
@@ -542,6 +553,15 @@ export default async function (message) {
 
     if (state?.kind === 'user_send' && text) {
       try {
+        if (!owner && (await isFridayMode())) {
+          await clearState(userId);
+          await api.sendMessage({
+            chat_id: chatId,
+            text: FRIDAY_MODE_TEXT,
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
         if (!owner && !isWorkHours()) {
           await api.sendMessage({
             chat_id: chatId,
@@ -2251,10 +2271,11 @@ try {
 
 if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظیمات')) {
       const on = await isBotOn();
+      const fri = await isFridayMode();
       await api.sendMessage({
         chat_id: chatId,
-        text: '⚙️ ابزار ربات',
-        reply_markup: settingsKeyboard(on),
+        text: '⚙️ ابزار ربات' + (fri ? '\n🌙 حالت جمعه: روشن' : ''),
+        reply_markup: settingsKeyboard(on, fri),
       });
       return;
     }
@@ -2278,6 +2299,20 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
       return;
     }
 
+
+    if (owner && (text === '🌙 حالت جمعه' || text === '☀️ خاموش کردن حالت جمعه')) {
+      const turnOn = text === '🌙 حالت جمعه';
+      await setFridayMode(turnOn);
+      await api.sendMessage({
+        chat_id: chatId,
+        text: turnOn
+          ? '🌙 حالت جمعه برای هر ۳ کانال فعال شد.\nادمین/ساب‌لیدر/مالک مثل قبل کار می‌کنند.\nکاربر عادی نمی‌تواند پیام ثبت کند.'
+          : '☀️ حالت جمعه خاموش شد. دریافت پیام کاربران از سر گرفته شد.',
+        reply_markup: settingsKeyboard(await isBotOn(), turnOn),
+      });
+      return;
+    }
+
     if (owner && text === '📢 حالت تب') {
       await api.sendMessage({
         chat_id: chatId,
@@ -2297,7 +2332,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
       await api.sendMessage({
         chat_id: chatId,
         text: t,
-        reply_markup: settingsKeyboard(await isBotOn()),
+        reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode()),
       });
       return;
     }
@@ -2350,7 +2385,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
         await api.sendMessage({
           chat_id: chatId,
           text: 'ℹ️ این کاربر پیام pending ندارد.',
-          reply_markup: settingsKeyboard(await isBotOn()),
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode()),
         });
         return;
       }
