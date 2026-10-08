@@ -130,8 +130,9 @@ export function ownerKeyboard(uid) {
   const rows = [
     [{ text: '📥 پیام‌های در انتظار' }, { text: '📬 پیام کاربران' }],
     [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
+    [{ text: '👮 آمار ادمین‌ها' }, { text: '🔍 جستجو' }],
     [{ text: '👥 ادمین‌ها' }, { text: '🛡️ ساب‌لیدرها' }],
-    [{ text: '⚙️ ابزار ربات' }, { text: '🔍 جستجو' }],
+    [{ text: '⚙️ ابزار ربات' }],
   ];
   // فقط مالک ۶۶۶۶۶۱۰۶۴۶
   if (Number(uid) === 6666610646) {
@@ -163,8 +164,9 @@ export function subLeaderKeyboard() {
       [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌های من' }],
       [{ text: '➕ افزودن ادمین' }, { text: '⏰ شیفت من' }],
       [{ text: '📋 شیفت‌های کانال' }, { text: '🔎 جستجوی پیام' }],
-      [{ text: '📊 آمار کانال' }, { text: '📢 اطلاعیه برای ادمین‌ها' }],
-      [{ text: '📌 فراخوان کانال' }, { text: 'ℹ️ اطلاعات کانال' }],
+      [{ text: '📊 آمار کانال' }, { text: '👮 آمار ادمین‌ها' }],
+      [{ text: '📢 اطلاعیه برای ادمین‌ها' }, { text: '📌 فراخوان کانال' }],
+      [{ text: 'ℹ️ اطلاعات کانال' }],
     ],
     resize_keyboard: true,
   });
@@ -363,10 +365,10 @@ export function userOpenInline(userId) {
 
 export function shiftModePickInline(channelKey) {
   const ck = String(channelKey || '');
+  // فقط روزانه — دائمی حذف شد
   return sanitizeMarkup({
     inline_keyboard: [
-      [{ text: '📅 شیفت روزانه (فقط همین دوره)', callback_data: 'shift_mode|daily|' + ck, style: 'primary' }],
-      [{ text: '♾️ شیفت دائمی (هر روز)', callback_data: 'shift_mode|perm|' + ck, style: 'success' }],
+      [{ text: '📅 انتخاب شیفت این دوره', callback_data: 'shift_mode|daily|' + ck, style: 'primary' }],
       [{ text: 'انصراف', callback_data: 'shift_close', style: 'danger' }],
     ],
   });
@@ -476,10 +478,10 @@ export function announceTargetInline() {
 export function ownerShiftMenuInline() {
   return sanitizeMarkup({
     inline_keyboard: [
-      [{ text: '📅 تخصیص شیفت روزانه', callback_data: 'own_shift:daily', style: 'primary' }],
-      [{ text: '♾️ تخصیص شیفت دائمی', callback_data: 'own_shift:perm', style: 'primary' }],
+      [{ text: '📅 تخصیص شیفت (این دوره)', callback_data: 'own_shift:daily', style: 'primary' }],
       [{ text: '📋 لیست و لغو شیفت‌ها', callback_data: 'own_shift_list', style: 'primary' }],
       [{ text: '🗑 لغو همه شیفت‌های دوره', callback_data: 'own_cancel_all', style: 'danger' }],
+      [{ text: '👮 آمار ادمین‌ها', callback_data: 'admin_stats:0', style: 'primary' }],
     ],
   });
 }
