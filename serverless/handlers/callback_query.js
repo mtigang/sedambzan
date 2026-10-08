@@ -1853,7 +1853,7 @@ if (data.startsWith('own_shift:')) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
-      const mode = data.split(':')[1];
+      const mode = 'daily'; // دائمی حذف شد
       await setState(userId, 'own_assign', { mode: mode });
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       await api.sendMessage({
@@ -2138,9 +2138,15 @@ if (data.startsWith('own_shift:')) {
 
 
     if (data.startsWith('admin_stats:')) {
+      let slScope = null;
       if (!isOwner(userId)) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
-        return;
+        try {
+          slScope = await getActiveSubLeaderChannel(userId);
+        } catch (_e) {}
+        if (!slScope) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک یا ساب‌لیدر', show_alert: true });
+          return;
+        }
       }
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       const daysAgo = Number(data.split(':')[1]) || 0;
@@ -2182,7 +2188,12 @@ if (data.startsWith('own_shift:')) {
         day +
         (daysAgo ? ' (' + daysAgo + ' روز پیش)' : ' (امروز)') +
         '\n';
-      for (const conf of Object.values(DEFAULT_CHANNELS)) {
+      const _statsChannels = slScope
+        ? Object.values(DEFAULT_CHANNELS).filter(function (c) {
+            return c.key === slScope;
+          })
+        : Object.values(DEFAULT_CHANNELS);
+      for (const conf of _statsChannels) {
         body += '\n━━━━━━━━━━━━\n📢 «' + conf.title + '»\n━━━━━━━━━━━━\n';
         const dayShifts = allSh.filter(function (s) {
           return (
@@ -3054,12 +3065,13 @@ if (data === 'ann_continue') {
     
     if (data.startsWith('shift_mode|') || data.startsWith('shift_mode:')) {
       const parts = data.indexOf('|') >= 0 ? data.split('|') : data.split(':');
-      const mode = parts[1]; // daily | perm
+      let mode = parts[1]; // فقط daily — perm منسوخ
       const channelKey = parts[2];
-      if (!channelKey || (mode !== 'daily' && mode !== 'perm')) {
+      if (!channelKey) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
         return;
       }
+      mode = 'daily';
       const now = tehranNow();
       const date = periodDateStr(now);
       const dayShifts =
@@ -3082,15 +3094,16 @@ if (data === 'ann_continue') {
         takenMap[key] = s.adminId;
         if (Number(s.adminId) === Number(userId)) myStarts.add(key);
       }
-      await setState(userId, 'pick_shift_slot', { channelKey, mode });
+      await setState(userId, 'pick_shift_slot', { channelKey, mode: 'daily' });
       const title = (DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey;
-      const modeLabel = mode === 'perm' ? 'دائمی (هر روز)' : 'روزانه (فقط دوره ' + date + ')';
       let head =
         '⏰ شیفت‌های «' +
         title +
-        '»\nنوع: ' +
-        modeLabel +
-        '\nساعت کاری: ۱۲:۰۰ تا ۰۳:۰۰\nحداکثر ۳ بازه\n🟢 خالی  ·  🔴 پر (روزانه یا دائمی)\n\n';
+        '»\nدوره: ' +
+        date +
+        ' (یک‌بارمصرف)\nساعت کاری: ۱۲:۰۰ تا ۰۳:۰۰\n' +
+        (isOwner(userId) ? 'مالک: بدون سقف شیفت\n' : 'حداکثر ۳ شیفت\n') +
+        '🟢 خالی  ·  🔴 پر\n\n';
       if (occupied.length) {
         head += 'اشغال‌شده‌ها:\n';
         for (const s of occupied) {
@@ -3207,8 +3220,8 @@ if (data === 'ann_continue') {
       const stAssign = await getState(userId);
       if (stAssign && stAssign.kind === 'own_assign_slot') {
         const targetAdmin = stAssign.adminId;
-        const mode = stAssign.mode;
-        const shiftDate = mode === 'perm' ? 'perm' : pdate;
+        const mode = 'daily';
+        const shiftDate = pdate;
         const targetConflict = await findAdminShiftConflict(targetAdmin, shiftDate, startHm, endHm);
         if (targetConflict) {
           await api.answerCallbackQuery({
@@ -3348,7 +3361,7 @@ if (data === 'ann_continue') {
           s.shiftDate === 'permanent';
         return same && Number(s.adminId) === Number(userId);
       }).length;
-      if (mineCount >= 3) {
+      if (!isOwner(userId) && mineCount >= 3) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
           text: 'حداکثر ۳ شیفت در هر دوره',
@@ -3364,15 +3377,9 @@ if (data === 'ann_continue') {
         });
         return;
       }
-      // نوع از state: daily → فقط دوره فعلی | perm → دائمی
-      let pickMode = 'daily';
-      try {
-        const stPick = await getState(userId);
-        if (stPick && stPick.kind === 'pick_shift_slot' && stPick.mode) {
-          pickMode = stPick.mode === 'perm' ? 'perm' : 'daily';
-        }
-      } catch (_e) {}
-      const shiftDateVal = pickMode === 'perm' ? 'perm' : pdate;
+      // فقط دوره فعلی — دائمی حذف شد
+      const pickMode = 'daily';
+      const shiftDateVal = pdate;
       // چک نهایی تداخل کانال (جلوگیری از دابل و race)
       const slotFinal = await isChannelSlotTaken(channelKey, startHm, endHm, null);
       if (slotFinal) {
@@ -3404,7 +3411,7 @@ if (data === 'ann_continue') {
 
       await api.answerCallbackQuery({
         callback_query_id: cq.id,
-        text: pickMode === 'perm' ? 'ثبت دائمی ✅' : 'ثبت روزانه ✅',
+        text: 'ثبت شد ✅',
       });
       try {
         await refreshAllShiftBoards(channelKey, pdate);
@@ -3453,9 +3460,7 @@ if (data === 'ann_continue') {
           startHm +
           '–' +
           endHm +
-          (pickMode === 'perm'
-            ? ' به‌صورت دائمی ثبت شد (هر روز).'
-            : ' فقط برای دوره ' + pdate + ' ثبت شد (فردا اعمال نمی‌شود).') +
+          ' فقط برای دوره ' + pdate + ' ثبت شد (یک‌بارمصرف، فردا تکرار نمی‌شود).' +
           '\n\nوقتی ساعت شیفت رسید «📥 پیام‌های در انتظار» را بزنید.',
       });
       return;
