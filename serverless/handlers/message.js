@@ -650,32 +650,38 @@ export default async function (message) {
           console.error('ch flags', e);
         }
 
-        // —— شیفت فعال برای کانال؟
+        // —— شیفت فعال برای کانال؟ (بدون شیفت = ثبت ممنوع؛ خطا هم = ممنوع)
         if (!owner) {
+          let activeAds = [];
           try {
-            const activeAds = await activeShiftAdmins(v.channelKey);
-            if (!activeAds || !activeAds.length) {
+            activeAds = await activeShiftAdmins(v.channelKey);
+          } catch (e) {
+            console.error('shift gate', e);
+            activeAds = [];
+          }
+          if (!activeAds || !activeAds.length) {
+            let t =
+              '⏰ الان شیفت فعالی برای «' +
+              ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
+              '» نیست؛ پیام ثبت نمی‌شود.\n';
+            try {
               const nxt = await nextShiftAfterNow(v.channelKey);
-              let t =
-                '⏰ الان شیفت فعالی برای «' +
-                ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
-                '» نیست؛ پیام ثبت نمی‌شود.\n';
               if (nxt && nxt.current) {
                 t += 'در حال انتقال شیفت… چند لحظه بعد دوباره بفرستید.';
               } else if (nxt && nxt.start) {
                 t += 'نزدیک‌ترین شیفت بعدی از ساعت ' + toFaDigits(nxt.start) + ' تا ' + toFaDigits(nxt.end) + ' است.';
               } else {
-                t += 'هنوز شیفتی برای ادامه امروز ثبت نشده. لطفاً در ساعت کاری و با شیفت فعال ارسال کنید.';
+                t += 'هنوز شیفتی برای ادامه امروز ثبت نشده. لطفاً وقتی شیفت فعال است ارسال کنید.';
               }
-              await api.sendMessage({
-                chat_id: chatId,
-                text: t,
-                reply_markup: sanitizeMarkup(backKeyboard()),
-              });
-              return;
+            } catch (_e) {
+              t += 'لطفاً وقتی شیفت فعال است دوباره تلاش کنید.';
             }
-          } catch (e) {
-            console.error('shift gate', e);
+            await api.sendMessage({
+              chat_id: chatId,
+              text: t,
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
           }
         }
         const bodyKey = exactBodyKey(v.content);
@@ -684,7 +690,8 @@ export default async function (message) {
           let dupIsPending = false;
           let queuePos = 0;
           try {
-            const recent =
+            // همهٔ pending کانال + ۲۰۰تای اخیر برای approved
+            const pendingRows =
               (await db
                 .select({
                   id: messages.id,
@@ -692,26 +699,37 @@ export default async function (message) {
                   content: messages.content,
                 })
                 .from(messages)
-                .where(eq(messages.channelKey, v.channelKey))
-                .orderBy(desc(messages.id))
-                .limit(200)
+                .where(
+                  and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'pending'))
+                )
                 .all()) || [];
-            for (const row of recent) {
-              if (row.status !== 'pending' && row.status !== 'approved') continue;
+            const recentApproved =
+              (await db
+                .select({
+                  id: messages.id,
+                  status: messages.status,
+                  content: messages.content,
+                })
+                .from(messages)
+                .where(
+                  and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'approved'))
+                )
+                .orderBy(desc(messages.id))
+                .limit(150)
+                .all()) || [];
+            const scan = pendingRows.concat(recentApproved);
+            for (const row of scan) {
               const other = exactBodyKey(row.content);
               if (other && other === bodyKey) {
                 dup = row;
                 dupIsPending = row.status === 'pending';
                 if (dupIsPending) {
-                  // موقعیت تقریبی در ۲۰۰تای اخیر
-                  const pendingRecent = recent
-                    .filter(function (x) {
-                      return x.status === 'pending';
-                    })
+                  const pendingSorted = pendingRows
+                    .slice()
                     .sort(function (a, b) {
                       return Number(a.id) - Number(b.id);
                     });
-                  const idx = pendingRecent.findIndex(function (x) {
+                  const idx = pendingSorted.findIndex(function (x) {
                     return Number(x.id) === Number(row.id);
                   });
                   queuePos = idx >= 0 ? idx : 0;
