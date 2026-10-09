@@ -9,6 +9,7 @@ import {
   ADMIN_GROUP_IDS,
 } from 'lib/config';
 import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf, periodOrd } from 'lib/time';
+import { exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { reviewInline, sanitizeMarkup } from 'lib/keyboards';
 
 const __reqMemo = Object.create(null);
@@ -978,7 +979,7 @@ export async function canAdminReviewMessage(adminId, channelKey) {
  * اگر قفل موجود ولی منقضی بود، با compare-and-swap تصاحب می‌شود.
  * برمی‌گرداند: توکن قفل (string) یا null (مشغول).
  */
-async function acquireLock(key, ttl = REVIEW_LOCK_TTL_MS) {
+export async function acquireLock(key, ttl = REVIEW_LOCK_TTL_MS) {
   const now = Date.now();
   const mine = JSON.stringify({
     lockedAt: now,
@@ -1014,7 +1015,7 @@ async function acquireLock(key, ttl = REVIEW_LOCK_TTL_MS) {
   }
 }
 
-async function releaseLock(key, mine) {
+export async function releaseLock(key, mine) {
   if (!mine) return;
   try {
     await db.delete(settings).where(and(eq(settings.key, key), eq(settings.value, mine))).run();
@@ -1475,7 +1476,10 @@ export async function decideMessage(adminId, id, decision, reason) {
       reviewedAt: new Date(),
     };
     await db.update(messages).set(patch).where(eq(messages.id, id)).run();
-    // فقط Batch خود ادمین فوری؛ بقیه در پس‌زمینه
+    try {
+      const bk = exactBodyKey(row.content);
+      if (bk) await settingSet(bodyIndexSettingKey(row.channelKey || row.channel_key, bk), String(id) + '|approved');
+    } catch (_e) {}
     try {
       await dropMessageFromReviewBatch(adminId, id);
     } catch (_e) {}
@@ -1504,6 +1508,15 @@ export async function decideMessage(adminId, id, decision, reason) {
             reviewedAt: new Date(),
           };
     await db.update(messages).set(patch).where(eq(messages.id, id)).run();
+    // ایندکس تکراری: pending/approved نگه دار؛ rejected آزاد کن
+    try {
+      const bk = exactBodyKey(fresh.content);
+      if (bk) {
+        const k = bodyIndexSettingKey(fresh.channelKey || fresh.channel_key, bk);
+        if (decision === 'reject') await settingSet(k, String(id) + '|rejected');
+        else if (decision === 'approve') await settingSet(k, String(id) + '|approved');
+      }
+    } catch (_e) {}
     try {
       await dropMessageFromReviewBatch(adminId, id);
     } catch (_e) {}
