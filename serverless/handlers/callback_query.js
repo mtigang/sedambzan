@@ -413,6 +413,10 @@ export default async function (cq) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: acc.text, show_alert: true });
         return;
       }
+      // پاسخ سریع به تلگرام تا دکمه گیر نکند
+      try {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳ در حال انتشار…' });
+      } catch (_e) {}
 
       // ۱) رزرو اتمیک pending → publishing
       try {
@@ -424,15 +428,19 @@ export default async function (cq) {
       } catch (e) {
         console.error('reserve', e);
       }
-      // یک خواندن سبک فقط وقتی لازم؛ در اکثر موارد همان pendingRow کافی است
+      // فقط status — سبک و ضد انتشار دوبل
       {
-        const check = (await db.select().from(messages).where(eq(messages.id, id)).all()) || [];
+        const check =
+          (await db
+            .select({ status: messages.status })
+            .from(messages)
+            .where(eq(messages.id, id))
+            .all()) || [];
         if (!check[0] || String(check[0].status) !== 'publishing') {
           try {
-            await api.answerCallbackQuery({
-              callback_query_id: cq.id,
-              text: 'این پیام توسط شخص دیگری در حال بررسی/انتشار است',
-              show_alert: true,
+            await api.sendMessage({
+              chat_id: userId,
+              text: 'این پیام توسط شخص دیگری در حال بررسی است.',
             });
           } catch (_e) {}
           return;
@@ -460,15 +468,8 @@ export default async function (cq) {
         mid = sent && sent.message_id;
         if (!mid) throw new Error('message_id خالی');
         link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
-        if (!link || link.indexOf('/c/') >= 0) {
-          try {
-            const alt = await resolveChannelMessageLink(conf.chatId, mid, pendingRow.channelKey);
-            if (alt) link = alt;
-          } catch (_e) {}
-        }
-        try {
-          await settingSet('chmsg:' + pendingRow.channelKey + ':' + mid, String(id));
-        } catch (_e) {}
+        // resolveChannelMessageLink حذف شد برای سرعت (یوزرنیم کانال کافی است)
+        settingSet('chmsg:' + pendingRow.channelKey + ':' + mid, String(id)).catch(function () {});
       } catch (e) {
         console.error('publish first', e);
         try {
