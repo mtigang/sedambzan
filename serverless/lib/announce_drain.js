@@ -5,8 +5,8 @@ import { api } from 'sdk';
 import { settingGet, settingSet } from 'lib/dbutil';
 import { announceProgressInline, sanitizeMarkup } from 'lib/keyboards';
 
-const CHUNK = 35;
-const LOCK_MS = 4500;
+const CHUNK = 40;
+const LOCK_MS = 8000;
 
 export async function loadAnnounceJob() {
   const raw = await settingGet('announce_job', '');
@@ -160,41 +160,48 @@ export async function drainAnnouncePiggyback(maxN) {
     }
 
     const end = Math.min(cursor + n, total);
-    const slice = ids.slice(cursor, end);
-    // حفظ فیلدهای پیشرفت هنگام ذخیره
-    job.cursor = end;
-    if (end >= total) job.status = 'done';
-    await saveAnnounceJob(job);
-
     let ok = Number(job.ok) || 0;
     let fail = Number(job.fail) || 0;
     const text = job.text || '';
+    let pos = cursor;
+    let hit429 = false;
 
-    for (let i = 0; i < slice.length; i++) {
+    for (; pos < end; pos++) {
       try {
-        await api.sendMessage({ chat_id: slice[i], text: text });
+        await api.sendMessage({
+          chat_id: ids[pos],
+          text: text,
+          disable_notification: true,
+        });
         ok++;
       } catch (e) {
-        fail++;
         const msg = String((e && (e.description || e.message)) || e);
         if (msg.includes('429') || msg.toLowerCase().includes('too many') || msg.toLowerCase().includes('retry')) {
+          // cursor روی همین نفر بماند تا بعداً دوباره تلاش شود
+          hit429 = true;
           break;
         }
+        // بلاک / حذف‌شده / چت نامعتبر → رد شو برو بعدی
+        fail++;
       }
     }
 
     const job2 = (await loadAnnounceJob()) || job;
     job2.ok = ok;
     job2.fail = fail;
-    // اگر load قبلی progress را از دست داد، از job نگه دار
+    job2.cursor = pos;
+    if (!hit429 && pos >= total) job2.status = 'done';
+    else if (hit429) job2.status = 'running';
     if (!job2.progressMessageId && job.progressMessageId) {
       job2.progressMessageId = job.progressMessageId;
       job2.progressChatId = job.progressChatId || job.ownerId;
     }
-    if (Number(job2.cursor) >= (job2.ids || ids).length) job2.status = 'done';
     await saveAnnounceJob(job2);
     await settingSet('announce_lock', '0');
-    await updateAnnounceProgressBar(job2);
+    // نوار پیشرفت هر چند دسته یک‌بار تا API کمتر شلوغ شود
+    if (pos % 50 < n || job2.status === 'done' || hit429) {
+      await updateAnnounceProgressBar(job2);
+    }
 
     return {
       did: true,
