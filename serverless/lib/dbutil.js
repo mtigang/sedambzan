@@ -168,7 +168,8 @@ export async function nextShiftAfterNow(channelKey) {
       const ck = String((s.channelKey ?? s.channel_key) || '');
       if (ck !== String(channelKey)) return false;
       const sd = String((s.shiftDate ?? s.shift_date) || '');
-      return sd === pdate || sd === 'perm' || sd === 'permanent' || sd === now.date;
+      if (sd === 'perm' || sd === 'permanent') return false;
+      return sd === pdate || sd === now.date;
     });
     const nowM = periodOrd(now.hm);
     let best = null;
@@ -489,14 +490,13 @@ export async function activeShiftAdmins(channelKey) {
         .where(and(eq(shifts.channelKey, channelKey), eq(shifts.status, 'active')))
         .all()) || [];
     return rows
-      .filter((s) => {
-        if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') {
-          return inRange(now.hm, s.startHm, s.endHm);
-        }
-        if (s.shiftDate !== pdate && s.shiftDate !== now.date) return false;
-        return inRange(now.hm, s.startHm, s.endHm);
+      .filter(function (s) {
+        return shiftActiveNow(s, now, pdate);
       })
-      .map((s) => s.adminId);
+      .map(function (s) {
+        return s.adminId ?? s.admin_id;
+      })
+      .filter(Boolean);
   } catch (e) {
     console.error('activeShiftAdmins', e);
     return [];
