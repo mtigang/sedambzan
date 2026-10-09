@@ -685,45 +685,49 @@ export default async function (message) {
           }
         }
         const bodyKey = exactBodyKey(v.content);
-        if (bodyKey) {
+        if (!bodyKey) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '⚠️ متن پیام نامعتبر است.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        {
           let dup = null;
           let dupIsPending = false;
           let queuePos = 0;
           try {
-            // همهٔ pending کانال + ۲۰۰تای اخیر برای approved
-            const pendingRows =
-              (await db
-                .select({
-                  id: messages.id,
-                  status: messages.status,
-                  content: messages.content,
-                })
-                .from(messages)
-                .where(
-                  and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'pending'))
-                )
-                .all()) || [];
-            const recentApproved =
-              (await db
-                .select({
-                  id: messages.id,
-                  status: messages.status,
-                  content: messages.content,
-                })
-                .from(messages)
-                .where(
-                  and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'approved'))
-                )
-                .orderBy(desc(messages.id))
-                .limit(150)
-                .all()) || [];
-            const scan = pendingRows.concat(recentApproved);
-            for (const row of scan) {
-              const other = exactBodyKey(row.content);
-              if (other && other === bodyKey) {
-                dup = row;
-                dupIsPending = row.status === 'pending';
-                if (dupIsPending) {
+            // ایندکس سریع در settings
+            const bIdx = 'bkey:' + v.channelKey + ':' + bodyKey.slice(0, 180);
+            const hit = await settingGet(bIdx, '');
+            if (hit) {
+              const hid = Number(String(hit).split('|')[0]);
+              const hst = String(hit).split('|')[1] || 'pending';
+              if (hid && (hst === 'pending' || hst === 'approved')) {
+                dup = { id: hid, status: hst };
+                dupIsPending = hst === 'pending';
+              }
+            }
+            if (!dup) {
+              // همهٔ pending کانال (سبک)
+              const pendingRows =
+                (await db
+                  .select({
+                    id: messages.id,
+                    status: messages.status,
+                    content: messages.content,
+                  })
+                  .from(messages)
+                  .where(
+                    and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'pending'))
+                  )
+                  .all()) || [];
+              for (const row of pendingRows) {
+                const other = exactBodyKey(row.content);
+                if (other && other === bodyKey) {
+                  dup = row;
+                  dupIsPending = true;
                   const pendingSorted = pendingRows
                     .slice()
                     .sort(function (a, b) {
@@ -733,12 +737,49 @@ export default async function (message) {
                     return Number(x.id) === Number(row.id);
                   });
                   queuePos = idx >= 0 ? idx : 0;
+                  try {
+                    await settingSet(bIdx, String(row.id) + '|pending');
+                  } catch (_e) {}
+                  break;
                 }
-                break;
+              }
+            }
+            if (!dup) {
+              const recentApproved =
+                (await db
+                  .select({
+                    id: messages.id,
+                    status: messages.status,
+                    content: messages.content,
+                  })
+                  .from(messages)
+                  .where(
+                    and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'approved'))
+                  )
+                  .orderBy(desc(messages.id))
+                  .limit(200)
+                  .all()) || [];
+              for (const row of recentApproved) {
+                const other = exactBodyKey(row.content);
+                if (other && other === bodyKey) {
+                  dup = row;
+                  dupIsPending = false;
+                  try {
+                    await settingSet(bIdx, String(row.id) + '|approved');
+                  } catch (_e) {}
+                  break;
+                }
               }
             }
           } catch (e) {
             console.error('dup check', e);
+            // fail-closed: در خطای چک تکراری، ثبت نکن
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '⏳ بررسی تکراری بودن پیام طول کشید. چند ثانیه بعد دوباره بفرستید.',
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
           }
           if (dup) {
             let msgText = '';
@@ -820,6 +861,14 @@ export default async function (message) {
               .limit(1)
               .all()) || [];
           if (lastRows[0]) msgId = lastRows[0].id;
+          if (msgId != null && bodyKey) {
+            try {
+              await settingSet(
+                'bkey:' + v.channelKey + ':' + bodyKey.slice(0, 180),
+                String(msgId) + '|pending'
+              );
+            } catch (_e) {}
+          }
         } finally {
           try {
             await settingSet(sendLockKey, '0');
