@@ -1,7 +1,7 @@
-/** زمان تهران — دوره شیفت ۱۲:۰۰ تا ۰۳:۰۰ + شمسی */
+/** زمان تهران — دوره شیفت ۱۲:۰۰ تا ۰۰:۰۰ (نیمه‌شب) + شمسی */
 
 const PERIOD_START_MIN = 12 * 60; // ۱۲ ظهر
-const PERIOD_END_MIN = 3 * 60; // ۳ بامداد
+const PERIOD_END_MIN = 0 * 60; // ۰۰:۰۰ نیمه‌شب
 
 export function tehranNow() {
   const fmt = new Intl.DateTimeFormat('en-GB', {
@@ -47,9 +47,9 @@ export function hourKeyOf(hm) {
 }
 
 /**
- * ترتیب داخل دوره ۱۲:۰۰→۰۳:۰۰:
- * ۱۲:۰۰=720 … ۲۳:۵۹ ، بعد ۰۰:۰۰=1440+ … ۰۲:۵۹
- * قبل از ۱۲ ظهر در همان تقویم → +۲۴س برای مقایسه داخل دوره شبانه
+ * ترتیب داخل دوره ۱۲:۰۰→۰۰:۰۰:
+ * ۱۲:۰۰=720 … ۲۳:۵۹=1439 ، ۰۰:۰۰=1440
+ * قبل از ۱۲ ظهر → +۲۴س برای مقایسه
  */
 export function periodOrd(hm) {
   let m = hmToMin(normHm(hm));
@@ -59,32 +59,28 @@ export function periodOrd(hm) {
 
 /**
  * آیا hm داخل [startHm, endHm) است؟
- * پشتیبانی overnight (مثلاً ۲۳→۰۰ یا ۱۲→۰۳).
+ * پشتیبانی overnight (مثلاً ۲۳→۰۰).
  * شیفت با طول صفر (start===end) هرگز فعال نیست.
  */
 export function inRange(hm, startHm, endHm) {
   const start = normHm(startHm);
   const end = normHm(endHm);
-  if (start === end) return false; // ۰۰–۰۰ و مشابه = نامعتبر
+  if (start === end) return false;
   const t = periodOrd(hm);
   let s = periodOrd(start);
   let e = periodOrd(end);
   if (e <= s) e += 24 * 60;
-  // اگر بازه بیش از ۱۵ ساعت باشد احتمالاً داده خراب است — محدود کن
   if (e - s > 15 * 60) return false;
   return t >= s && t < e;
 }
 
 /**
- * تاریخ میلادی شروع دوره فعلی (روزی که ۱۲:۰۰ دوره را شروع می‌کند).
- * ۰۳:۰۰–۱۱:۵۹ → دوره بعدی از امروز ۱۲:۰۰
+ * تاریخ میلادی دوره فعلی (شروع از ۱۲:۰۰ همان روز تا ۰۰:۰۰).
+ * ۰۰:۰۰–۱۱:۵۹ → دوره از امروز ۱۲:۰۰ (هنوز شروع نشده / دوره قبل تمام شده)
  * ۱۲:۰۰–۲۳:۵۹ → دوره امروز
- * ۰۰:۰۰–۰۲:۵۹ → دوره از دیروز ۱۲:۰۰
  */
 export function periodDateStr(now) {
   if (!now) now = tehranNow();
-  if (now.hour >= 3 && now.hour < 12) return now.date;
-  if (now.hour < 3) return addDays(now.date, -1);
   return now.date;
 }
 
@@ -103,24 +99,18 @@ function addDays(iso, delta) {
 
 export function isWorkHours(now) {
   if (!now) now = tehranNow();
-  return inRange(now.hm, '12:00', '03:00');
+  // ۱۲:۰۰ تا ۰۰:۰۰ (نیمه‌شب) — نه بعد از نیمه‌شب
+  return inRange(now.hm, '12:00', '00:00');
 }
 
 /**
- * شیفت‌های قابل انتخاب ادمین:
- * - داخل دوره (۱۲–۰۳): فقط از الان به بعد (گذشته مخفی)
- * - خارج از دوره (۰۳–۱۲): همهٔ شیفت‌های دورهٔ پیش‌رو قابل انتخاب/لغو
+ * شیفت‌های قابل انتخاب: ۱۲:۰۰–۱۳:۰۰ … ۲۳:۰۰–۰۰:۰۰
  */
 export function buildAvailableShiftSlots(now) {
   if (!now) now = tehranNow();
-  // انتخاب شیفت همیشه فعال (۲۴ ساعته) — همه بازه‌های دوره ۱۲:۰۰→۰۳:۰۰
   const slots = [];
   const pad = (n) => String(n).padStart(2, '0');
-  const hours = [];
-  for (let h = 12; h <= 23; h++) hours.push(h);
-  for (let h = 0; h <= 2; h++) hours.push(h);
-
-  for (const h of hours) {
+  for (let h = 12; h <= 23; h++) {
     const start = pad(h) + ':00';
     const endH = (h + 1) % 24;
     const end = pad(endH) + ':00';
@@ -136,20 +126,21 @@ export function buildAvailableShiftSlots(now) {
 
 export function buildOwnerShiftSlots(now) {
   if (!now) now = tehranNow();
-  // مالک: ۲۴ ساعت آینده
+  // مالک: همه بازه‌های دوره ۱۲→۰۰ + در صورت نیاز ساعات قبل از ظهر همان روز
   const slots = [];
   const pad = (n) => String(n).padStart(2, '0');
-  for (let i = 0; i < 24; i++) {
-    const startH = (now.hour + i) % 24;
-    const endH = (startH + 1) % 24;
-    let start = pad(startH) + ':00';
-    const end = pad(endH) + ':00';
-    if (i === 0 && now.minute > 0) start = pad(now.hour) + ':' + pad(now.minute);
+  const base = buildAvailableShiftSlots(now);
+  // اگر مالک بیرون از ساعت کاری است، همان لیست دوره کافی است
+  for (const s of base) slots.push(s);
+  // ساعات ۰–۱۱ هم برای تخصیص آزاد مالک (بدون سقف دوره)
+  for (let h = 0; h < 12; h++) {
+    const start = pad(h) + ':00';
+    const end = pad(h + 1) + ':00';
     slots.push({
       start: start,
       end: end,
       label: start + '–' + end,
-      hourKey: pad(startH) + ':00',
+      hourKey: start,
     });
   }
   return slots;
@@ -245,7 +236,9 @@ export function hoursUntilWorkOpen(now) {
   if (isWorkHours(now)) return 0;
   const nowM = hmToMin(now.hm);
   const openM = 12 * 60;
-  if (nowM >= 3 * 60 && nowM < openM) return Math.max(1, Math.ceil((openM - nowM) / 60));
+  // ۰۰:۰۰–۱۱:۵۹ تا ظهر
+  if (nowM < openM) return Math.max(1, Math.ceil((openM - nowM) / 60));
+  // بعد از نیمه‌شب از مسیر دیگر نمی‌آید چون isWorkHours تا ۰۰:۰۰ است
   return Math.max(1, Math.ceil((openM + 24 * 60 - nowM) / 60));
 }
 
@@ -255,14 +248,14 @@ export function workHoursClosedText() {
     '⏰ ساعت کاری از ' +
     toFaDigits('12:00') +
     ' تا ' +
-    toFaDigits('03:00') +
+    toFaDigits('00:00') +
     ' است.\nالان خارج از ساعت کاری هستید.\nحدود ' +
     toFaDigits(h) +
     ' ساعت تا شروع کار مانده.'
   );
 }
 
-/** مرتب‌سازی شیفت‌ها داخل دوره ۱۲→۰۳ */
+/** مرتب‌سازی شیفت‌ها داخل دوره ۱۲→۰۰ */
 export function sortShiftsByPeriod(list) {
   return (list || []).slice().sort(function (a, b) {
     const sa = periodOrd(normHm(a.startHm || a.start_hm || '12:00'));
