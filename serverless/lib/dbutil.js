@@ -23,13 +23,27 @@ let _channelsSeededAt = 0;
 export async function ensureChannelsSeeded() {
   try {
     // هر ۶ ساعت یک‌بار کافی است — هر پیام ۳ آپدیت نزن
-    if (_channelsSeededAt && Date.now() - _channelsSeededAt < 6 * 3600 * 1000) {
+    if (_channelsSeededAt && Date.now() - _channelsSeededAt < 5 * 60 * 1000) {
       return Object.values(DEFAULT_CHANNELS);
     }
     for (const c of Object.values(DEFAULT_CHANNELS)) {
       try {
         const exist = await db.select().from(channels).where(eq(channels.key, c.key)).all();
-        if (exist && exist.length) continue; // موجود است — دست نزن
+        if (exist && exist.length) {
+          // ساعت کاری را با کانفیگ همگام کن
+          try {
+            await db
+              .update(channels)
+              .set({
+                workStart: c.workStart || '12:00',
+                workEnd: c.workEnd || '00:00',
+                title: c.title,
+              })
+              .where(eq(channels.key, c.key))
+              .run();
+          } catch (_e) {}
+          continue;
+        }
         await db
           .insert(channels)
           .values({
@@ -38,7 +52,7 @@ export async function ensureChannelsSeeded() {
             link: String(c.chatId),
             enabled: 1,
             workStart: c.workStart || '12:00',
-            workEnd: c.workEnd || '03:00',
+            workEnd: c.workEnd || '00:00',
           })
           .run();
       } catch (e) {
@@ -55,7 +69,7 @@ export async function ensureChannelsSeeded() {
       link: String(c.chatId),
       enabled: 1,
       workStart: c.workStart || '12:00',
-      workEnd: c.workEnd || '03:00',
+      workEnd: c.workEnd || '00:00',
     }));
   }
 }
