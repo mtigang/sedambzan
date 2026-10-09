@@ -103,6 +103,7 @@ import {
   restoreMistakenlyCancelledShifts,
   getStatsDashboardText,
   dedupeActiveShifts,
+  cancelAllPermanentShifts,
   listAdminsByChannel,
   syncAdminsFromGroup,
   syncAllAdminGroups,
@@ -1120,6 +1121,7 @@ export default async function (message) {
     if (owner && text === '⏰ شیفت‌ها') {
       try {
 try {
+        try { await cancelAllPermanentShifts(); } catch (_e) {}
         for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
           try { await dedupeActiveShifts(ck); } catch (_e) {}
         }
@@ -1134,14 +1136,11 @@ try {
           console.error('shifts all', e);
         }
         const today = all.filter(function (s) {
-          if (s.status !== 'active') return false;
+          if (String(s.status) !== 'active') return false;
           if (String(s.startHm) === String(s.endHm)) return false;
-          return (
-            (s.shiftDate === pdate ||
-              s.shiftDate === 'perm' ||
-              s.shiftDate === 'permanent' ||
-              s.shiftDate === now.date)
-          );
+          const sd = String(s.shiftDate || '');
+          if (sd === 'perm' || sd === 'permanent') return false;
+          return sd === pdate || sd === now.date;
         });
         let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۱۲:۰۰–۰۳:۰۰)\n';
         if (!today.length) {
@@ -1163,8 +1162,6 @@ try {
               try {
                 name = displayName(await getUser(s.adminId), s.adminId);
               } catch (_e) {}
-              const tag =
-                s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? ' · دائم' : '';
               t +=
                 '▫️ ' +
                 String(s.startHm).slice(0, 5) +
@@ -1172,12 +1169,11 @@ try {
                 String(s.endHm).slice(0, 5) +
                 '  ·  ' +
                 name +
-                tag +
                 '\n';
             }
           }
         }
-        t += '\nاز دکمه‌های زیر:\n• تخصیص روزانه/دائمی\n• لیست و لغو تک‌تک\n• لغو همه شیفت‌های دوره';
+        t += '\nاز دکمه‌های زیر:\n• تخصیص این دوره\n• لیست و لغو\n• لغو همه شیفت‌های دوره';
         await api.sendMessage({
           chat_id: chatId,
           text: t,
@@ -1216,7 +1212,7 @@ try {
         await api.sendMessage({ chat_id: chatId, text: 'آیدی نامعتبر', reply_markup: sanitizeMarkup(backKeyboard()) });
         return;
       }
-      const mode = state.mode;
+      const mode = 'daily';
       const channelKey = state.channelKey;
       await setState(userId, 'own_assign_slot', { mode, channelKey, adminId });
       const now = tehranNow();
@@ -1230,16 +1226,19 @@ try {
       const takenMap = {};
       for (const s of dayShifts) {
         if (s.status !== 'active') continue;
-        if (s.shiftDate === pdate || s.shiftDate === 'perm' || s.shiftDate === 'permanent' || s.shiftDate === now.date) {
-          takenMap[s.startHm] = s.adminId;
+        {
+          const _sd = String(s.shiftDate || '');
+          if (_sd === 'perm' || _sd === 'permanent') continue;
+          if (!(_sd === pdate || _sd === now.date)) continue;
         }
+        takenMap[s.startHm] = s.adminId;
       }
       const ownerSlots = buildOwnerShiftSlots(now);
       await api.sendMessage({
         chat_id: chatId,
         text:
           'ساعت را انتخاب کنید (' +
-          (mode === 'perm' ? 'دائمی — هر ساعت' : 'روزانه — ۲۴ ساعت آینده') +
+          'فقط همین دوره' +
           '):',
         reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, new Set(), ownerSlots, true)),
       });
