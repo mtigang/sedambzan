@@ -51,7 +51,7 @@ import {
   flushConfirmInline,
 } from 'lib/keyboards';
 // sanitize imported below
-import { validateAndFix, normalizeBody, exactBodyKey } from 'lib/validation';
+import { validateAndFix, normalizeBody, exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm, sortShiftsByPeriod, periodOrd } from 'lib/time';
 // normHm via time
@@ -104,6 +104,8 @@ import {
   getStatsDashboardText,
   dedupeActiveShifts,
   cancelAllPermanentShifts,
+  acquireLock,
+  releaseLock,
   listAdminsByChannel,
   syncAdminsFromGroup,
   syncAllAdminGroups,
@@ -699,7 +701,22 @@ export default async function (message) {
           let queuePos = 0;
           try {
             // ایندکس سریع در settings
-            const bIdx = 'bkey:' + v.channelKey + ':' + bodyKey.slice(0, 180);
+            const bIdx = bodyIndexSettingKey(v.channelKey, bodyKey);
+            // قفل ضد ثبت موازی همان بدنه
+            let bodyLock = null;
+            try {
+              bodyLock = await acquireLock('lock:' + bIdx, 6000);
+            } catch (_e) {}
+            if (!bodyLock) {
+              await api.sendMessage({
+                chat_id: chatId,
+                text: '⏳ همین متن در حال ثبت است. چند ثانیه صبر کنید.',
+                reply_markup: sanitizeMarkup(backKeyboard()),
+              });
+              return;
+            }
+            // برای finally آزادسازی
+            globalThis.__bodyLock = { key: 'lock:' + bIdx, token: bodyLock };
             const hit = await settingGet(bIdx, '');
             if (hit) {
               const hid = Number(String(hit).split('|')[0]);
@@ -806,6 +823,13 @@ export default async function (message) {
               text: msgText + '\n\nپیام دیگری بفرستید یا ◀️ بازگشت.',
               reply_markup: sanitizeMarkup(backKeyboard()),
             });
+            try {
+              const bl = globalThis.__bodyLock;
+              if (bl) {
+                await releaseLock(bl.key, bl.token);
+                globalThis.__bodyLock = null;
+              }
+            } catch (_e) {}
             return;
           }
         }
@@ -863,15 +887,19 @@ export default async function (message) {
           if (lastRows[0]) msgId = lastRows[0].id;
           if (msgId != null && bodyKey) {
             try {
-              await settingSet(
-                'bkey:' + v.channelKey + ':' + bodyKey.slice(0, 180),
-                String(msgId) + '|pending'
-              );
+              await settingSet(bodyIndexSettingKey(v.channelKey, bodyKey), String(msgId) + '|pending');
             } catch (_e) {}
           }
         } finally {
           try {
             await settingSet(sendLockKey, '0');
+          } catch (_e) {}
+          try {
+            const bl = globalThis.__bodyLock;
+            if (bl) {
+              await releaseLock(bl.key, bl.token);
+              globalThis.__bodyLock = null;
+            }
           } catch (_e) {}
         }
 
@@ -2697,7 +2725,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
             return false;
           })));
       if (staff) {
-        await drainAnnouncePiggyback(25);
+        await drainAnnouncePiggyback(55);
       }
     } catch (_d) {}
   }
