@@ -94,6 +94,15 @@ export function normalizeBody(text) {
 export function exactBodyKey(text) {
   let t = normalizeForPrefix(String(text || ''));
   t = t.replace(/<\/?b>/gi, '');
+  // tatweel و کاراکترهای نامرئی اضافه
+  t = t.replace(/[\u0640\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF\u00AD]/g, '');
+  // ارقام فارسی/عربی → لاتین
+  t = t.replace(/[۰-۹]/g, function (d) {
+    return String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
+  });
+  t = t.replace(/[٠-٩]/g, function (d) {
+    return String('٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+  });
   for (const { prefix } of CHANNEL_PREFIXES) {
     const p = normalizeForPrefix(prefix);
     if (t.startsWith(p)) {
@@ -101,11 +110,13 @@ export function exactBodyKey(text) {
       break;
     }
   }
-  t = t.replace(/[\s.]+$/g, '').trim();
-  // فاصله ابتدا بعد از پیشوند
-  if (t.startsWith(' ')) t = t.slice(1);
+  // نقطه/ویرگول انتهایی + فاصله‌ها
+  t = t.replace(/[\s.。．｡،,;؛!！؟?]+$/g, '').trim();
+  t = t.replace(/^\s+/, '');
+  t = t.replace(/\s+/g, ' ');
   return t;
 }
+
 
 export function detectChannel(text) {
   const t = normalizeForPrefix(text);
