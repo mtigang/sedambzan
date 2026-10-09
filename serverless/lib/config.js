@@ -28,7 +28,7 @@ export const DEFAULT_CHANNELS = {
     chatId: CHANNEL_IDS.sadambazan,
     adminGroupId: ADMIN_GROUP_IDS.sadambazan,
     workStart: '12:00',
-    workEnd: '03:00',
+    workEnd: '00:00',
   },
   inkarbar: {
     key: 'inkarbar',
@@ -37,7 +37,7 @@ export const DEFAULT_CHANNELS = {
     chatId: CHANNEL_IDS.inkarbar,
     adminGroupId: ADMIN_GROUP_IDS.inkarbar,
     workStart: '12:00',
-    workEnd: '03:00',
+    workEnd: '00:00',
   },
   zendegi: {
     key: 'zendegi',
@@ -46,7 +46,7 @@ export const DEFAULT_CHANNELS = {
     chatId: CHANNEL_IDS.zendegi,
     adminGroupId: ADMIN_GROUP_IDS.zendegi,
     workStart: '12:00',
-    workEnd: '03:00',
+    workEnd: '00:00',
   },
 };
 
