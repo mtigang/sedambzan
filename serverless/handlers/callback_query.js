@@ -36,6 +36,7 @@ import {
   findAdminShiftConflict,
   isChannelSlotTaken,
   dedupeActiveShifts,
+  cancelAllPermanentShifts,
   shiftIntervalOverlaps,
 } from 'lib/dbutil';
 import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob } from 'lib/announce_drain';
@@ -94,13 +95,11 @@ async function refreshAllShiftBoards(channelKey, date) {
       .from(shifts)
       .where(and(eq(shifts.channelKey, channelKey), eq(shifts.status, 'active')))
       .all()) || [];
-  // روزانه + دائمی
+  // فقط روزانه همین دوره
   const dayShifts = allActive.filter(function (s) {
-    return (
-      s.shiftDate === date ||
-      s.shiftDate === 'perm' ||
-      s.shiftDate === 'permanent'
-    );
+    const sd = String(s.shiftDate || '');
+    if (sd === 'perm' || sd === 'permanent') return false;
+    return sd === date;
   });
   const takenMap = {};
   for (const s of dayShifts) {
@@ -1611,6 +1610,7 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
     
     if (data === 'own_shift_list') {
       try {
+        try { await cancelAllPermanentShifts(); } catch (_e) {}
         if (!isOwner(userId)) {
           await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
           return;
@@ -3072,20 +3072,20 @@ if (data === 'ann_continue') {
         return;
       }
       mode = 'daily';
+      try {
+        await cancelAllPermanentShifts();
+      } catch (_e) {}
       const now = tehranNow();
       const date = periodDateStr(now);
       const dayShifts =
         (await db.select().from(shifts).where(eq(shifts.channelKey, channelKey)).all()) || [];
-      // پر بودن: هم روزانه همین دوره هم دائمی
+      // فقط شیفت روزانه همین دوره
       const occupied = dayShifts.filter(function (s) {
-        if (s.status !== 'active') return false;
+        if (String(s.status) !== 'active') return false;
         if (String(s.startHm) === String(s.endHm)) return false;
-        return (
-          s.shiftDate === date ||
-          s.shiftDate === 'perm' ||
-          s.shiftDate === 'permanent' ||
-          s.shiftDate === now.date
-        );
+        const sd = String(s.shiftDate || '');
+        if (sd === 'perm' || sd === 'permanent') return false;
+        return sd === date || sd === now.date;
       });
       const takenMap = {};
       const myStarts = new Set();
@@ -3113,9 +3113,7 @@ if (data === 'ann_continue') {
               who = displayName(await getUser(s.adminId), s.adminId);
             }
           } catch (_e) {}
-          const tag =
-            s.shiftDate === 'perm' || s.shiftDate === 'permanent' ? 'دائم' : 'روزانه';
-          head += '• ' + s.startHm + '–' + s.endHm + ' | ' + who + ' (' + tag + ')\n';
+          head += '• ' + s.startHm + '–' + s.endHm + ' | ' + who + '\n';
         }
       } else {
         head += 'هنوز شیفتی ثبت نشده — همه خالی‌اند.';
