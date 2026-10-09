@@ -5,8 +5,8 @@ import { api } from 'sdk';
 import { settingGet, settingSet } from 'lib/dbutil';
 import { announceProgressInline, sanitizeMarkup } from 'lib/keyboards';
 
-const CHUNK = 40;
-const LOCK_MS = 8000;
+const CHUNK = 55;
+const LOCK_MS = 5500;
 
 export async function loadAnnounceJob() {
   const raw = await settingGet('announce_job', '');
@@ -198,10 +198,10 @@ export async function drainAnnouncePiggyback(maxN) {
     }
     await saveAnnounceJob(job2);
     await settingSet('announce_lock', '0');
-    // نوار پیشرفت هر چند دسته یک‌بار تا API کمتر شلوغ شود
-    if (pos % 50 < n || job2.status === 'done' || hit429) {
+    // هر دسته نوار را به‌روز کن
+    try {
       await updateAnnounceProgressBar(job2);
-    }
+    } catch (_e) {}
 
     return {
       did: true,
@@ -222,7 +222,7 @@ export async function drainAnnouncePiggyback(maxN) {
 }
 
 export async function drainAnnounceOwnerBurst(chatId, progressMessageId, maxMs) {
-  const budget = Math.min(Number(maxMs) || 12000, 18000);
+  const budget = Math.min(Number(maxMs) || 20000, 25000);
   const started = Date.now();
   // همیشه ارجاع نوار را به پیام فعلی مالک بچسبان
   if (chatId && progressMessageId) {
