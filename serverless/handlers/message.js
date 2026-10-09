@@ -554,15 +554,6 @@ export default async function (message) {
 
     if (state?.kind === 'user_send' && text) {
       try {
-        if (!owner && (await isFridayMode())) {
-          await clearState(userId);
-          await api.sendMessage({
-            chat_id: chatId,
-            text: FRIDAY_MODE_TEXT,
-            reply_markup: await roleKb(userId),
-          });
-          return;
-        }
         if (!owner && !isWorkHours()) {
           await api.sendMessage({
             chat_id: chatId,
@@ -571,7 +562,17 @@ export default async function (message) {
           });
           return;
         }
-        if (!(await isBotOn())) {
+        const [_fri, _botOn] = await Promise.all([isFridayMode(), isBotOn()]);
+        if (!owner && _fri) {
+          await clearState(userId);
+          await api.sendMessage({
+            chat_id: chatId,
+            text: FRIDAY_MODE_TEXT,
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+        if (!_botOn) {
           await clearState(userId);
           await api.sendMessage({
             chat_id: chatId,
@@ -621,7 +622,11 @@ export default async function (message) {
 
         // —— کانال خاموش / حالت تب
         try {
-          if (!(await isChannelOpen(v.channelKey))) {
+          const [_chOpen, _adMode] = await Promise.all([
+            isChannelOpen(v.channelKey),
+            isChannelAdMode(v.channelKey),
+          ]);
+          if (!_chOpen) {
             await api.sendMessage({
               chat_id: chatId,
               text: '🔴 دریافت پیام برای «' + ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) + '» فعلاً غیرفعال است.\nبعداً دوباره تلاش کنید.',
@@ -629,7 +634,7 @@ export default async function (message) {
             });
             return;
           }
-          if (await isChannelAdMode(v.channelKey)) {
+          if (_adMode) {
             await api.sendMessage({
               chat_id: chatId,
               text:
@@ -679,16 +684,18 @@ export default async function (message) {
           let dupIsPending = false;
           let queuePos = 0;
           try {
-            const sameCh =
+            const recent =
               (await db
-                .select()
+                .select({
+                  id: messages.id,
+                  status: messages.status,
+                  content: messages.content,
+                })
                 .from(messages)
                 .where(eq(messages.channelKey, v.channelKey))
                 .orderBy(desc(messages.id))
+                .limit(200)
                 .all()) || [];
-            // فقط ۲۰۰ پیام اخیر کانال
-            const recent = sameCh.slice(0, 200);
-            const pendingAll = sameCh.filter((r) => r.status === 'pending').sort((a, b) => a.id - b.id);
             for (const row of recent) {
               if (row.status !== 'pending' && row.status !== 'approved') continue;
               const other = exactBodyKey(row.content);
@@ -696,8 +703,18 @@ export default async function (message) {
                 dup = row;
                 dupIsPending = row.status === 'pending';
                 if (dupIsPending) {
-                  const idx = pendingAll.findIndex((x) => x.id === row.id);
-                  queuePos = idx >= 0 ? idx : 0; // تعداد قبل از آن
+                  // موقعیت تقریبی در ۲۰۰تای اخیر
+                  const pendingRecent = recent
+                    .filter(function (x) {
+                      return x.status === 'pending';
+                    })
+                    .sort(function (a, b) {
+                      return Number(a.id) - Number(b.id);
+                    });
+                  const idx = pendingRecent.findIndex(function (x) {
+                    return Number(x.id) === Number(row.id);
+                  });
+                  queuePos = idx >= 0 ? idx : 0;
                 }
                 break;
               }
@@ -776,13 +793,15 @@ export default async function (message) {
               submittedAt: new Date(),
             })
             .run();
-          const recent = await db
-            .select()
-            .from(messages)
-            .where(eq(messages.userId, userId))
-            .orderBy(desc(messages.id))
-            .all();
-          if (recent && recent[0]) msgId = recent[0].id;
+          const lastRows =
+            (await db
+              .select({ id: messages.id })
+              .from(messages)
+              .where(eq(messages.userId, userId))
+              .orderBy(desc(messages.id))
+              .limit(1)
+              .all()) || [];
+          if (lastRows[0]) msgId = lastRows[0].id;
         } finally {
           try {
             await settingSet(sendLockKey, '0');
@@ -792,14 +811,19 @@ export default async function (message) {
         // keep user_send state for continuous
         let ahead = 0;
         try {
-          const pend = (await db.select().from(messages).all()) || [];
-          ahead = pend.filter(function (x) {
-            return (
-              String(x.status) === 'pending' &&
-              String((x.channelKey ?? x.channel_key) || '') === String(v.channelKey) &&
-              Number(x.id) < Number(msgId)
-            );
-          }).length;
+          if (msgId != null) {
+            const pendIds =
+              (await db
+                .select({ id: messages.id })
+                .from(messages)
+                .where(
+                  and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'pending'))
+                )
+                .all()) || [];
+            ahead = pendIds.filter(function (x) {
+              return Number(x.id) < Number(msgId);
+            }).length;
+          }
         } catch (_e) {}
         let note =
           '✅ ثبت شد.\n🆔 #' + (msgId != null ? msgId : '?') + '\n🟡 در انتظار بررسی ادمین';
@@ -2595,7 +2619,19 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
       } catch (_e) {}
     }
     try {
-      await drainAnnouncePiggyback(35);
+      // کاربران عادی نباید منتظر صف اطلاعیه بمانند (کندی ثبت پیام)
+      const uid = message && message.from && message.from.id;
+      const staff =
+        uid &&
+        (isOwner(uid) ||
+          (await getUser(uid).then(function (u) {
+            return u && (u.role === 'admin' || u.role === 'subleader' || u.role === 'owner');
+          }).catch(function () {
+            return false;
+          })));
+      if (staff) {
+        await drainAnnouncePiggyback(25);
+      }
     } catch (_d) {}
   }
 }
