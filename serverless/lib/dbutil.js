@@ -694,10 +694,8 @@ function shiftActiveNow(s, now, pdate) {
   const end = normHm(s.endHm || s.end_hm || '');
   if (!start || !end || start === end) return false;
   const sd = String(s.shiftDate ?? s.shift_date ?? '');
-  if (sd === 'perm' || sd === 'permanent') {
-    return inRange(now.hm, start, end);
-  }
-  // روزانه: دوره فعلی یا تاریخ تقویم امروز
+  // دائمی منسوخ — دیگر فعال محسوب نمی‌شود
+  if (sd === 'perm' || sd === 'permanent') return false;
   if (sd !== String(pdate) && sd !== String(now.date)) return false;
   return inRange(now.hm, start, end);
 }
@@ -721,6 +719,28 @@ export function shiftIntervalOverlaps(startHm, endHm, otherStartHm, otherEndHm) 
 
 
 /** آیا این بازه در کانال برای دوره/دائم توسط کسی اشغال است؟ */
+
+/** همه شیفت‌های دائمی را لغو می‌کند (قابلیت دائم حذف شده) */
+export async function cancelAllPermanentShifts() {
+  try {
+    const all = (await db.select().from(shifts).all()) || [];
+    let n = 0;
+    for (const s of all) {
+      if (String(s.status) !== 'active') continue;
+      const sd = String(s.shiftDate ?? s.shift_date ?? '');
+      if (sd !== 'perm' && sd !== 'permanent') continue;
+      try {
+        await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, Number(s.id))).run();
+        n += 1;
+      } catch (_e) {}
+    }
+    return n;
+  } catch (e) {
+    console.error('cancelAllPermanentShifts', e);
+    return 0;
+  }
+}
+
 export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShiftId) {
   try {
     const rows =
@@ -734,11 +754,8 @@ export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShif
     for (const s of rows) {
       if (excludeShiftId != null && Number(s.id) === Number(excludeShiftId)) continue;
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
-      const relevant =
-        sd === 'perm' ||
-        sd === 'permanent' ||
-        sd === String(pdate) ||
-        sd === String(now.date);
+      // perm دیگر اشغال‌کننده نیست
+      const relevant = sd === String(pdate) || sd === String(now.date);
       if (!relevant) continue;
       if (String(s.startHm) === String(s.endHm)) continue;
       if (shiftIntervalOverlaps(startHm, endHm, s.startHm || s.start_hm, s.endHm || s.end_hm)) {
