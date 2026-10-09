@@ -94,8 +94,14 @@ export function normalizeBody(text) {
 export function exactBodyKey(text) {
   let t = normalizeForPrefix(String(text || ''));
   t = t.replace(/<\/?b>/gi, '');
-  // tatweel و کاراکترهای نامرئی اضافه
-  t = t.replace(/[\u0640\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF\u00AD]/g, '');
+  t = t.replace(/\*\*/g, '');
+  // tatweel و نامرئی‌ها
+  t = t.replace(/[\u0640\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF\u00AD\u061C]/g, '');
+  // همزه/الف‌های متنوع
+  t = t.replace(/[آأإٱ]/g, 'ا');
+  t = t.replace(/ة/g, 'ه');
+  t = t.replace(/ؤ/g, 'و');
+  t = t.replace(/ئ/g, 'ی');
   // ارقام فارسی/عربی → لاتین
   t = t.replace(/[۰-۹]/g, function (d) {
     return String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
@@ -110,13 +116,32 @@ export function exactBodyKey(text) {
       break;
     }
   }
-  // نقطه/ویرگول انتهایی + فاصله‌ها
-  t = t.replace(/[\s.。．｡،,;؛!！؟?]+$/g, '').trim();
+  t = t.replace(/[\s.。．｡،,;؛!！؟?…‥:：]+$/g, '').trim();
   t = t.replace(/^\s+/, '');
   t = t.replace(/\s+/g, ' ');
+  // حذف فاصله‌های اطراف علائم میانی تکراری
+  t = t.replace(/\s{2,}/g, ' ').trim();
   return t;
 }
 
+/** هش پایدار برای ایندکس settings (کلید کوتاه و بدون یونیکد مشکل‌ساز) */
+export function bodyKeyHash(bodyKey) {
+  const s = String(bodyKey || '');
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h) ^ s.charCodeAt(i);
+  }
+  // دومین هش برای برخورد کمتر
+  let h2 = 0;
+  for (let i = 0; i < s.length; i++) {
+    h2 = (h2 * 31 + s.charCodeAt(i)) >>> 0;
+  }
+  return (h >>> 0).toString(36) + '_' + h2.toString(36) + '_' + s.length;
+}
+
+export function bodyIndexSettingKey(channelKey, bodyKey) {
+  return 'bkey:' + String(channelKey || '') + ':' + bodyKeyHash(bodyKey);
+}
 
 export function detectChannel(text) {
   const t = normalizeForPrefix(text);
