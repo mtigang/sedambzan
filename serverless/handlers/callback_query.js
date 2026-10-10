@@ -38,6 +38,11 @@ import {
   dedupeActiveShifts,
   cancelAllPermanentShifts,
   cancelInvalidShifts,
+  countAdminPeriodShifts,
+  isUserChannelAdmin,
+  verifyShiftStillActive,
+  clearMemo,
+  pruneOldShifts,
   filterPeriodShifts,
   buildTakenMapForSlots,
   acquireLock,
@@ -57,7 +62,7 @@ import {
   subLeaderAdmins,
   listActiveSubLeaders,
 } from 'lib/subleader';
-import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod, toJalaliDisplay, periodOrd, isWorkHours, normHm } from 'lib/time';
 import { DEFAULT_CHANNELS } from 'lib/config';
 import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
 import { DB_EXPORT_OWNER_ID, processDbExportBatch, clearDbExportJob, getDbExportJob } from 'lib/db_export';
@@ -94,48 +99,8 @@ import {
 } from 'lib/keyboards';
 
 async function refreshAllShiftBoards(channelKey, date) {
-  const allActive =
-    (await db
-      .select()
-      .from(shifts)
-      .where(and(eq(shifts.channelKey, channelKey), eq(shifts.status, 'active')))
-      .all()) || [];
-  // فقط روزانه همین دوره
-  const dayShifts = allActive.filter(function (s) {
-    const sd = String(s.shiftDate || '');
-    if (sd === 'perm' || sd === 'permanent') return false;
-    return sd === date;
-  });
-  const takenMap = {};
-  for (const s of dayShifts) {
-          if (String(s.startHm) === String(s.endHm)) continue;
-          takenMap[s.startHm] = s.adminId;
-        }
-
-  // همه boardهای ذخیره‌شده برای این کانال/روز
-  try {
-    const allSettings = await db.select().from(settings).all();
-    const prefix = 'shift_board:' + channelKey + ':' + date + ':';
-    for (const row of allSettings || []) {
-      if (!row.key || !row.key.startsWith(prefix) || !row.value) continue;
-      try {
-        const info = JSON.parse(row.value);
-        const adminId = Number(row.key.slice(prefix.length));
-        const myStarts = new Set(
-          dayShifts.filter((s) => s.adminId === adminId).map((s) => s.startHm)
-        );
-        await api.editMessageReplyMarkup({
-          chat_id: info.chatId,
-          message_id: info.messageId,
-          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts)),
-        });
-      } catch (e) {
-        console.error('refresh board', e);
-      }
-    }
-  } catch (e) {
-    console.error('refreshAllShiftBoards', e);
-  }
+  // بردها در settings ثبت نمی‌شوند — اسکن بی‌فایده settings حذف شد
+  return;
 }
 
 /** ویرایش پیام بعد از تأیید/رد؛ اگر Batch کامل شد دکمه‌ی بعدی یا «صف تمام شد» */
@@ -689,8 +654,7 @@ if (data.startsWith('reject_menu:')) {
           await settingSet('owner_pend_ch:' + userId, '');
         }
       } catch (_e) {}
-      try { await restoreMistakenlyCancelledShifts(); } catch (_e) {}
-      const res = await createReviewBatch(userId);
+            const res = await createReviewBatch(userId);
       if (res.status === 'empty') {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
@@ -755,8 +719,7 @@ if (data.startsWith('reject_menu:')) {
           return;
         }
       }
-      try { await restoreMistakenlyCancelledShifts(); } catch (_e) {}
-      const res = await createReviewBatch(userId);
+            const res = await createReviewBatch(userId);
       if (res.status === 'no_shift') {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: '❌ شیفت شما تمام شده است.', show_alert: true });
         return;
@@ -1442,7 +1405,7 @@ if (data.startsWith('reject_menu:')) {
               ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
               '» ' +
               sh +
-              ' توسط مالک لغو شد.',
+              ' لغو شد.',
           });
         } catch (_e) {}
       }
@@ -1458,8 +1421,11 @@ if (data.startsWith('reject_menu:')) {
     }
 
     if (data.startsWith('shift_oclear|') || data.startsWith('shift_oclear:')) {
-      if (!isOwner(userId)) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+      
+      let _canClear = isOwner(userId);
+      try { _canClear = _canClear || (await canManageOthersShifts(userId, (data.indexOf('|')>=0?data.split('|')[1]:data.split(':')[1]))); } catch(_e) {}
+      if (!_canClear) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'اجازه ندارید', show_alert: true });
         return;
       }
       const channelKey = data.indexOf('|') >= 0 ? data.split('|')[1] : data.split(':')[1];
@@ -1494,7 +1460,7 @@ if (data.startsWith('reject_menu:')) {
               text:
                 '⚠️ تمام شیفت‌های امروز شما در «' +
                 ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
-                '» توسط مالک لغو شد.',
+                '» لغو شد.',
             });
           } catch (_e) {}
         }
@@ -1591,7 +1557,7 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts)),
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, (isOwner(userId) || false))),
         });
       } catch (_e) {}
       return;
@@ -3106,7 +3072,7 @@ if (data === 'ann_continue') {
         '⏰ شیفت‌های «' +
         title +
         '»\nدوره: ' +
-        date +
+        (toJalaliDisplay(date) || date) +
         ' (یک‌بارمصرف)\nساعت کاری: ۱۲:۰۰ تا ۰۰:۰۰\n' +
         (isOwner(userId) ? 'مالک: بدون سقف شیفت\n' : 'حداکثر ۳ شیفت\n') +
         '🟢 خالی  ·  🔴 پر\n\n';
@@ -3255,6 +3221,37 @@ if (data === 'ann_continue') {
           });
           return;
         }
+        // اعتبارسنجی تخصیص مالک
+        {
+          const sh = Number(String(startHm).split(':')[0]) || 0;
+          if (sh < 12) {
+            await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'شیفت فقط ۱۲–۰۰', show_alert: true });
+            return;
+          }
+          const isAdm = await isUserChannelAdmin(targetAdmin, channelKey);
+          if (!isAdm && !isOwner(targetAdmin)) {
+            await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کاربر ادمین این کانال نیست', show_alert: true });
+            return;
+          }
+          const conf = await findAdminShiftConflict(targetAdmin, shiftDate, startHm, endHm);
+          if (conf) {
+            await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'تداخل با شیفت دیگر این ادمین', show_alert: true });
+            return;
+          }
+          const slotT = await isChannelSlotTaken(channelKey, startHm, endHm, null);
+          if (slotT) {
+            await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'بازه پر است', show_alert: true });
+            return;
+          }
+        }
+        const _oaLock = 'shift_slot:' + channelKey + ':' + shiftDate + ':' + String(Number(String(startHm).split(':')[0])||0).padStart(2,'0');
+        let _oaTok = null;
+        try { _oaTok = await acquireLock(_oaLock, 8000); } catch (_e) {}
+        if (!_oaTok) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'قفل — بعداً', show_alert: true });
+          return;
+        }
+        try {
         await db
           .insert(shifts)
           .values({
@@ -3266,6 +3263,10 @@ if (data === 'ann_continue') {
             status: 'active',
           })
           .run();
+        try { await dedupeActiveShifts(channelKey); } catch (_e) {}
+        } finally {
+          try { await releaseLock(_oaLock, _oaTok); } catch (_e) {}
+        }
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'تخصیص شد' });
         await api.sendMessage({
           chat_id: userId,
@@ -3290,7 +3291,7 @@ if (data === 'ann_continue') {
               startHm +
               '–' +
               endHm +
-              (mode === 'perm' ? ' (دائمی)' : ''),
+              ' (دوره فعلی)',
           });
         } catch (_) {}
         return;
@@ -3309,11 +3310,9 @@ if (data === 'ann_continue') {
           )
           .all()) || [];
       const conflict = taken.filter((s) => {
-        const sameDate =
-          s.shiftDate === pdate ||
-          s.shiftDate === 'perm' ||
-          s.shiftDate === 'permanent';
+        const sameDate = String(s.shiftDate) === String(pdate);
         if (!sameDate) return false;
+        if (String(s.startHm) === String(s.endHm)) return false;
         const toOrd = (hm) => {
           const parts = String(hm || '0:0').split(':').map(Number);
           let m = (parts[0] || 0) * 60 + (parts[1] || 0);
@@ -3343,6 +3342,52 @@ if (data === 'ann_continue') {
         const _stc = await getState(userId);
         // دائمی حذف شده — همیشه دوره فعلی
       } catch (_e) {}
+      
+      // —— اعتبارسنجی سمت سرور ——
+      try { clearMemo('ask:'); } catch (_e) {}
+      if (!isOwner(userId)) {
+        let allowedCh = [];
+        try { allowedCh = await shiftPickChannels(userId); } catch (_e) { allowedCh = []; }
+        if (!allowedCh.map(String).includes(String(channelKey))) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'اجازه انتخاب شیفت برای این کانال را ندارید',
+            show_alert: true,
+          });
+          return;
+        }
+      }
+      // اسلات گذشته + طول یک‌ساعته
+      {
+        const nowChk = tehranNow();
+        const startN = normHm(startHm);
+        const endN = normHm(endHm);
+        if (!startN || !endN || startN === endN) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'بازه نامعتبر', show_alert: true });
+          return;
+        }
+        let sOrd = periodOrd(startN);
+        let eOrd = periodOrd(endN);
+        if (eOrd <= sOrd) eOrd += 24 * 60;
+        if (eOrd - sOrd > 70 || eOrd - sOrd < 50) {
+          // فقط بازه‌های حدود ۱ ساعته (۵۰–۷۰ دقیقه برای انعطاف جزئی)
+          // partial owner slots may differ — owners exempt from exact length
+          if (!isOwner(userId)) {
+            await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'بازه باید حدود ۱ ساعت باشد', show_alert: true });
+            return;
+          }
+        }
+        if (isWorkHours(nowChk) && periodOrd(nowChk.hm) >= eOrd) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'این بازه تمام شده', show_alert: true });
+          return;
+        }
+        const sh = Number(String(startN).split(':')[0]) || 0;
+        if (sh < 12) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'شیفت فقط از ۱۲ تا ۰۰', show_alert: true });
+          return;
+        }
+      }
+
       const ownConflict = await findAdminShiftConflict(
         userId,
         pdate,
@@ -3358,9 +3403,12 @@ if (data === 'ann_continue') {
         return;
       }
 
-      const mineCount = taken.filter(function (s) {
-        return Number(s.adminId) === Number(userId) && String(s.shiftDate) === String(pdate);
-      }).length;
+      let mineCount = 0;
+      try {
+        mineCount = await countAdminPeriodShifts(userId, pdate);
+      } catch (_e) {
+        mineCount = 99;
+      }
       if (!isOwner(userId) && mineCount >= 3) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
@@ -3393,63 +3441,83 @@ if (data === 'ann_continue') {
       const shiftDateVal = pdate;
       // چک نهایی تداخل کانال (جلوگیری از دابل و race)
       // قفل اسلات برای جلوگیری از ثبت همزمان دو ادمین
-      const slotLockKey =
-        'shift_slot:' +
-        channelKey +
-        ':' +
-        pdate +
-        ':' +
-        String(Number(String(startHm).split(':')[0]) || 0).padStart(2, '0');
+      const hourBucket = String(Number(String(startHm).split(':')[0]) || 0).padStart(2, '0');
+      const slotLockKey = 'shift_slot:' + channelKey + ':' + pdate + ':' + hourBucket;
+      const adminLockKey = 'shift_admin:' + userId + ':' + pdate + ':' + hourBucket;
       let slotLock = null;
+      let adminLock = null;
       try {
         slotLock = await acquireLock(slotLockKey, 8000);
+        adminLock = await acquireLock(adminLockKey, 8000);
       } catch (_e) {}
-      if (!slotLock) {
+      if (!slotLock || !adminLock) {
+        try { if (slotLock) await releaseLock(slotLockKey, slotLock); } catch (_e) {}
+        try { if (adminLock) await releaseLock(adminLockKey, adminLock); } catch (_e) {}
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: '⏳ این ساعت در حال ثبت توسط دیگری است',
+          text: '⏳ این ساعت در حال ثبت است — چند ثانیه بعد',
           show_alert: true,
         });
         return;
       }
-      let slotFinal = null;
+      let insertOk = false;
       try {
-        slotFinal = await isChannelSlotTaken(channelKey, startHm, endHm, null);
-      } catch (_e) {
-        slotFinal = null;
+        // چک نهایی داخل قفل: کانال + تداخل ادمین بین همه کانال‌ها
+        const slotFinal = await isChannelSlotTaken(channelKey, startHm, endHm, null);
+        if (slotFinal) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'این بازه پر است یا همزمان گرفته شد.',
+            show_alert: true,
+          });
+          return;
+        }
+        const conflictFinal = await findAdminShiftConflict(userId, pdate, startHm, endHm);
+        if (conflictFinal) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'این بازه با شیفت شما در کانال دیگر تداخل دارد.',
+            show_alert: true,
+          });
+          return;
+        }
+        let mineNow = 0;
+        try { mineNow = await countAdminPeriodShifts(userId, pdate); } catch (_e) { mineNow = 99; }
+        if (!isOwner(userId) && mineNow >= 3) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'حداکثر ۳ شیفت در هر دوره',
+            show_alert: true,
+          });
+          return;
+        }
+        await db
+          .insert(shifts)
+          .values({
+            channelKey,
+            adminId: userId,
+            shiftDate: shiftDateVal,
+            startHm,
+            endHm,
+            status: 'active',
+          })
+          .run();
+        try { await dedupeActiveShifts(channelKey); } catch (_e) {}
+        const still = await verifyShiftStillActive(userId, channelKey, startHm, shiftDateVal);
+        if (!still) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'ثبت نشد — تداخل تشخیص داده شد',
+            show_alert: true,
+          });
+          return;
+        }
+        insertOk = true;
+      } finally {
+        try { if (slotLock) await releaseLock(slotLockKey, slotLock); } catch (_e) {}
+        try { if (adminLock) await releaseLock(adminLockKey, adminLock); } catch (_e) {}
       }
-      if (slotFinal) {
-        try {
-          if (slotLock) await releaseLock(slotLockKey, slotLock);
-        } catch (_e) {}
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'این بازه پر است یا همزمان گرفته شد.',
-          show_alert: true,
-        });
-        try {
-          await refreshAllShiftBoards(channelKey, pdate);
-        } catch (_e) {}
-        return;
-      }
-      await db
-        .insert(shifts)
-        .values({
-          channelKey,
-          adminId: userId,
-          shiftDate: shiftDateVal,
-          startHm,
-          endHm,
-          status: 'active',
-        })
-        .run();
-      // پاک‌سازی تکراری‌های احتمالی همین کانال
-      try {
-        await dedupeActiveShifts(channelKey);
-      } catch (_e) {}
-      try {
-        if (slotLock) await releaseLock(slotLockKey, slotLock);
-      } catch (_e) {}
+      if (!insertOk) return;
 
       await api.answerCallbackQuery({
         callback_query_id: cq.id,
@@ -3487,7 +3555,7 @@ if (data === 'ann_continue') {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts)),
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, (isOwner(userId) || false))),
         });
       } catch (e) {
         console.error('edit self board', e);
