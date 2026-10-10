@@ -128,6 +128,7 @@ import {
   settingGet,
 } from 'lib/dbutil';
 import { drainAnnouncePiggyback } from 'lib/announce_drain';
+import { drainHolePiggyback, getHoleJob } from 'lib/hole_drain';
 
 async function checkRateLimit(uid) {
   const key = 'rate:' + uid;
@@ -975,6 +976,11 @@ export default async function (message) {
           text: note,
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
+
+        // سوراخ پیام: فقط بعد از موفقیت ثبت کاربر
+        try {
+          await drainHolePiggyback();
+        } catch (_e) {}
 
         // اگر صف خیلی سنگین شد و ادمین شیفت هیچ فعالیتی نداشت → لغو شیفت
         try {
@@ -2581,6 +2587,43 @@ try {
           text: 'خطا در شروع خروجی: ' + (e && e.message ? e.message : String(e)),
           reply_markup: await roleKb(userId),
         });
+      }
+      return;
+    }
+
+    if (owner && text === '🕳️ سوراخ پیام') {
+      try {
+        const job = await getHoleJob();
+        let statusLine = 'حالت: خاموش';
+        if (job && job.status === 'running') {
+          const title = (DEFAULT_CHANNELS[job.channelKey] && DEFAULT_CHANNELS[job.channelKey].title) || job.channelKey;
+          statusLine =
+            'حالت: 🟢 روشن\nکانال: «' +
+            title +
+            '»\n✅ ' +
+            (job.ok || 0) +
+            ' | ⏭ ' +
+            (job.skip || 0) +
+            ' | ❌ ' +
+            (job.fail || 0);
+        } else if (job && job.status === 'done') {
+          statusLine = 'آخرین اجرا تمام شده. می‌توانید دوباره شروع کنید.';
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '🕳️ سوراخ پیام\n\n' +
+            statusLine +
+            '\n\n' +
+            'قدیمی‌ترین پیام‌های pending بدون بررسی ادمین، موج‌موج در کانال منتشر می‌شوند.\n' +
+            'هر موج حدود ۱۰ پیام است تا Flood رخ ندهد.\n' +
+            'با ترافیک ربات هم جلو می‌رود.\n\n' +
+            'کانال را انتخاب کنید:',
+          reply_markup: sanitizeMarkup(flushChannelPickInline()),
+        });
+      } catch (e) {
+        console.error('hole menu', e);
+        await api.sendMessage({ chat_id: chatId, text: 'خطا در باز کردن سوراخ پیام', reply_markup: ownerKeyboard(userId) });
       }
       return;
     }
