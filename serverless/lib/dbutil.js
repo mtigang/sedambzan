@@ -13,35 +13,57 @@ import { exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { reviewInline, sanitizeMarkup } from 'lib/keyboards';
 
 const __reqMemo = Object.create(null);
+const __reqMemoTs = Object.create(null);
+const MEMO_TTL_MS = 2500;
 function memo(key, fn) {
-  if (Object.prototype.hasOwnProperty.call(__reqMemo, key)) return __reqMemo[key];
+  const now = Date.now();
+  if (
+    Object.prototype.hasOwnProperty.call(__reqMemo, key) &&
+    now - (Number(__reqMemoTs[key]) || 0) < MEMO_TTL_MS
+  ) {
+    return __reqMemo[key];
+  }
   const p = fn();
   __reqMemo[key] = p;
+  __reqMemoTs[key] = now;
   return p;
+}
+export function clearMemo(prefix) {
+  try {
+    if (!prefix) {
+      for (const k of Object.keys(__reqMemo)) delete __reqMemo[k];
+      for (const k of Object.keys(__reqMemoTs)) delete __reqMemoTs[k];
+      return;
+    }
+    for (const k of Object.keys(__reqMemo)) {
+      if (String(k).startsWith(prefix)) {
+        delete __reqMemo[k];
+        delete __reqMemoTs[k];
+      }
+    }
+  } catch (_e) {}
 }
 
 let _channelsSeededAt = 0;
 export async function ensureChannelsSeeded() {
   try {
-    // هر ۶ ساعت یک‌بار کافی است — هر پیام ۳ آپدیت نزن
-    if (_channelsSeededAt && Date.now() - _channelsSeededAt < 5 * 60 * 1000) {
+    // هر ۶ ساعت یک‌بار کافی است
+    if (_channelsSeededAt && Date.now() - _channelsSeededAt < 6 * 60 * 60 * 1000) {
       return Object.values(DEFAULT_CHANNELS);
     }
     for (const c of Object.values(DEFAULT_CHANNELS)) {
       try {
         const exist = await db.select().from(channels).where(eq(channels.key, c.key)).all();
         if (exist && exist.length) {
-          // ساعت کاری را با کانفیگ همگام کن
+          // فقط title را همگام کن — workStart/workEnd را بازنویسی نکن
           try {
-            await db
-              .update(channels)
-              .set({
-                workStart: c.workStart || '12:00',
-                workEnd: c.workEnd || '00:00',
-                title: c.title,
-              })
-              .where(eq(channels.key, c.key))
-              .run();
+            if (c.title && String(exist[0].title || '') !== String(c.title)) {
+              await db
+                .update(channels)
+                .set({ title: c.title })
+                .where(eq(channels.key, c.key))
+                .run();
+            }
           } catch (_e) {}
           continue;
         }
@@ -655,35 +677,8 @@ export async function checkInactiveShiftAndCancel(channelKey, opts) {
 
 /** بازگردانی شیفت‌هایی که status=cancelled دارند ولی هنوز در بازه زمانی‌شان هستند */
 export async function restoreMistakenlyCancelledShifts() {
-  try {
-    const now = tehranNow();
-    const pdate = periodDateStr(now);
-    const all = (await db.select().from(shifts).all()) || [];
-    let n = 0;
-    for (const s of all) {
-      if (String(s.status) !== 'cancelled') continue;
-      // فقط اگر از نظر ساعت هنوز «باید» فعال باشد
-      const start = normHm(s.startHm || s.start_hm || '');
-      const end = normHm(s.endHm || s.end_hm || '');
-      if (!start || !end || start === end) continue;
-      const sd = String(s.shiftDate ?? s.shift_date ?? '');
-      let inWindow = false;
-      if (sd === 'perm' || sd === 'permanent') {
-        inWindow = inRange(now.hm, start, end);
-      } else if (sd === String(pdate) || sd === String(now.date)) {
-        inWindow = inRange(now.hm, start, end);
-      }
-      if (!inWindow) continue;
-      try {
-        await db.update(shifts).set({ status: 'active' }).where(eq(shifts.id, Number(s.id))).run();
-        n += 1;
-      } catch (_e) {}
-    }
-    return { restored: n };
-  } catch (e) {
-    console.error('restoreMistakenlyCancelledShifts', e);
-    return { restored: 0, error: true };
-  }
+  // عمداً غیرفعال: لغو عمدی مالک/ادمین/dedupe نباید زنده شود
+  return { restored: 0, disabled: true };
 }
 
 /* ============================================================
@@ -745,6 +740,46 @@ export function shiftIntervalOverlaps(startHm, endHm, otherStartHm, otherEndHm) 
 /** همه شیفت‌های دائمی را لغو می‌کند (قابلیت دائم حذف شده) */
 
 /** لغو شیفت‌های بی‌اعتبار: دائم، یا شروع قبل از ۱۲ (باقی‌مانده سیستم قدیم) */
+export async function pruneOldShifts() {
+  try {
+    const now = tehranNow();
+    const pdate = periodDateStr(now);
+    const all = (await db.select().from(shifts).all()) || [];
+    let n = 0;
+    for (const s of all) {
+      const sd = String(s.shiftDate ?? s.shift_date ?? '');
+      if (sd === 'perm' || sd === 'permanent') {
+        try {
+          await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, Number(s.id))).run();
+          n += 1;
+        } catch (_e) {}
+        continue;
+      }
+      // شیفت‌های تاریخ‌های خیلی قدیمی (>2 روز) را cancelled کن اگر هنوز active‌اند
+      if (String(s.status) !== 'active') continue;
+      if (sd === String(pdate) || sd === String(now.date)) continue;
+      // تاریخ ساده‌ی YYYY-MM-DD
+      try {
+        const a = sd.split('-').map(Number);
+        const b = String(pdate).split('-').map(Number);
+        if (a.length === 3 && b.length === 3) {
+          const da = Date.UTC(a[0], a[1] - 1, a[2]);
+          const db_ = Date.UTC(b[0], b[1] - 1, b[2]);
+          const days = (db_ - da) / 86400000;
+          if (days > 2) {
+            await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, Number(s.id))).run();
+            n += 1;
+          }
+        }
+      } catch (_e) {}
+    }
+    return n;
+  } catch (e) {
+    console.error('pruneOldShifts', e);
+    return 0;
+  }
+}
+
 export async function cancelInvalidShifts() {
   try {
     const all = (await db.select().from(shifts).all()) || [];
@@ -866,6 +901,31 @@ export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShif
  * اگر دو رکورد با همان admin + همان بازه (+ همان نوع دوره) باشند، فقط قدیمی‌ترین می‌ماند.
  * اگر دو ادمین مختلف روی بازه هم‌پوشان باشند، دومی (id بزرگ‌تر) لغو می‌شود.
  */
+export async function verifyShiftStillActive(adminId, channelKey, startHm, shiftDate) {
+  try {
+    const rows =
+      (await db
+        .select()
+        .from(shifts)
+        .where(
+          and(
+            eq(shifts.adminId, Number(adminId)),
+            eq(shifts.channelKey, String(channelKey)),
+            eq(shifts.status, 'active')
+          )
+        )
+        .all()) || [];
+    return rows.some(function (s) {
+      return (
+        String(s.startHm) === String(startHm) &&
+        String(s.shiftDate) === String(shiftDate)
+      );
+    });
+  } catch (_e) {
+    return false;
+  }
+}
+
 export async function dedupeActiveShifts(channelKey) {
   try {
     const rows =
@@ -939,6 +999,46 @@ export async function dedupeActiveShifts(channelKey) {
 }
 
 
+export async function countAdminPeriodShifts(adminId, shiftDate) {
+  try {
+    const rows =
+      (await db
+        .select()
+        .from(shifts)
+        .where(and(eq(shifts.adminId, Number(adminId)), eq(shifts.status, 'active')))
+        .all()) || [];
+    const target = String(shiftDate);
+    let n = 0;
+    for (const s of rows) {
+      const sd = String(s.shiftDate ?? s.shift_date ?? '');
+      if (sd === 'perm' || sd === 'permanent') continue;
+      if (sd !== target) continue;
+      if (String(s.startHm) === String(s.endHm)) continue;
+      const sh = Number(String(s.startHm || '0').split(':')[0]) || 0;
+      if (sh < 12) continue;
+      n += 1;
+    }
+    return n;
+  } catch (e) {
+    console.error('countAdminPeriodShifts', e);
+    return 99; // fail-closed به سقف
+  }
+}
+
+/** آیا کاربر ادمین این کانال است (یا مالک/ساب‌لیدر اسکوپ) */
+export async function isUserChannelAdmin(userId, channelKey) {
+  if (isOwner(userId)) return true;
+  try {
+    const chs = await adminChannels(userId);
+    if ((chs || []).map(String).includes(String(channelKey))) return true;
+  } catch (_e) {}
+  try {
+    const sl = await getActiveSubLeaderChannel(userId);
+    if (sl && String(sl) === String(channelKey)) return true;
+  } catch (_e) {}
+  return false;
+}
+
 export async function findAdminShiftConflict(adminId, shiftDate, startHm, endHm, excludeId = null) {
   try {
     const rows =
@@ -960,7 +1060,8 @@ export async function findAdminShiftConflict(adminId, shiftDate, startHm, endHm,
     );
   } catch (e) {
     console.error('findAdminShiftConflict', e);
-    return null;
+    // fail-closed: وانمود کن تداخل هست تا دابل‌بوک بین کانال‌ها نشود
+    return { id: -1, adminId: Number(adminId), _error: true };
   }
 }
 
