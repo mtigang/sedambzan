@@ -116,11 +116,37 @@ export function userKeyboard() {
   });
 }
 
+export function adminPerfInline() {
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [
+        { text: '🆘 درخواست کمک', callback_data: 'admin_help', style: 'primary' },
+        { text: '🐞 گزارش مشکل', callback_data: 'admin_bug', style: 'danger' },
+      ],
+    ],
+  });
+}
+
+export function adminHelpConfirmInline(channelKey, requesterId) {
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [
+        {
+          text: '✅ می‌رسم کمک کنم',
+          callback_data: 'help_ok|' + channelKey + '|' + requesterId,
+          style: 'success',
+        },
+      ],
+    ],
+  });
+}
+
 export function adminKeyboard() {
   return sanitizeMarkup({
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '⏰ شیفت من' }],
       [{ text: '📊 عملکرد من' }, { text: '📌 فراخوان کانال' }],
+      [{ text: '🆘 درخواست کمک' }, { text: '🐞 گزارش مشکل' }],
     ],
     resize_keyboard: true,
   });
