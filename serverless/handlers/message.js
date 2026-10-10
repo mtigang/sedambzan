@@ -36,6 +36,8 @@ import {
   ownerShiftMenuInline,
   reviewNextInline,
   subLeaderKeyboard,
+  adminPerfInline,
+  adminHelpConfirmInline,
   ownerSubLeaderMenuKeyboard,
   subLeaderPickChannelInline,
   subLeaderListInline,
@@ -113,6 +115,8 @@ import {
   syncAllAdminGroups,
   notifyShiftAdmins,
   createReviewBatch,
+  adminShiftCard,
+  maybeGreetShiftStart,
   pruneReviewBatchToPending,
   clearReviewBatch,
   sendReviewBatch,
@@ -378,7 +382,37 @@ export default async function (message) {
       return;
     }
 
-    // ویرایش پیام توسط ادمین
+    // گزارش مشکل ادمین → مالک
+    if (state?.kind === 'admin_bug' && text && text !== '/start' && text !== '◀️ بازگشت') {
+      try {
+        const me = await getUser(userId);
+        const who = displayName(me, userId);
+        const payload =
+          '🐞 گزارش ادمین\nاز: ' +
+          who +
+          ' | ' +
+          userId +
+          '\n\n' +
+          String(text).slice(0, 3500);
+        for (const oid of OWNER_IDS || []) {
+          try {
+            await api.sendMessage({ chat_id: Number(oid), text: payload });
+          } catch (_e) {}
+        }
+        await clearState(userId);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '✅ گزارش برای مالک ارسال شد. ممنون.',
+          reply_markup: await roleKb(userId),
+        });
+      } catch (e) {
+        console.error('admin_bug', e);
+        await api.sendMessage({ chat_id: chatId, text: 'ارسال گزارش ناموفق', reply_markup: await roleKb(userId) });
+      }
+      return;
+    }
+
+        // ویرایش پیام توسط ادمین
     if (state && state.kind === 'edit_msg' && text && text !== '◀️ بازگشت') {
       const mid = Number(state.msgId);
       await clearState(userId);
@@ -1069,6 +1103,36 @@ export default async function (message) {
     if ((role === 'admin' || role === 'subleader' || owner) && text === '📊 عملکرد من') {
       try {
         const now = tehranNow();
+        let shiftHead = '';
+        try {
+          const card = await adminShiftCard(userId);
+          shiftHead = '🧭 وضعیت الان\n';
+          if (card.active && card.active.length) {
+            for (const a of card.active) {
+              shiftHead +=
+                '• «' +
+                a.title +
+                '» ' +
+                a.startHm +
+                '–' +
+                a.endHm +
+                ' · باقی‌مانده ~' +
+                a.minutesLeft +
+                ' دقیقه\n';
+            }
+            shiftHead += '📥 صف قابل‌بررسی: ' + (card.pendingTotal || 0) + ' پیام\n';
+            shiftHead +=
+              'امروز شما: 🟢' +
+              (card.todayApproved || 0) +
+              '  🔴' +
+              (card.todayRejected || 0) +
+              '\n';
+          } else {
+            shiftHead += 'الان شیفت فعالی ندارید.\n';
+            shiftHead += '📥 صف (در صورت داشتن شیفت): ' + (card.pendingTotal || 0) + '\n';
+          }
+          shiftHead += '────────────\n';
+        } catch (_e) {}
         const allMsg = (await db.select().from(messages).all()) || [];
         const mine = allMsg.filter(function (m) {
           return Number(m.reviewedBy ?? m.reviewed_by) === Number(userId);
@@ -1125,8 +1189,8 @@ export default async function (message) {
           return { rank: rank || (myN ? ranked.length : 0), totalAdmins: ranked.length, count: myN };
         }
 
-        let body = '📊 عملکرد شما\n';
-        body += '📅 امروز تهران: ' + now.date + ' — ' + now.hm + '\n';
+        let body = shiftHead + '📊 عملکرد شما\n';
+        body += '📅 ' + now.date + ' — ' + now.hm + '\n';
         body += 'کانال‌ها: ' + (chans.map(function (k) { return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k; }).join('، ') || '—') + '\n\n';
 
         const apAll = mine.filter(function (m) { return m.status === 'approved'; }).length;
@@ -1157,11 +1221,132 @@ export default async function (message) {
           body += 'رتبه امروز: ' + (rt.rank || '—') + '/' + (rt.totalAdmins || 0) + ' · رتبه کل: ' + (rT.rank || '—') + '/' + (rT.totalAdmins || 0) + '\n';
         }
 
-        await api.sendMessage({ chat_id: chatId, text: body.slice(0, 4000), reply_markup: await roleKb(userId) });
+        // ۷ روز اخیر خلاصه
+        try {
+          const dayCounts = {};
+          for (let i = 0; i < 7; i++) dayCounts[i] = { a: 0, r: 0 };
+          for (const msg of mine) {
+            const ra = msg.reviewedAt ?? msg.reviewed_at;
+            if (!ra) continue;
+            let d;
+            try {
+              d = ra instanceof Date ? ra : new Date(ra);
+              if (isNaN(d.getTime())) continue;
+            } catch (_e) { continue; }
+            const diff = Math.floor((Date.now() - d.getTime()) / 86400000);
+            if (diff < 0 || diff > 6) continue;
+            const st = String(msg.status || '');
+            if (st === 'approved') dayCounts[diff].a += 1;
+            else if (st === 'rejected') dayCounts[diff].r += 1;
+          }
+          body += '\n—— ۷ روز اخیر ——\n';
+          const labels = ['امروز', 'دیروز', '۲روز', '۳روز', '۴روز', '۵روز', '۶روز'];
+          for (let i = 0; i < 7; i++) {
+            const c = dayCounts[i];
+            if (!c.a && !c.r) continue;
+            body += labels[i] + ': 🟢' + c.a + ' 🔴' + c.r + '\n';
+          }
+        } catch (_e) {}
+
+        await api.sendMessage({
+          chat_id: chatId,
+          text: body.slice(0, 4000),
+          reply_markup: sanitizeMarkup(adminPerfInline()),
+        });
       } catch (e) {
         console.error('perf', e);
         await api.sendMessage({ chat_id: chatId, text: 'خطا در آمار عملکرد', reply_markup: await roleKb(userId) });
       }
+      return;
+    }
+
+    // ========== ADMIN: help request ==========
+    if ((role === 'admin' || role === 'subleader') && text === '🆘 درخواست کمک') {
+      try {
+        const card = await adminShiftCard(userId);
+        if (!card.active || !card.active.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'الان شیفت فعالی ندارید.\nدرخواست کمک فقط داخل شیفت معنا دارد.',
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+        const a = card.active[0];
+        const ck = a.channelKey;
+        const title = a.title;
+        // جلوگیری از اسپم: یک درخواست باز در هر کانال/دوره
+        const pdate = periodDateStr(tehranNow());
+        const flagKey = 'help_req:' + ck + ':' + pdate + ':' + userId;
+        if ((await settingGet(flagKey, '')) === '1') {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'درخواست کمک شما برای این شیفت قبلاً ارسال شده.',
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+        await settingSet(flagKey, '1');
+        const me = await getUser(userId);
+        const who = displayName(me, userId);
+        const textH =
+          '🆘 درخواست کمک\n' +
+          'از: ' + who + '\n' +
+          'کانال: «' + title + '»\n' +
+          'شیفت: ' + a.startHm + '–' + a.endHm + '\n' +
+          'صف تقریبی: ' + (card.pendingTotal || 0) + ' پیام\n\n' +
+          'اگر می‌توانید وارد شیفت شوید یا پیام‌های در انتظار را بررسی کنید.';
+        // به ادمین‌های همان کانال + ساب‌لیدر + مالک‌ها
+        const targets = new Set();
+        try {
+          const rows = (await db.select().from(channelAdmins).all()) || [];
+          for (const r of rows) {
+            if (String(r.channelKey ?? r.channel_key) === String(ck)) {
+              const uid = Number(r.userId ?? r.user_id);
+              if (uid && uid !== Number(userId)) targets.add(uid);
+            }
+          }
+        } catch (_e) {}
+        try {
+          const slRows = (await listActiveSubLeaders()) || [];
+          for (const r of slRows) {
+            if (String(r.channelKey ?? r.channel_key) === String(ck)) {
+              const uid = Number(r.userId ?? r.user_id);
+              if (uid && uid !== Number(userId)) targets.add(uid);
+            }
+          }
+        } catch (_e) {}
+        for (const oid of OWNER_IDS || []) targets.add(Number(oid));
+        let sent = 0;
+        for (const tid of targets) {
+          try {
+            await api.sendMessage({
+              chat_id: tid,
+              text: textH,
+              reply_markup: sanitizeMarkup(adminHelpConfirmInline(ck, userId)),
+            });
+            sent += 1;
+          } catch (_e) {}
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '✅ درخواست کمک برای «' + title + '» به ' + sent + ' نفر ارسال شد.',
+          reply_markup: await roleKb(userId),
+        });
+      } catch (e) {
+        console.error('help req', e);
+        await api.sendMessage({ chat_id: chatId, text: 'خطا در ارسال درخواست کمک', reply_markup: await roleKb(userId) });
+      }
+      return;
+    }
+
+    if ((role === 'admin' || role === 'subleader') && text === '🐞 گزارش مشکل') {
+      await setState(userId, 'admin_bug');
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'مشکل را کوتاه بنویسید.\n(مستقیم برای مالک ارسال می‌شود)\n\nبرای انصراف: /start',
+        reply_markup: sanitizeMarkup(backKeyboard()),
+      });
       return;
     }
 
