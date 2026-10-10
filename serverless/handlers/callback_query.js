@@ -49,6 +49,7 @@ import {
   releaseLock,
   shiftIntervalOverlaps,
 } from 'lib/dbutil';
+import { drainHoleWave, startHoleJob, getHoleJob, saveHoleJob, drainHolePiggyback } from 'lib/hole_drain';
 import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob } from 'lib/announce_drain';
 import { setState, getState, clearState } from 'lib/state';
 import {
@@ -491,6 +492,7 @@ export default async function (cq) {
       })();
       const fin = await finP;
       await editReviewResult(cq, '🟢 تأیید و منتشر شد #' + id, fin);
+      try { await drainHolePiggyback(); } catch (_e) {}
       // نوتیف را block نکن
       try { notifyP.catch(function () {}); } catch (_e) {}
       return;
@@ -2559,14 +2561,14 @@ if (data.startsWith('flush_ch:')) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text:
-          '⚠️ انتشار مستقیم\n\n' +
+          '🕳️ سوراخ پیام\n\n' +
           'کانال: «' +
           title +
           '»\n' +
           'تعداد pending: ' +
           pending.length +
           '\n\n' +
-          'بدون بررسی ادمین، از قدیمی‌ترین به کانال منتشر می‌شوند (هر دسته حدود ۳۰ پیام).\nادامه؟',
+          'بدون بررسی ادمین، موج‌موج از قدیمی‌ترین به کانال منتشر می‌شوند (سوراخ پیام) (هر دسته حدود ۳۰ پیام).\nادامه؟',
         reply_markup: sanitizeMarkup(flushConfirmInline(channelKey)),
       });
       return;
@@ -2588,35 +2590,39 @@ if (data.startsWith('flush_ch:')) {
         return;
       }
       const channelKey = data.split(':')[1];
-      const pending =
-        (await db
-          .select()
-          .from(messages)
-          .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, channelKey)))
-          .all()) || [];
-      pending.sort(function (a, b) {
-        return a.id - b.id;
-      });
-      const job = {
-        status: 'running',
-        channelKey: channelKey,
-        total: pending.length,
-        ok: 0,
-        fail: 0,
-        ownerId: userId,
-      };
-      await settingSet('flush_job', JSON.stringify(job));
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'شروع...' });
+      if (!DEFAULT_CHANNELS[channelKey]) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'شروع سوراخ...' });
       const progress = await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: '📤 در حال انتشار...\n0/' + pending.length,
+        text: '🕳️ سوراخ پیام در حال آماده‌سازی...',
         reply_markup: sanitizeMarkup(flushProgressInline(false)),
       });
-      await runFlushBatch(cq.message.chat.id, progress && progress.message_id);
+      const job = await startHoleJob(
+        userId,
+        channelKey,
+        cq.message.chat.id,
+        progress && progress.message_id
+      );
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: progress.message_id,
+          text:
+            '🕳️ سوراخ پیام روشن شد\nکانال: «' +
+            ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
+            '»\nصف اولیه: ' +
+            (job.total || 0) +
+            '\nهر موج حداکثر ۱۰ پیام.',
+          reply_markup: sanitizeMarkup(flushProgressInline(false)),
+        });
+      } catch (_e) {}
+      await drainHoleWave({ force: true, maxN: 10 });
       return;
     }
 
-    
     if (data === 'flush_view_skip') {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
@@ -2644,7 +2650,7 @@ if (data.startsWith('flush_ch:')) {
             .all()) || [];
         ids = all
           .filter(function (r) {
-            return String(r.rejectReason || '') === 'تکراری (انتشار مستقیم)';
+            return /تکراری \(سوراخ پیام\)|تکراری \(انتشار مستقیم\)/.test(String(r.rejectReason || ''));
           })
           .sort(function (a, b) {
             return b.id - a.id;
@@ -2711,8 +2717,16 @@ if (data === 'flush_next') {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ادامه...' });
-      await runFlushBatch(cq.message.chat.id, cq.message.message_id);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'موج بعد...' });
+      try {
+        const job = await getHoleJob();
+        if (job && job.status === 'running') {
+          job.progressChatId = cq.message.chat.id;
+          job.progressMessageId = cq.message.message_id;
+          await saveHoleJob(job);
+        }
+      } catch (_e) {}
+      await drainHoleWave({ force: true, maxN: 10 });
       return;
     }
 
