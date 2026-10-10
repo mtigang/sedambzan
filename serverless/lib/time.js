@@ -113,14 +113,13 @@ export function buildAvailableShiftSlots(now) {
   const pad = (n) => String(n).padStart(2, '0');
   const inWork = isWorkHours(now);
   const nowOrd = periodOrd(now.hm);
+  // دوره رسمی: ۱۲:۰۰–۱۳:۰۰ … ۲۳:۰۰–۰۰:۰۰
   for (let h = 12; h <= 23; h++) {
     const start = pad(h) + ':00';
     const end = pad((h + 1) % 24) + ':00';
-    // داخل ساعت کاری فقط از الان به بعد
     if (inWork) {
       const endOrd = periodOrd(end);
-      // end انحصاری: اگر الان >= end بازه تمام شده
-      if (nowOrd >= endOrd) continue;
+      if (nowOrd >= endOrd) continue; // بازه تمام شده
     }
     slots.push({
       start: start,
@@ -133,25 +132,9 @@ export function buildAvailableShiftSlots(now) {
 }
 
 export function buildOwnerShiftSlots(now) {
+  // مالک همان بازه‌های دوره کاری (۱۲→۰۰) — بدون ساعات نیمه‌شب تا ظهر
   if (!now) now = tehranNow();
-  // مالک: همه بازه‌های دوره ۱۲→۰۰ + در صورت نیاز ساعات قبل از ظهر همان روز
-  const slots = [];
-  const pad = (n) => String(n).padStart(2, '0');
-  const base = buildAvailableShiftSlots(now);
-  // اگر مالک بیرون از ساعت کاری است، همان لیست دوره کافی است
-  for (const s of base) slots.push(s);
-  // ساعات ۰–۱۱ هم برای تخصیص آزاد مالک (بدون سقف دوره)
-  for (let h = 0; h < 12; h++) {
-    const start = pad(h) + ':00';
-    const end = pad(h + 1) + ':00';
-    slots.push({
-      start: start,
-      end: end,
-      label: start + '–' + end,
-      hourKey: start,
-    });
-  }
-  return slots;
+  return buildAvailableShiftSlots(now);
 }
 
 const JMONTHS = [
