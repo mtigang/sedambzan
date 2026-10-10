@@ -1029,8 +1029,7 @@ export default async function (message) {
       // ادمین/ساب‌لیدر: ساخت/بازیابی Batch
       // اگر شیفت‌ها اشتباه لغو شده بودند، همان‌هایی که هنوز در بازه ساعت‌شان هستند برگردان
       try {
-        await restoreMistakenlyCancelledShifts();
-      } catch (_e) {}
+              } catch (_e) {}
       const res = await createReviewBatch(userId);
       if (res.status === 'no_shift') {
         await api.sendMessage({
@@ -1200,6 +1199,18 @@ export default async function (message) {
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
+      }
+      if (!isOwner(userId)) {
+        let allowed = [];
+        try { allowed = await shiftPickChannels(userId); } catch (_e) { allowed = []; }
+        if (!allowed.map(String).includes(String(entry.key))) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'اجازه انتخاب شیفت برای این کانال را ندارید.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
       }
       await clearState(userId);
       await api.sendMessage({
