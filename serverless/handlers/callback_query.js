@@ -37,6 +37,9 @@ import {
   isChannelSlotTaken,
   dedupeActiveShifts,
   cancelAllPermanentShifts,
+  cancelInvalidShifts,
+  filterPeriodShifts,
+  buildTakenMapForSlots,
   acquireLock,
   releaseLock,
   shiftIntervalOverlaps,
@@ -1537,13 +1540,9 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
       let cancelled = 0;
       for (const s of mySh) {
         const sameHour =
-          s.startHm === hourKey ||
-          String(s.startHm).slice(0, 2) === String(hourKey).slice(0, 2);
-        const sameDate =
-          s.shiftDate === pdate ||
-          s.shiftDate === 'perm' ||
-          s.shiftDate === 'permanent' ||
-          s.shiftDate === now.date;
+          String(Number(String(s.startHm).split(':')[0]) || 0).padStart(2, '0') ===
+          String(Number(String(hourKey).split(':')[0]) || 0).padStart(2, '0');
+        const sameDate = String(s.shiftDate) === String(pdate);
         if (s.channelKey === channelKey && sameHour && sameDate) {
           await db
             .update(shifts)
@@ -1613,7 +1612,7 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
     
     if (data === 'own_shift_list') {
       try {
-        try { await cancelAllPermanentShifts(); } catch (_e) {}
+        try { await cancelInvalidShifts(); } catch (_e) {}
         if (!isOwner(userId)) {
           await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
           return;
@@ -3076,7 +3075,7 @@ if (data === 'ann_continue') {
       }
       mode = 'daily';
       try {
-        await cancelAllPermanentShifts();
+        await cancelInvalidShifts();
       } catch (_e) {}
       const now = tehranNow();
       const date = periodDateStr(now);
@@ -3088,7 +3087,9 @@ if (data === 'ann_continue') {
         if (String(s.startHm) === String(s.endHm)) return false;
         const sd = String(s.shiftDate || '');
         if (sd === 'perm' || sd === 'permanent') return false;
-        return sd === date;
+        if (sd !== date) return false;
+        const sh = Number(String(s.startHm || '0').split(':')[0]) || 0;
+        return sh >= 12;
       });
       const takenMap = {};
       const myStarts = new Set();
@@ -3276,7 +3277,7 @@ if (data === 'ann_continue') {
             ' برای ادمین ' +
             displayName(await getUser(targetAdmin), targetAdmin) +
             ' (' +
-            (mode === 'perm' ? 'دائمی' : 'روزانه') +
+            'دوره فعلی' +
             ') ثبت شد.',
         });
         try {
@@ -3376,13 +3377,29 @@ if (data === 'ann_continue') {
         });
         return;
       }
+      {
+        const sh = Number(String(startHm).split(':')[0]) || 0;
+        if (sh < 12) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'شیفت فقط از ۱۲ تا ۰۰ معتبر است',
+            show_alert: true,
+          });
+          return;
+        }
+      }
       // فقط دوره فعلی — دائمی حذف شد
       const pickMode = 'daily';
       const shiftDateVal = pdate;
       // چک نهایی تداخل کانال (جلوگیری از دابل و race)
       // قفل اسلات برای جلوگیری از ثبت همزمان دو ادمین
       const slotLockKey =
-        'shift_slot:' + channelKey + ':' + pdate + ':' + String(startHm).slice(0, 5);
+        'shift_slot:' +
+        channelKey +
+        ':' +
+        pdate +
+        ':' +
+        String(Number(String(startHm).split(':')[0]) || 0).padStart(2, '0');
       let slotLock = null;
       try {
         slotLock = await acquireLock(slotLockKey, 8000);
