@@ -8,7 +8,7 @@ import {
   CHANNEL_IDS,
   ADMIN_GROUP_IDS,
 } from 'lib/config';
-import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf, periodOrd } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf, periodOrd, isWorkHours } from 'lib/time';
 import { exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { reviewInline, sanitizeMarkup } from 'lib/keyboards';
 
@@ -705,13 +705,20 @@ function reviewBatchKey(adminId) {
 /** آیا این رکورد shift همین الان (تهران) فعال است؟ */
 function shiftActiveNow(s, now, pdate) {
   if (!s || String(s.status) !== 'active') return false;
+  if (!now) now = tehranNow();
+  if (!pdate) pdate = periodDateStr(now);
+  // خارج از ساعت کاری (۱۲–۰۰) هیچ شیفتی فعال نیست
+  if (!isWorkHours(now)) return false;
   const start = normHm(s.startHm || s.start_hm || '');
   const end = normHm(s.endHm || s.end_hm || '');
   if (!start || !end || start === end) return false;
   const sd = String(s.shiftDate ?? s.shift_date ?? '');
   if (sd === 'perm' || sd === 'permanent') return false;
-  // فقط همان تاریخ دوره
+  // فقط دورهٔ تقویمی فعلی
   if (sd !== String(pdate)) return false;
+  // بازه باید داخل پنجره کاری باشد (شروع بین ۱۲ تا ۲۳)
+  const sh = Number(String(start).split(':')[0]) || 0;
+  if (sh < 12) return false;
   return inRange(now.hm, start, end);
 }
 
@@ -736,6 +743,34 @@ export function shiftIntervalOverlaps(startHm, endHm, otherStartHm, otherEndHm) 
 /** آیا این بازه در کانال برای دوره/دائم توسط کسی اشغال است؟ */
 
 /** همه شیفت‌های دائمی را لغو می‌کند (قابلیت دائم حذف شده) */
+
+/** لغو شیفت‌های بی‌اعتبار: دائم، یا شروع قبل از ۱۲ (باقی‌مانده سیستم قدیم) */
+export async function cancelInvalidShifts() {
+  try {
+    const all = (await db.select().from(shifts).all()) || [];
+    let n = 0;
+    for (const s of all) {
+      if (String(s.status) !== 'active') continue;
+      const sd = String(s.shiftDate ?? s.shift_date ?? '');
+      const sh = Number(String(s.startHm || s.start_hm || '0').split(':')[0]) || 0;
+      const bad =
+        sd === 'perm' ||
+        sd === 'permanent' ||
+        sh < 12 ||
+        String(s.startHm) === String(s.endHm);
+      if (!bad) continue;
+      try {
+        await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, Number(s.id))).run();
+        n += 1;
+      } catch (_e) {}
+    }
+    return n;
+  } catch (e) {
+    console.error('cancelInvalidShifts', e);
+    return 0;
+  }
+}
+
 export async function cancelAllPermanentShifts() {
   try {
     const all = (await db.select().from(shifts).all()) || [];
@@ -756,6 +791,46 @@ export async function cancelAllPermanentShifts() {
   }
 }
 
+
+/** نقشه پر بودن اسلات‌ها بر اساس هم‌پوشانی واقعی (نه فقط ساعت شروع) */
+export function buildTakenMapForSlots(activeShifts, slots) {
+  const takenMap = {};
+  const list = activeShifts || [];
+  const slotList = slots || [];
+  for (const slot of slotList) {
+    const ss = slot.start || slot.hourKey;
+    const se = slot.end;
+    if (!ss || !se || String(ss) === String(se)) continue;
+    for (const s of list) {
+      const sd = String(s.shiftDate ?? s.shift_date ?? '');
+      if (sd === 'perm' || sd === 'permanent') continue;
+      if (String(s.startHm) === String(s.endHm)) continue;
+      const sh = Number(String(s.startHm || '0').split(':')[0]) || 0;
+      if (sh < 12) continue;
+      if (shiftIntervalOverlaps(ss, se, s.startHm || s.start_hm, s.endHm || s.end_hm)) {
+        takenMap[ss] = s.adminId ?? s.admin_id;
+        takenMap[hourKeyOf(ss)] = s.adminId ?? s.admin_id;
+        break;
+      }
+    }
+  }
+  return takenMap;
+}
+
+/** فقط شیفت‌های معتبر دوره فعلی (۱۲–۰۰، غیر دائم، غیر صفر) */
+export function filterPeriodShifts(rows, pdate) {
+  return (rows || []).filter(function (s) {
+    if (String(s.status) !== 'active') return false;
+    const sd = String(s.shiftDate ?? s.shift_date ?? '');
+    if (sd === 'perm' || sd === 'permanent') return false;
+    if (sd !== String(pdate)) return false;
+    if (String(s.startHm) === String(s.endHm)) return false;
+    const sh = Number(String(s.startHm || s.start_hm || '0').split(':')[0]) || 0;
+    if (sh < 12) return false;
+    return true;
+  });
+}
+
 export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShiftId) {
   try {
     const rows =
@@ -771,6 +846,9 @@ export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShif
       if (sd === 'perm' || sd === 'permanent') continue;
       if (sd !== String(pdate)) continue;
       if (String(s.startHm) === String(s.endHm)) continue;
+      // شیفت‌های نیمه‌شب تا ظهر (باقی‌مانده قدیمی) نادیده
+      const sh = Number(String(s.startHm || s.start_hm || '0').split(':')[0]) || 0;
+      if (sh < 12) continue;
       if (shiftIntervalOverlaps(startHm, endHm, s.startHm || s.start_hm, s.endHm || s.end_hm)) {
         return s;
       }
@@ -778,7 +856,8 @@ export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShif
     return null;
   } catch (e) {
     console.error('isChannelSlotTaken', e);
-    return null;
+    // fail-closed: وانمود کن پر است تا دابل‌بوک نشود
+    return { id: -1, adminId: 0, _error: true };
   }
 }
 
@@ -800,12 +879,11 @@ export async function dedupeActiveShifts(channelKey) {
     const relevant = rows
       .filter(function (s) {
         const sd = String(s.shiftDate ?? s.shift_date ?? '');
-        return (
-          sd === 'perm' ||
-          sd === 'permanent' ||
-          sd === String(pdate) ||
-          sd === String(now.date)
-        );
+        if (sd === 'perm' || sd === 'permanent') return false;
+        if (sd !== String(pdate)) return false;
+        const sh = Number(String(s.startHm || s.start_hm || '0').split(':')[0]) || 0;
+        if (sh < 12) return false;
+        return true;
       })
       .sort(function (a, b) {
         return Number(a.id) - Number(b.id);
