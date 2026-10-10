@@ -709,9 +709,9 @@ function shiftActiveNow(s, now, pdate) {
   const end = normHm(s.endHm || s.end_hm || '');
   if (!start || !end || start === end) return false;
   const sd = String(s.shiftDate ?? s.shift_date ?? '');
-  // دائمی منسوخ — دیگر فعال محسوب نمی‌شود
   if (sd === 'perm' || sd === 'permanent') return false;
-  if (sd !== String(pdate) && sd !== String(now.date)) return false;
+  // فقط همان تاریخ دوره
+  if (sd !== String(pdate)) return false;
   return inRange(now.hm, start, end);
 }
 
@@ -764,14 +764,12 @@ export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShif
         .from(shifts)
         .where(and(eq(shifts.channelKey, String(channelKey)), eq(shifts.status, 'active')))
         .all()) || [];
-    const now = tehranNow();
-    const pdate = periodDateStr(now);
+    const pdate = periodDateStr(tehranNow());
     for (const s of rows) {
       if (excludeShiftId != null && Number(s.id) === Number(excludeShiftId)) continue;
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
-      // perm دیگر اشغال‌کننده نیست
-      const relevant = sd === String(pdate) || sd === String(now.date);
-      if (!relevant) continue;
+      if (sd === 'perm' || sd === 'permanent') continue;
+      if (sd !== String(pdate)) continue;
       if (String(s.startHm) === String(s.endHm)) continue;
       if (shiftIntervalOverlaps(startHm, endHm, s.startHm || s.start_hm, s.endHm || s.end_hm)) {
         return s;
@@ -865,17 +863,23 @@ export async function dedupeActiveShifts(channelKey) {
 
 export async function findAdminShiftConflict(adminId, shiftDate, startHm, endHm, excludeId = null) {
   try {
-    const rows = (await db.select().from(shifts).where(
-      and(eq(shifts.adminId, Number(adminId)), eq(shifts.status, 'active'))
-    ).all()) || [];
-    const newPermanent = shiftDate === 'perm' || shiftDate === 'permanent';
-    return rows.find((s) => {
-      if (excludeId != null && Number(s.id) === Number(excludeId)) return false;
-      const oldPermanent = s.shiftDate === 'perm' || s.shiftDate === 'permanent';
-      const samePeriod = newPermanent || oldPermanent || String(s.shiftDate) === String(shiftDate);
-      if (!samePeriod) return false;
-      return shiftIntervalOverlaps(startHm, endHm, s.startHm, s.endHm);
-    }) || null;
+    const rows =
+      (await db
+        .select()
+        .from(shifts)
+        .where(and(eq(shifts.adminId, Number(adminId)), eq(shifts.status, 'active')))
+        .all()) || [];
+    const targetDate = String(shiftDate);
+    return (
+      rows.find(function (s) {
+        if (excludeId != null && Number(s.id) === Number(excludeId)) return false;
+        const sd = String(s.shiftDate ?? s.shift_date ?? '');
+        if (sd === 'perm' || sd === 'permanent') return false;
+        if (sd !== targetDate) return false;
+        if (String(s.startHm) === String(s.endHm)) return false;
+        return shiftIntervalOverlaps(startHm, endHm, s.startHm || s.start_hm, s.endHm || s.end_hm);
+      }) || null
+    );
   } catch (e) {
     console.error('findAdminShiftConflict', e);
     return null;
