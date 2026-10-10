@@ -105,21 +105,22 @@ async function refreshAllShiftBoards(channelKey, date) {
 
 /** ویرایش پیام بعد از تأیید/رد؛ اگر Batch کامل شد دکمه‌ی بعدی یا «صف تمام شد» */
 async function editReviewResult(cq, text, fin) {
-  // کیبورد نتیجه: اگر Batch تمام شد و pending بیشتری هست → دکمه Batch بعدی بماند
-  // اگر تمام شد و چیزی نمانده → صف خالی
-  // اگر Batch هنوز کامل نشده → کیبورد خالی (فقط نتیجه)
+  // روی پیام تأیید/رد دکمه‌ای نمی‌ماند.
+  // فقط اگر Batch تمام شد و صف دارد: یک پیام جدا با دکمه سبز «Batch بعدی»
   let markup = { inline_keyboard: [] };
   let extraSend = null;
   if (fin && fin.complete) {
     if (fin.hasMore) {
       const bn = fin.batch && fin.batch.batchNumber;
-      markup = sanitizeMarkup(reviewNextInline(bn));
       extraSend = {
         text: '✅ این Batch تمام شد.\nبرای دریافت دسته بعدی دکمه زیر را بزنید.',
         reply_markup: sanitizeMarkup(reviewNextInline(bn)),
       };
     } else {
-      markup = sanitizeMarkup(reviewDoneInline());
+      extraSend = {
+        text: '✅ این Batch تمام شد.\n📭 پیام pending دیگری در صف شما نیست.',
+        reply_markup: { inline_keyboard: [] },
+      };
     }
   }
   try {
