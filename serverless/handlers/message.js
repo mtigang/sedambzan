@@ -104,6 +104,8 @@ import {
   getStatsDashboardText,
   dedupeActiveShifts,
   cancelAllPermanentShifts,
+  cancelInvalidShifts,
+  filterPeriodShifts,
   acquireLock,
   releaseLock,
   listAdminsByChannel,
@@ -1240,7 +1242,7 @@ export default async function (message) {
     if (owner && text === '⏰ شیفت‌ها') {
       try {
 try {
-        try { await cancelAllPermanentShifts(); } catch (_e) {}
+        try { await cancelInvalidShifts(); } catch (_e) {}
         for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
           try { await dedupeActiveShifts(ck); } catch (_e) {}
         }
