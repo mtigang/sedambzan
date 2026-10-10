@@ -677,7 +677,59 @@ if (data.startsWith('reject_menu:')) {
       return;
     }
 
-    if (data === 'review_next' || data.startsWith('review_next:')) {
+    
+    if (data === 'admin_help') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'برای درخواست کمک از دکمه «🆘 درخواست کمک» در منوی اصلی استفاده کنید.',
+        });
+      } catch (_e) {}
+      return;
+    }
+    if (data === 'admin_bug') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        await setState(userId, 'admin_bug');
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'مشکل را کوتاه بنویسید.\nبرای انصراف: /start',
+        });
+      } catch (_e) {}
+      return;
+    }
+    if (data.startsWith('help_ok|') || data.startsWith('help_ok:')) {
+      const parts = data.indexOf('|') >= 0 ? data.split('|') : data.split(':');
+      const ck = parts[1];
+      const requesterId = Number(parts[2]);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت شد' });
+      try {
+        const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+        const me = await getUser(userId);
+        const who = displayName(me, userId);
+        if (requesterId) {
+          try {
+            await api.sendMessage({
+              chat_id: requesterId,
+              text: '✅ ' + who + ' برای کمک در «' + title + '» اعلام آمادگی کرد.',
+            });
+          } catch (_e) {}
+        }
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: (cq.message.text || '') + '\n\n✅ شما اعلام آمادگی کردید.',
+          });
+        } catch (_e) {}
+      } catch (e) {
+        console.error('help_ok', e);
+      }
+      return;
+    }
+
+if (data === 'review_next' || data.startsWith('review_next:')) {
       const want = data.indexOf(':') >= 0 ? Number(data.split(':')[1]) : null;
       const role = await getRole(userId);
       if (role !== 'admin' && role !== 'subleader' && !isOwner(userId)) {
