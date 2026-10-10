@@ -75,9 +75,10 @@ export function inRange(hm, startHm, endHm) {
 }
 
 /**
- * تاریخ میلادی دوره فعلی (شروع از ۱۲:۰۰ همان روز تا ۰۰:۰۰).
- * ۰۰:۰۰–۱۱:۵۹ → دوره از امروز ۱۲:۰۰ (هنوز شروع نشده / دوره قبل تمام شده)
- * ۱۲:۰۰–۲۳:۵۹ → دوره امروز
+ * کلید تاریخ دوره شیفت (یک‌بارمصرف روزانه).
+ * دوره = از ۱۲:۰۰ تا ۰۰:۰۰ همان تقویم تهران.
+ * بعد از نیمه‌شب تا ظهر: دوره «امروز» هنوز شروع نشده (از ۱۲:۰۰).
+ * شیفت‌های دیروز دیگر متعلق به دوره فعلی نیستند.
  */
 export function periodDateStr(now) {
   if (!now) now = tehranNow();
@@ -110,10 +111,17 @@ export function buildAvailableShiftSlots(now) {
   if (!now) now = tehranNow();
   const slots = [];
   const pad = (n) => String(n).padStart(2, '0');
+  const inWork = isWorkHours(now);
+  const nowOrd = periodOrd(now.hm);
   for (let h = 12; h <= 23; h++) {
     const start = pad(h) + ':00';
-    const endH = (h + 1) % 24;
-    const end = pad(endH) + ':00';
+    const end = pad((h + 1) % 24) + ':00';
+    // داخل ساعت کاری فقط از الان به بعد
+    if (inWork) {
+      const endOrd = periodOrd(end);
+      // end انحصاری: اگر الان >= end بازه تمام شده
+      if (nowOrd >= endOrd) continue;
+    }
     slots.push({
       start: start,
       end: end,
