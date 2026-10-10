@@ -1756,7 +1756,7 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
           '\n\n' +
           String(row.content || '').slice(0, 3800),
         // فقط زیر آخرین پیام Batch دکمه «Batch بعدی» باشد
-        reply_markup: sanitizeMarkup(reviewInline(row.id, Number(row.id) === lastId, batch.batchNumber)),
+        reply_markup: sanitizeMarkup(reviewInline(row.id, false, batch.batchNumber)),
       });
     } catch (e) {
       console.error('sendReviewBatch', row.id, e);
