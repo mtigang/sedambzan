@@ -37,6 +37,8 @@ import {
   isChannelSlotTaken,
   dedupeActiveShifts,
   cancelAllPermanentShifts,
+  acquireLock,
+  releaseLock,
   shiftIntervalOverlaps,
 } from 'lib/dbutil';
 import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob } from 'lib/announce_drain';
@@ -3086,12 +3088,14 @@ if (data === 'ann_continue') {
         if (String(s.startHm) === String(s.endHm)) return false;
         const sd = String(s.shiftDate || '');
         if (sd === 'perm' || sd === 'permanent') return false;
-        return sd === date || sd === now.date;
+        return sd === date;
       });
       const takenMap = {};
       const myStarts = new Set();
       for (const s of occupied) {
-        const key = String(s.startHm);
+        // کلید باکت ساعت شروع تا با دکمه‌ها یکی باشد
+        const parts = String(s.startHm || '0').split(':');
+        const key = String(Number(parts[0]) || 0).padStart(2, '0') + ':00';
         takenMap[key] = s.adminId;
         if (Number(s.adminId) === Number(userId)) myStarts.add(key);
       }
@@ -3336,11 +3340,11 @@ if (data === 'ann_continue') {
       let _modeForConflict = 'daily';
       try {
         const _stc = await getState(userId);
-        if (_stc && _stc.kind === 'pick_shift_slot' && _stc.mode === 'perm') _modeForConflict = 'perm';
+        // دائمی حذف شده — همیشه دوره فعلی
       } catch (_e) {}
       const ownConflict = await findAdminShiftConflict(
         userId,
-        _modeForConflict === 'perm' ? 'perm' : pdate,
+        pdate,
         startHm,
         endHm
       );
@@ -3353,12 +3357,8 @@ if (data === 'ann_continue') {
         return;
       }
 
-      const mineCount = taken.filter((s) => {
-        const same =
-          s.shiftDate === pdate ||
-          s.shiftDate === 'perm' ||
-          s.shiftDate === 'permanent';
-        return same && Number(s.adminId) === Number(userId);
+      const mineCount = taken.filter(function (s) {
+        return Number(s.adminId) === Number(userId) && String(s.shiftDate) === String(pdate);
       }).length;
       if (!isOwner(userId) && mineCount >= 3) {
         await api.answerCallbackQuery({
@@ -3380,8 +3380,31 @@ if (data === 'ann_continue') {
       const pickMode = 'daily';
       const shiftDateVal = pdate;
       // چک نهایی تداخل کانال (جلوگیری از دابل و race)
-      const slotFinal = await isChannelSlotTaken(channelKey, startHm, endHm, null);
+      // قفل اسلات برای جلوگیری از ثبت همزمان دو ادمین
+      const slotLockKey =
+        'shift_slot:' + channelKey + ':' + pdate + ':' + String(startHm).slice(0, 5);
+      let slotLock = null;
+      try {
+        slotLock = await acquireLock(slotLockKey, 8000);
+      } catch (_e) {}
+      if (!slotLock) {
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: '⏳ این ساعت در حال ثبت توسط دیگری است',
+          show_alert: true,
+        });
+        return;
+      }
+      let slotFinal = null;
+      try {
+        slotFinal = await isChannelSlotTaken(channelKey, startHm, endHm, null);
+      } catch (_e) {
+        slotFinal = null;
+      }
       if (slotFinal) {
+        try {
+          if (slotLock) await releaseLock(slotLockKey, slotLock);
+        } catch (_e) {}
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
           text: 'این بازه پر است یا همزمان گرفته شد.',
@@ -3407,6 +3430,9 @@ if (data === 'ann_continue') {
       try {
         await dedupeActiveShifts(channelKey);
       } catch (_e) {}
+      try {
+        if (slotLock) await releaseLock(slotLockKey, slotLock);
+      } catch (_e) {}
 
       await api.answerCallbackQuery({
         callback_query_id: cq.id,
@@ -3425,17 +3451,16 @@ if (data === 'ann_continue') {
             .where(and(eq(shifts.channelKey, channelKey), eq(shifts.status, 'active')))
             .all()) || [];
         const active = dayShifts.filter(function (s) {
-          return (
-            s.shiftDate === pdate ||
-            s.shiftDate === 'perm' ||
-            s.shiftDate === 'permanent' ||
-            s.shiftDate === now.date
-          );
+          const sd = String(s.shiftDate || '');
+          if (sd === 'perm' || sd === 'permanent') return false;
+          return sd === pdate;
         });
         const takenMap = {};
         for (const s of active) {
           if (String(s.startHm) === String(s.endHm)) continue;
-          takenMap[s.startHm] = s.adminId;
+          const parts = String(s.startHm || '0').split(':');
+          const key = String(Number(parts[0]) || 0).padStart(2, '0') + ':00';
+          takenMap[key] = s.adminId;
         }
         const myStarts = new Set(
           active.filter((s) => Number(s.adminId) === Number(userId)).map((s) => s.startHm)
