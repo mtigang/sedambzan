@@ -309,6 +309,7 @@ export function ownerReviewInline(id) {
 }
 
 export function reviewInline(id, showNext, batchNumber) {
+  // دکمه Batch بعدی اینجا نیست — فقط بعد از اتمام Batch با پیام جداگانه می‌آید
   const rows = [
     [
       { text: 'تأیید', callback_data: 'approve:' + id, style: 'success' },
@@ -316,15 +317,6 @@ export function reviewInline(id, showNext, batchNumber) {
     ],
     [{ text: '✏️ ویرایش و ارسال', callback_data: 'edit_msg:' + id, style: 'primary' }],
   ];
-  if (showNext) {
-    rows.push([
-      {
-        text: '📥 Batch بعدی' + (batchNumber != null ? ' (' + batchNumber + ')' : ''),
-        callback_data: 'review_next' + (batchNumber != null ? ':' + batchNumber : ''),
-        style: 'primary',
-      },
-    ]);
-  }
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
