@@ -219,6 +219,7 @@ export function settingsKeyboard(botOn, fridayOn) {
       [{ text: '📢 حالت تب' }, { text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
       [{ text: fridayOn ? '☀️ خاموش کردن حالت جمعه' : '🌙 حالت جمعه' }, { text: '📣 اطلاعیه' }],
       [{ text: '📣 ارسال' }, { text: '🧪 تست کانال‌ها' }],
+      [{ text: '🕳️ سوراخ پیام' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
@@ -658,6 +659,7 @@ return { markup: sanitizeMarkup({ inline_keyboard: rows }), skipped: skipped };
 }
 
 export function flushChannelPickInline() {
+  // انتخاب کانال برای سوراخ پیام
   const rows = [];
   for (const c of Object.values(DEFAULT_CHANNELS)) {
     rows.push([
@@ -676,7 +678,7 @@ export function flushProgressInline(finished, hasSkipped) {
   const rows = [];
   if (!finished) {
     rows.push([
-      { text: '▶️ انتشار دسته بعدی', callback_data: 'flush_next', style: 'success' },
+      { text: '▶️ دسته بعدی سوراخ', callback_data: 'flush_next', style: 'success' },
       { text: '⏹ توقف', callback_data: 'flush_stop', style: 'danger' },
     ]);
   } else {
