@@ -1481,6 +1481,156 @@ export async function finishReviewBatchIfComplete(adminId, messageId) {
  *   empty      → Pending مناسبی نیست
  *   created    → Batch جدید ساخته شد
  */
+
+/** کارت فشرده شیفت فعلی ادمین: کانال‌ها، دقیقه تا پایان، pending، تأیید/رد امروز */
+export async function adminShiftCard(adminId) {
+  const now = tehranNow();
+  const pdate = periodDateStr(now);
+  const out = {
+    active: [],
+    pendingTotal: 0,
+    todayApproved: 0,
+    todayRejected: 0,
+    minutesLeftMin: null,
+  };
+  try {
+    const all = (await db.select().from(shifts).all()) || [];
+    for (const s of all) {
+      if (Number(s.adminId ?? s.admin_id) !== Number(adminId)) continue;
+      if (!shiftActiveNow(s, now, pdate)) continue;
+      const ck = String((s.channelKey ?? s.channel_key) || '');
+      const end = normHm(s.endHm || s.end_hm || '');
+      let eOrd = periodOrd(end);
+      let nOrd = periodOrd(now.hm);
+      if (eOrd <= periodOrd(normHm(s.startHm || s.start_hm))) eOrd += 24 * 60;
+      if (nOrd < periodOrd(normHm(s.startHm || s.start_hm || '12:00')) && nOrd < 12 * 60) nOrd += 24 * 60;
+      const mins = Math.max(0, eOrd - nOrd);
+      out.active.push({
+        channelKey: ck,
+        title: (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck,
+        startHm: normHm(s.startHm || s.start_hm),
+        endHm: end,
+        minutesLeft: mins,
+      });
+      if (out.minutesLeftMin == null || mins < out.minutesLeftMin) out.minutesLeftMin = mins;
+    }
+  } catch (e) {
+    console.error('adminShiftCard shifts', e);
+  }
+  try {
+    const allowed = await allowedReviewChannels(adminId);
+    const allow = {};
+    for (const k of allowed || []) allow[String(k)] = true;
+    // شمارش سبک pending
+    let light = [];
+    try {
+      light =
+        (await db
+          .select({ id: messages.id, status: messages.status, channelKey: messages.channelKey })
+          .from(messages)
+          .where(eq(messages.status, 'pending'))
+          .all()) || [];
+    } catch (_e) {
+      try {
+        const allm = (await db.select().from(messages).all()) || [];
+        light = allm.filter(function (m) {
+          return String(m.status) === 'pending';
+        });
+      } catch (_e2) {}
+    }
+    for (const m of light) {
+      const ck = String((m.channelKey ?? m.channel_key) || '');
+      if (isOwner(adminId) || allow[ck]) out.pendingTotal += 1;
+    }
+  } catch (e) {
+    console.error('adminShiftCard pending', e);
+  }
+  try {
+    const allm = (await db.select().from(messages).all()) || [];
+    const day = String(now.date);
+    for (const m of allm) {
+      if (Number(m.reviewedBy ?? m.reviewed_by) !== Number(adminId)) continue;
+      const ts = String(m.reviewedAt ?? m.reviewed_at ?? m.createdAt ?? m.created_at ?? '');
+      if (ts.indexOf(day) < 0 && !String(ts).startsWith(day)) {
+        // تلاش برای تاریخ شمسی/ISO
+        try {
+          if (ts && ts.length >= 10 && ts.slice(0, 10) !== day) continue;
+          if (!ts) continue;
+        } catch (_e) {
+          continue;
+        }
+      }
+      const st = String(m.status || '');
+      if (st === 'approved') out.todayApproved += 1;
+      else if (st === 'rejected') out.todayRejected += 1;
+    }
+  } catch (e) {
+    console.error('adminShiftCard today', e);
+  }
+  return out;
+}
+
+/** یک‌بار در اولین Batch شیفت فعال: پیام خوش‌آمد */
+export async function maybeGreetShiftStart(adminId, chatId) {
+  try {
+    const now = tehranNow();
+    const pdate = periodDateStr(now);
+    const all = (await db.select().from(shifts).all()) || [];
+    const active = all.filter(function (s) {
+      return Number(s.adminId ?? s.admin_id) === Number(adminId) && shiftActiveNow(s, now, pdate);
+    });
+    if (!active.length) return false;
+    let greetedAny = false;
+    for (const s of active) {
+      const ck = String((s.channelKey ?? s.channel_key) || '');
+      const start = normHm(s.startHm || s.start_hm);
+      const key = 'shift_hello:' + adminId + ':' + ck + ':' + pdate + ':' + start;
+      const done = await settingGet(key, '');
+      if (done === '1') continue;
+      const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+      const end = normHm(s.endHm || s.end_hm);
+      let pendingN = 0;
+      try {
+        const light =
+          (await db
+            .select({ id: messages.id, status: messages.status, channelKey: messages.channelKey })
+            .from(messages)
+            .where(eq(messages.status, 'pending'))
+            .all()) || [];
+        pendingN = light.filter(function (m) {
+          return String((m.channelKey ?? m.channel_key) || '') === ck;
+        }).length;
+      } catch (_e) {}
+      const text =
+        '🟢 شیفت «' +
+        title +
+        '» شروع شد\n' +
+        '⏰ ' +
+        start +
+        '–' +
+        end +
+        '\n' +
+        '📥 در صف این کانال: ' +
+        pendingN +
+        ' پیام\n\n' +
+        'پیام‌های همین Batch را یکی‌یکی بررسی کن.\n' +
+        'وقتی تمام شد، «Batch بعدی» را بزن.';
+      try {
+        await api.sendMessage({ chat_id: chatId || adminId, text: text });
+      } catch (_e) {}
+      try {
+        await settingSet(key, '1');
+      } catch (_e) {}
+      greetedAny = true;
+    }
+    return greetedAny;
+  } catch (e) {
+    console.error('maybeGreetShiftStart', e);
+    return false;
+  }
+}
+
+
 export async function createReviewBatch(adminId) {
   const lockKey = 'review_batch_lock:' + adminId;
   const lock = await acquireLock(lockKey);
@@ -1560,13 +1710,35 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
     return;
   }
   const lastId = Number(live[live.length - 1].id);
+  // خوش‌آمد شیفت فقط یک‌بار، روی اولین دریافت Batch در بازه شیفت
+  if (!resumed) {
+    try {
+      await maybeGreetShiftStart(chatId, chatId);
+    } catch (_e) {}
+  }
+  let queueHint = '';
+  try {
+    const card = await adminShiftCard(chatId);
+    if (card && card.pendingTotal > 0) {
+      queueHint = '\n📊 کل صف قابل‌بررسی شما: ' + card.pendingTotal + ' پیام';
+      if (card.minutesLeftMin != null) {
+        queueHint += '\n⏱ حدود ' + card.minutesLeftMin + ' دقیقه تا پایان نزدیک‌ترین شیفت';
+      }
+    }
+  } catch (_e) {}
   const head = resumed
     ? '⏳ Batch فعلی هنوز کامل بررسی نشده است.\nBatch شماره ' +
       batch.batchNumber +
       ' — ' +
       live.length +
-      ' پیام pending باقی مانده.'
-    : '📥 Batch شماره ' + batch.batchNumber + '\n' + live.length + ' پیام برای بررسی دریافت شد.';
+      ' پیام باقی مانده.' +
+      queueHint
+    : '📥 Batch شماره ' +
+      batch.batchNumber +
+      '\n' +
+      live.length +
+      ' پیام برای بررسی' +
+      queueHint;
   await api.sendMessage({ chat_id: chatId, text: head });
   for (const row of live) {
     try {
