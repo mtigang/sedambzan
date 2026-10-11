@@ -40,6 +40,8 @@ import {
   cancelInvalidShifts,
   countAdminPeriodShifts,
   isUserChannelAdmin,
+  normalizeChannelKey,
+  shiftPickChannels,
   verifyShiftStillActive,
   clearMemo,
   pruneOldShifts,
@@ -3101,10 +3103,29 @@ if (data === 'ann_continue') {
     if (data.startsWith('shift_mode|') || data.startsWith('shift_mode:')) {
       const parts = data.indexOf('|') >= 0 ? data.split('|') : data.split(':');
       let mode = parts[1]; // فقط daily — perm منسوخ
-      const channelKey = parts[2];
-      if (!channelKey) {
+      let channelKey = normalizeChannelKey(parts[2]);
+      if (!channelKey || !DEFAULT_CHANNELS[channelKey]) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
         return;
+      }
+      if (!isOwner(userId)) {
+        let allowedOk = false;
+        try { allowedOk = await isUserChannelAdmin(userId, channelKey); } catch (_e) { allowedOk = false; }
+        if (!allowedOk) {
+          // نقش admin کلی: اگر shiftPickChannels شامل این کانال باشد
+          try {
+            const pcs = await shiftPickChannels(userId);
+            allowedOk = (pcs || []).map(normalizeChannelKey).includes(channelKey);
+          } catch (_e) {}
+        }
+        if (!allowedOk) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'اجازه انتخاب شیفت این کانال را ندارید',
+            show_alert: true,
+          });
+          return;
+        }
       }
       mode = 'daily';
       try {
@@ -3219,6 +3240,11 @@ if (data === 'ann_continue') {
       if (startHm === endHm) {
         const h = (Number(startHm.split(':')[0]) + 1) % 24;
         endHm = String(h).padStart(2, '0') + ':00';
+      }
+      channelKey = normalizeChannelKey(channelKey);
+      if (!channelKey || !DEFAULT_CHANNELS[channelKey]) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
+        return;
       }
       // ساده: کاربر عادی نه؛ ادمین/ساب‌لیدر/مالک بله
       // اگر channel_admins خراب بود، نقش admin کافی است
