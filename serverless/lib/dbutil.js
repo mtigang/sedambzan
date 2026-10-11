@@ -1494,17 +1494,22 @@ async function selectReviewablePending(adminId) {
     });
   }
 
-  // فقط به اندازه‌ی چند Batch ردیف کامل بگیر (نه کل صف)
-  const need = Math.max(REVIEW_BATCH_SIZE * 3, 48);
+  // فقط به اندازه یک Batch ردیف کامل — موازی برای سرعت
+  const need = REVIEW_BATCH_SIZE;
   const ids = filtered.slice(0, need).map(function (m) {
     return Number(m.id);
   });
+  if (!ids.length) return [];
+  const rows = await Promise.all(
+    ids.map(function (id) {
+      return getMessageById(id).catch(function () {
+        return null;
+      });
+    })
+  );
   const full = [];
-  for (let i = 0; i < ids.length; i++) {
-    try {
-      const row = await getMessageById(ids[i]);
-      if (row && String(row.status) === 'pending') full.push(row);
-    } catch (_e) {}
+  for (const row of rows) {
+    if (row && String(row.status) === 'pending') full.push(row);
   }
   return full;
 }
@@ -1717,8 +1722,14 @@ export async function createReviewBatch(adminId) {
     const pruned = await pruneReviewBatchToPending(adminId);
     if (!pruned.cleared && pruned.ids && pruned.ids.length) {
       let pendingRows = [];
-      for (const id of pruned.ids) {
-        const row = await getMessageById(id);
+      const got = await Promise.all(
+        pruned.ids.map(function (id) {
+          return getMessageById(id).catch(function () {
+            return null;
+          });
+        })
+      );
+      for (const row of got) {
         if (row && String(row.status) === 'pending') pendingRows.push(row);
       }
       if (!owner) {
@@ -1762,11 +1773,18 @@ export async function createReviewBatch(adminId) {
 /** ارسال پیام‌های Batch به ادمین (حداکثر ۱۰ + یک پیام سرتیتر) */
 export async function sendReviewBatch(chatId, batch, rows, opts) {
   const resumed = !!(opts && opts.resumed);
+  // اگر ردیف‌ها content دارند همان را بگیر؛ فقط مشکوک‌ها را دوباره بخوان
   const live = [];
   for (const row of rows || []) {
     if (!row) continue;
-    const fresh = await getMessageById(Number(row.id));
-    if (fresh && String(fresh.status) === 'pending') live.push(fresh);
+    if (row.content != null && String(row.status || 'pending') === 'pending') {
+      live.push(row);
+      continue;
+    }
+    try {
+      const fresh = await getMessageById(Number(row.id));
+      if (fresh && String(fresh.status) === 'pending') live.push(fresh);
+    } catch (_e) {}
   }
   if (!live.length) {
     await api.sendMessage({
@@ -1782,16 +1800,7 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
       await maybeGreetShiftStart(chatId, chatId);
     } catch (_e) {}
   }
-  let queueHint = '';
-  try {
-    const card = await adminShiftCard(chatId);
-    if (card && card.pendingTotal > 0) {
-      queueHint = '\n📊 کل صف قابل‌بررسی شما: ' + card.pendingTotal + ' پیام';
-      if (card.minutesLeftMin != null) {
-        queueHint += '\n⏱ حدود ' + card.minutesLeftMin + ' دقیقه تا پایان نزدیک‌ترین شیفت';
-      }
-    }
-  } catch (_e) {}
+  const queueHint = '';
   const head = resumed
     ? '⏳ Batch فعلی هنوز کامل بررسی نشده است.\nBatch شماره ' +
       batch.batchNumber +
@@ -1808,17 +1817,22 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
   await api.sendMessage({ chat_id: chatId, text: head });
   for (const row of live) {
     try {
-      const ch = await getChannel(row.channelKey);
-      const sender = await getUser(row.userId);
+      const ck = String((row.channelKey ?? row.channel_key) || '');
+      const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+      let who = String(row.userId || '');
+      try {
+        const sender = await getUser(row.userId);
+        who = displayName(sender, row.userId);
+      } catch (_e) {}
       await api.sendMessage({
         chat_id: chatId,
         text:
           '#' +
           row.id +
           ' | ' +
-          ((ch && ch.title) || row.channelKey) +
+          title +
           ' | کاربر: ' +
-          displayName(sender, row.userId) +
+          who +
           '\n\n' +
           String(row.content || '').slice(0, 3800),
         // فقط زیر آخرین پیام Batch دکمه «Batch بعدی» باشد
