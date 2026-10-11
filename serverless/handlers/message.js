@@ -1137,138 +1137,166 @@ export default async function (message) {
               '\n';
           } else {
             shiftHead += 'الان شیفت فعالی ندارید.\n';
-            shiftHead += '📥 صف (در صورت داشتن شیفت): ' + (card.pendingTotal || 0) + '\n';
           }
           shiftHead += '────────────\n';
         } catch (_e) {}
-        const allMsg = (await db.select().from(messages).all()) || [];
-        const mine = allMsg.filter(function (m) {
-          return Number(m.reviewedBy ?? m.reviewed_by) === Number(userId);
-        });
-        function isToday(m) {
-          const ra = m.reviewedAt ?? m.reviewed_at;
+
+        // فقط پیام‌های بررسی‌شده توسط همین کاربر (نه کل جدول)
+        let mine = [];
+        try {
+          mine =
+            (await db
+              .select({
+                id: messages.id,
+                status: messages.status,
+                channelKey: messages.channelKey,
+                reviewedAt: messages.reviewedAt,
+                reviewedBy: messages.reviewedBy,
+              })
+              .from(messages)
+              .where(eq(messages.reviewedBy, Number(userId)))
+              .all()) || [];
+        } catch (e1) {
+          console.error('perf mine', e1);
+          try {
+            const light =
+              (await db
+                .select({
+                  id: messages.id,
+                  status: messages.status,
+                  channelKey: messages.channelKey,
+                  reviewedAt: messages.reviewedAt,
+                  reviewedBy: messages.reviewedBy,
+                })
+                .from(messages)
+                .all()) || [];
+            mine = light.filter(function (x) {
+              return Number(x.reviewedBy ?? x.reviewed_by) === Number(userId);
+            });
+          } catch (e2) {
+            console.error('perf mine fallback', e2);
+            mine = [];
+          }
+        }
+
+        function isToday(row) {
+          const ra = row.reviewedAt ?? row.reviewed_at;
           if (!ra) return false;
           try {
-            const d = ra instanceof Date ? ra : new Date(ra);
-            if (isNaN(d.getTime())) return false;
+            const dt = ra instanceof Date ? ra : new Date(ra);
+            if (isNaN(dt.getTime())) return false;
             const fmt = new Intl.DateTimeFormat('en-GB', {
               timeZone: 'Asia/Tehran',
               year: 'numeric',
               month: '2-digit',
               day: '2-digit',
             });
-            const parts = Object.fromEntries(fmt.formatToParts(d).map(function (p) { return [p.type, p.value]; }));
-            const ds = parts.year + '-' + parts.month + '-' + parts.day;
-            return ds === now.date;
+            const parts = Object.fromEntries(
+              fmt.formatToParts(dt).map(function (p) {
+                return [p.type, p.value];
+              })
+            );
+            return parts.year + '-' + parts.month + '-' + parts.day === now.date;
           } catch (_e) {
             return false;
           }
         }
+
         const mineToday = mine.filter(isToday);
         const keys = await adminChannels(userId);
         const sl = await getActiveSubLeaderChannel(userId);
-        const chans = [...new Set([...(keys || []), ...(sl ? [sl] : [])])];
+        const chans = [...new Set([...(keys || []), ...(sl ? [sl] : [])])].map(function (k) {
+          return normalizeChannelKey(k);
+        }).filter(Boolean);
 
-        function rankIn(list, channelKey, todayOnly) {
-          const pool = list.filter(function (m) {
-            const ck = String((m.channelKey ?? m.channel_key) || '');
-            if (channelKey && ck !== channelKey) return false;
-            if (todayOnly && !isToday(m)) return false;
-            const st = String(m.status || '');
-            return st === 'approved' || st === 'rejected';
-          });
-          const counts = {};
-          for (const m of pool) {
-            const id = Number(m.reviewedBy ?? m.reviewed_by);
-            if (!id) continue;
-            counts[id] = (counts[id] || 0) + 1;
-          }
-          const ranked = Object.keys(counts)
-            .map(function (id) { return { id: Number(id), n: counts[id] }; })
-            .sort(function (a, b) { return b.n - a.n; });
-          const myN = counts[Number(userId)] || 0;
-          let rank = 0;
-          for (let i = 0; i < ranked.length; i++) {
-            if (ranked[i].id === Number(userId)) {
-              rank = i + 1;
-              break;
-            }
-          }
-          return { rank: rank || (myN ? ranked.length : 0), totalAdmins: ranked.length, count: myN };
-        }
+        const apAll = mine.filter(function (x) { return String(x.status) === 'approved'; }).length;
+        const rjAll = mine.filter(function (x) { return String(x.status) === 'rejected'; }).length;
+        const apTd = mineToday.filter(function (x) { return String(x.status) === 'approved'; }).length;
+        const rjTd = mineToday.filter(function (x) { return String(x.status) === 'rejected'; }).length;
 
         let body = shiftHead + '📊 عملکرد شما\n';
         body += '📅 ' + now.date + ' — ' + now.hm + '\n';
-        body += 'کانال‌ها: ' + (chans.map(function (k) { return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k; }).join('، ') || '—') + '\n\n';
-
-        const apAll = mine.filter(function (m) { return m.status === 'approved'; }).length;
-        const rjAll = mine.filter(function (m) { return m.status === 'rejected'; }).length;
-        const apTd = mineToday.filter(function (m) { return m.status === 'approved'; }).length;
-        const rjTd = mineToday.filter(function (m) { return m.status === 'rejected'; }).length;
+        body +=
+          'کانال‌ها: ' +
+          (chans
+            .map(function (k) {
+              return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k;
+            })
+            .join('، ') || '—') +
+          '\n\n';
         body += '—— کلی ——\n';
         body += '🟢 تأیید کل: ' + apAll + ' | امروز: ' + apTd + '\n';
         body += '🔴 رد کل: ' + rjAll + ' | امروز: ' + rjTd + '\n';
         body += 'Σ بررسی کل: ' + mine.length + ' | امروز: ' + mineToday.length + '\n';
 
-        const rAllToday = rankIn(allMsg, null, true);
-        const rAllTotal = rankIn(allMsg, null, false);
-        body += '🏆 رتبه امروز (همه کانال‌ها): ' + (rAllToday.rank || '—') + ' از ' + (rAllToday.totalAdmins || 0) + ' (بررسی: ' + rAllToday.count + ')\n';
-        body += '🏆 رتبه کل: ' + (rAllTotal.rank || '—') + ' از ' + (rAllTotal.totalAdmins || 0) + ' (بررسی: ' + rAllTotal.count + ')\n';
-
-        for (const ck of chans.length ? chans : Object.keys(DEFAULT_CHANNELS)) {
+        for (const ck of chans.length ? chans : []) {
           const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-          const chMine = mine.filter(function (m) { return String((m.channelKey ?? m.channel_key) || '') === ck; });
+          const chMine = mine.filter(function (x) {
+            return normalizeChannelKey(x.channelKey ?? x.channel_key) === ck;
+          });
           const chToday = chMine.filter(isToday);
-          const rt = rankIn(allMsg, ck, true);
-          const rT = rankIn(allMsg, ck, false);
           body += '\n—— «' + title + '» ——\n';
-          body += '🟢' + chMine.filter(function (m) { return m.status === 'approved'; }).length;
-          body += ' 🔴' + chMine.filter(function (m) { return m.status === 'rejected'; }).length;
-          body += ' | امروز 🟢' + chToday.filter(function (m) { return m.status === 'approved'; }).length;
-          body += ' 🔴' + chToday.filter(function (m) { return m.status === 'rejected'; }).length + '\n';
-          body += 'رتبه امروز: ' + (rt.rank || '—') + '/' + (rt.totalAdmins || 0) + ' · رتبه کل: ' + (rT.rank || '—') + '/' + (rT.totalAdmins || 0) + '\n';
+          body +=
+            '🟢' +
+            chMine.filter(function (x) { return String(x.status) === 'approved'; }).length +
+            ' 🔴' +
+            chMine.filter(function (x) { return String(x.status) === 'rejected'; }).length;
+          body +=
+            ' | امروز 🟢' +
+            chToday.filter(function (x) { return String(x.status) === 'approved'; }).length +
+            ' 🔴' +
+            chToday.filter(function (x) { return String(x.status) === 'rejected'; }).length +
+            '\n';
         }
 
-        // ۷ روز اخیر خلاصه
+        // ۷ روز اخیر
         try {
           const dayCounts = {};
           for (let i = 0; i < 7; i++) dayCounts[i] = { a: 0, r: 0 };
           for (const msg of mine) {
             const ra = msg.reviewedAt ?? msg.reviewed_at;
             if (!ra) continue;
-            let d;
+            let dt;
             try {
-              d = ra instanceof Date ? ra : new Date(ra);
-              if (isNaN(d.getTime())) continue;
-            } catch (_e) { continue; }
-            const diff = Math.floor((Date.now() - d.getTime()) / 86400000);
+              dt = ra instanceof Date ? ra : new Date(ra);
+              if (isNaN(dt.getTime())) continue;
+            } catch (_e) {
+              continue;
+            }
+            const diff = Math.floor((Date.now() - dt.getTime()) / 86400000);
             if (diff < 0 || diff > 6) continue;
             const st = String(msg.status || '');
             if (st === 'approved') dayCounts[diff].a += 1;
             else if (st === 'rejected') dayCounts[diff].r += 1;
           }
           body += '\n—— ۷ روز اخیر ——\n';
-          const labels = ['امروز', 'دیروز', '۲روز', '۳روز', '۴روز', '۵روز', '۶روز'];
           for (let i = 0; i < 7; i++) {
-            const c = dayCounts[i];
-            if (!c.a && !c.r) continue;
-            body += labels[i] + ': 🟢' + c.a + ' 🔴' + c.r + '\n';
+            body +=
+              (i === 0 ? 'امروز' : i + ' روز پیش') +
+              ': 🟢' +
+              dayCounts[i].a +
+              ' 🔴' +
+              dayCounts[i].r +
+              '\n';
           }
         } catch (_e) {}
 
         await api.sendMessage({
           chat_id: chatId,
           text: body.slice(0, 4000),
-          reply_markup: sanitizeMarkup(adminPerfInline()),
+          reply_markup: await roleKb(userId),
         });
       } catch (e) {
-        console.error('perf', e);
-        await api.sendMessage({ chat_id: chatId, text: 'خطا در آمار عملکرد', reply_markup: await roleKb(userId) });
+        console.error('perf me', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در آمار عملکرد: ' + (e && e.message ? e.message : 'نامشخص'),
+          reply_markup: await roleKb(userId),
+        });
       }
       return;
     }
 
-    // ========== ADMIN: help request ==========
     if ((role === 'admin' || role === 'subleader') && text === '🆘 درخواست کمک') {
       try {
         const card = await adminShiftCard(userId);
