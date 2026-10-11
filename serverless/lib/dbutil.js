@@ -319,7 +319,7 @@ export async function getRole(id) {
       } catch (_e) {}
     }
     if (u?.role === 'admin') return 'admin';
-    const ca = await db.select().from(channelAdmins).where(eq(channelAdmins.userId, id)).all();
+    const ca = await db.select().from(channelAdmins).where(eq(channelAdmins.userId, Number(id))).all();
     if (ca?.length) return 'admin';
   } catch (_) {}
   return 'user';
@@ -335,18 +335,77 @@ export async function getActiveSubLeaderChannel(userId) {
   return null;
 }
 
+
+/** نرمال‌سازی کلید کانال: title/alias → key استاندارد */
+export function normalizeChannelKey(raw) {
+  let s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+  if (DEFAULT_CHANNELS && DEFAULT_CHANNELS[s]) return s;
+  try {
+    for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+      const c = DEFAULT_CHANNELS[k];
+      if (!c) continue;
+      if (String(c.title || '') === s) return k;
+      if (String(c.key || '') === s) return k;
+      const prefs = c.prefixes || [];
+      for (const p of prefs) {
+        if (String(p) === s) return k;
+      }
+    }
+    // شامل‌بودن عنوان داخل رشته (دکمه کوتاه‌شده و …)
+    for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+      const c = DEFAULT_CHANNELS[k];
+      if (!c) continue;
+      const t = String(c.title || '');
+      if (t && (s.indexOf(t) >= 0 || t.indexOf(s) >= 0)) return k;
+    }
+  } catch (_e) {}
+  return s;
+}
+
 export async function adminChannels(userId) {
   try {
     const uid = Number(userId);
-    // select-all + فیلتر عددی — مقاوم به mismatch نوع و نام فیلد
-    const all = (await db.select().from(channelAdmins).all()) || [];
+    if (!Number.isFinite(uid) || !uid) return [];
+    let rows = [];
+    // اول فقط ردیف‌های همین کاربر (سریع‌تر، کمتر timeout)
+    try {
+      rows = (await db.select().from(channelAdmins).where(eq(channelAdmins.userId, uid)).all()) || [];
+    } catch (_e1) {
+      try {
+        rows = (await db.select().from(channelAdmins).where(eq(channelAdmins.userId, String(uid))).all()) || [];
+      } catch (_e2) {
+        rows = [];
+      }
+    }
+    // fallback: اسکن کامل فقط اگر خالی بود
+    if (!rows.length) {
+      try {
+        const all = (await db.select().from(channelAdmins).all()) || [];
+        rows = all.filter(function (r) {
+          return Number(r.userId ?? r.user_id) === uid;
+        });
+      } catch (e) {
+        console.error('adminChannels scan', e);
+        rows = [];
+      }
+    }
     const out = [];
     const seen = {};
-    for (const r of all) {
+    for (const r of rows) {
       const rid = Number(r.userId ?? r.user_id);
       if (!Number.isFinite(rid) || rid !== uid) continue;
-      const key = r.channelKey ?? r.channel_key;
+      const raw = r.channelKey ?? r.channel_key;
+      const key = normalizeChannelKey(raw);
       if (!key || seen[key]) continue;
+      // اگر کلید خراب بود و نرمال شد، در پس‌زمینه اصلاح کن
+      if (String(raw) !== String(key)) {
+        try {
+          if (r.id != null) {
+            await db.update(channelAdmins).set({ channelKey: key }).where(eq(channelAdmins.id, r.id)).run();
+          }
+        } catch (_e) {}
+      }
       seen[key] = true;
       out.push(String(key));
     }
@@ -1028,13 +1087,14 @@ export async function countAdminPeriodShifts(adminId, shiftDate) {
 /** آیا کاربر ادمین این کانال است (یا مالک/ساب‌لیدر اسکوپ) */
 export async function isUserChannelAdmin(userId, channelKey) {
   if (isOwner(userId)) return true;
+  const ck = normalizeChannelKey(channelKey);
   try {
     const chs = await adminChannels(userId);
-    if ((chs || []).map(String).includes(String(channelKey))) return true;
+    if ((chs || []).some(function (x) { return normalizeChannelKey(x) === ck; })) return true;
   } catch (_e) {}
   try {
     const sl = await getActiveSubLeaderChannel(userId);
-    if (sl && String(sl) === String(channelKey)) return true;
+    if (sl && normalizeChannelKey(sl) === ck) return true;
   } catch (_e) {}
   return false;
 }
@@ -1072,13 +1132,19 @@ export async function shiftPickChannels(userId) {
   const set = new Set();
   try {
     const chs = await adminChannels(userId);
-    for (const c of chs || []) if (c) set.add(String(c));
+    for (const c of chs || []) {
+      const nk = normalizeChannelKey(c);
+      if (nk && DEFAULT_CHANNELS[nk]) set.add(nk);
+      else if (nk) set.add(nk);
+    }
   } catch (_e) {}
   try {
     const sl = await getActiveSubLeaderChannel(userId);
-    if (sl) set.add(String(sl));
+    if (sl) {
+      const nk = normalizeChannelKey(sl);
+      if (nk) set.add(nk);
+    }
   } catch (_e) {}
-  // اگر role=admin در users ولی ردیف channel_admins خالی/خراب بود — لاگ
   if (!set.size) {
     try {
       const u = await getUser(userId);
