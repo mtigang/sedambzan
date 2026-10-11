@@ -94,6 +94,8 @@ import {
   adminChannels,
   addChannelAdmin,
   shiftPickChannels,
+  normalizeChannelKey,
+  isUserChannelAdmin,
   canManageOthersShifts,
   getActiveSubLeaderChannel,
   checkReviewAccess,
@@ -1358,20 +1360,24 @@ export default async function (message) {
 
     // ========== ADMIN/OWNER: shifts ==========
     if ((role === 'admin' || role === 'subleader' || owner) && text === '⏰ شیفت من') {
-      const keys = owner ? Object.keys(DEFAULT_CHANNELS) : await shiftPickChannels(userId);
+      let keys = owner ? Object.keys(DEFAULT_CHANNELS) : await shiftPickChannels(userId);
+      keys = (keys || []).map(function (k) { return normalizeChannelKey(k); }).filter(Boolean);
+      // یکتا
+      keys = keys.filter(function (k, i, a) { return a.indexOf(k) === i; });
       if (!keys.length) {
         await api.sendMessage({
           chat_id: chatId,
-          text: 'شما ادمین هیچ کانالی نیستید.',
+          text: 'شما ادمین هیچ کانالی نیستید.\nاگر اخیراً اضافه شده‌اید از مالک بخواهید دوباره اضافه‌تان کند.',
           reply_markup: await roleKb(userId),
         });
         return;
       }
       const chans = keys.map((k) => ({
         key: k,
-        title: DEFAULT_CHANNELS[k]?.title || k,
+        title: (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k,
       }));
-      await setState(userId, 'pick_shift_ch');
+      // کلیدهای مجاز را در state نگه دار تا خواندن دوباره DB خطا ندهد
+      await setState(userId, 'pick_shift_ch', { allowedKeys: keys });
       await api.sendMessage({
         chat_id: chatId,
         text: 'کانال شیفت را انتخاب کنید:',
@@ -1381,23 +1387,43 @@ export default async function (message) {
     }
 
     if (state?.kind === 'pick_shift_ch' && text.startsWith('شیفت: ')) {
-      const title = text.replace('شیفت: ', '');
-      const entry = Object.values(DEFAULT_CHANNELS).find((c) => c.title === title);
+      const title = String(text.replace(/^شیفت:\s*/, '').replace(/^شیفت: /, '')).trim();
+      let entry = Object.values(DEFAULT_CHANNELS).find((c) => c.title === title);
+      if (!entry) {
+        entry = Object.values(DEFAULT_CHANNELS).find(function (c) {
+          return title.indexOf(c.title) >= 0 || String(c.title).indexOf(title) >= 0;
+        });
+      }
+      if (!entry) {
+        const nk = normalizeChannelKey(title);
+        if (nk && DEFAULT_CHANNELS[nk]) entry = DEFAULT_CHANNELS[nk];
+      }
       if (!entry) {
         await api.sendMessage({
           chat_id: chatId,
-          text: 'کانال نامعتبر',
+          text: 'کانال نامعتبر. دوباره «⏰ شیفت من» را بزنید.',
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
       }
       if (!isOwner(userId)) {
         let allowed = [];
-        try { allowed = await shiftPickChannels(userId); } catch (_e) { allowed = []; }
-        if (!allowed.map(String).includes(String(entry.key))) {
+        // اول از state (قابل اعتمادتر)
+        if (state.allowedKeys && Array.isArray(state.allowedKeys) && state.allowedKeys.length) {
+          allowed = state.allowedKeys.map(function (k) { return normalizeChannelKey(k); });
+        }
+        if (!allowed.length) {
+          try { allowed = (await shiftPickChannels(userId)).map(function (k) { return normalizeChannelKey(k); }); } catch (_e) { allowed = []; }
+        }
+        const ck = normalizeChannelKey(entry.key);
+        let ok = allowed.some(function (x) { return String(x) === String(ck); });
+        if (!ok) {
+          try { ok = await isUserChannelAdmin(userId, ck); } catch (_e) { ok = false; }
+        }
+        if (!ok) {
           await api.sendMessage({
             chat_id: chatId,
-            text: 'اجازه انتخاب شیفت برای این کانال را ندارید.',
+            text: 'اجازه انتخاب شیفت برای این کانال را ندارید.\nدوباره «⏰ شیفت من» را بزنید.',
             reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
