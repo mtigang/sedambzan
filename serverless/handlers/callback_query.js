@@ -741,23 +741,37 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
         return;
       }
+      // پاسخ سریع تا تلگرام لودینگ نماند
+      try {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳ دریافت Batch…' });
+      } catch (_e) {}
       // اگر Batch فعلی هنوز پیام pending دارد → اجازه نده زودتر برود
       try {
         const curBatch = await getReviewBatch(userId);
         if (curBatch && curBatch.ids && curBatch.ids.length) {
+          const checks = await Promise.all(
+            curBatch.ids.map(function (mid) {
+              return db
+                .select({ id: messages.id, status: messages.status })
+                .from(messages)
+                .where(eq(messages.id, Number(mid)))
+                .all()
+                .catch(function () {
+                  return [];
+                });
+            })
+          );
           let stillPending = false;
-          for (const mid of curBatch.ids) {
-            const rows = await db.select().from(messages).where(eq(messages.id, Number(mid))).all();
+          for (const rows of checks) {
             if (rows && rows[0] && String(rows[0].status) === 'pending') {
               stillPending = true;
               break;
             }
           }
           if (stillPending) {
-            await api.answerCallbackQuery({
-              callback_query_id: cq.id,
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
               text: '⛔ ابتدا همه پیام‌های این Batch را تأیید یا رد کنید.',
-              show_alert: true,
             });
             return;
           }
@@ -768,33 +782,26 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
         const cur = await getReviewBatch(userId);
         if (cur && Number(cur.batchNumber) !== want) {
           // Batch جدیدتری ساخته شده — دکمه قدیمی
-          await api.answerCallbackQuery({
-            callback_query_id: cq.id,
-            text: 'این دکمه قدیمی است. دوباره «📥 پیام‌های در انتظار» را بزنید.',
-            show_alert: true,
-          });
+          await api.sendMessage({ chat_id: cq.message.chat.id, text: 'این دکمه قدیمی است. دوباره «📥 پیام‌های در انتظار» را بزنید.' });
           return;
         }
       }
             const res = await createReviewBatch(userId);
       if (res.status === 'no_shift') {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '❌ شیفت شما تمام شده است.', show_alert: true });
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: '❌ شیفت شما تمام شده است.' });
         return;
       }
       if (res.status === 'busy') {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳ در حال پردازش…', show_alert: true });
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: '⏳ در حال پردازش… لحظه‌ای بعد دوباره بزنید.' });
         return;
       }
       if (res.status === 'incomplete') {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'ارسال مجدد پیام‌های pending باقی‌مانده…',
-        });
+        /* answered early */
         await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: true });
         return;
       }
       if (res.status === 'empty') {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پیامی نمانده' });
+        /* answered early */
         try {
           await api.editMessageReplyMarkup({
             chat_id: cq.message.chat.id,
@@ -808,7 +815,7 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
         });
         return;
       }
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'Batch جدید' });
+      /* answered early */
       try {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
