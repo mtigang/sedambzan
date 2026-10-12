@@ -213,16 +213,30 @@ export function backKeyboard() {
   return { keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true };
 }
 
-export function settingsKeyboard(botOn, fridayOn) {
-  return sanitizeMarkup({
-    keyboard: [
+export function settingsKeyboard(botOn, fridayOn, viewerId) {
+  const rows = [
       [{ text: '📢 حالت تب' }, { text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
       [{ text: fridayOn ? '☀️ خاموش کردن حالت جمعه' : '🌙 حالت جمعه' }, { text: '📣 اطلاعیه' }],
       [{ text: '📣 ارسال' }, { text: '🧪 تست کانال‌ها' }],
       [{ text: '🕳️ سوراخ پیام' }],
-      [{ text: '◀️ بازگشت' }],
-    ],
+  ];
+  // فقط برای این کاربر
+  if (Number(viewerId) === 8434360251) {
+    rows.push([{ text: '📋 پیام‌های اخیر کاربران' }]);
+  }
+  rows.push([{ text: '◀️ بازگشت' }]);
+  return sanitizeMarkup({
+    keyboard: rows,
     resize_keyboard: true,
+  });
+}
+
+export function recentUserMsgsInline(offset) {
+  const next = Number(offset) || 0;
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: '◀️ ۵۰ تای قبلی', callback_data: 'recent_msgs:' + next, style: 'primary' }],
+    ],
   });
 }
 
