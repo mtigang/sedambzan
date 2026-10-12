@@ -1410,12 +1410,14 @@ export default async function (message) {
           'شیفت: ' + a.startHm + '–' + a.endHm + '\n' +
           'صف تقریبی: ' + (card.pendingTotal || 0) + ' پیام\n\n' +
           'اگر می‌توانید وارد شیفت شوید یا پیام‌های در انتظار را بررسی کنید.';
-        // به ادمین‌های همان کانال + ساب‌لیدر + مالک‌ها
+        // فقط ادمین‌ها و ساب‌لیدر همان کانال (نه همه مالک‌ها)
         const targets = new Set();
+        const ckN = normalizeChannelKey(ck) || String(ck);
         try {
           const rows = (await db.select().from(channelAdmins).all()) || [];
           for (const r of rows) {
-            if (String(r.channelKey ?? r.channel_key) === String(ck)) {
+            const rck = normalizeChannelKey(r.channelKey ?? r.channel_key);
+            if (String(rck) === String(ckN)) {
               const uid = Number(r.userId ?? r.user_id);
               if (uid && uid !== Number(userId)) targets.add(uid);
             }
@@ -1424,13 +1426,13 @@ export default async function (message) {
         try {
           const slRows = (await listActiveSubLeaders()) || [];
           for (const r of slRows) {
-            if (String(r.channelKey ?? r.channel_key) === String(ck)) {
+            const rck = normalizeChannelKey(r.channelKey ?? r.channel_key);
+            if (String(rck) === String(ckN)) {
               const uid = Number(r.userId ?? r.user_id);
               if (uid && uid !== Number(userId)) targets.add(uid);
             }
           }
         } catch (_e) {}
-        for (const oid of OWNER_IDS || []) targets.add(Number(oid));
         let sent = 0;
         for (const tid of targets) {
           try {
