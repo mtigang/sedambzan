@@ -90,6 +90,7 @@ import {
   subLeaderAdminsInline,
   subLeaderListInline,
   ownerCancelShiftsInline,
+  ownerShiftListChannelInline,
   reviewNextInline,
   reviewDoneInline,
   reviewTakenInline,
@@ -1641,10 +1642,31 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
     
     
     if (data === 'own_shift_list') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      try {
+        await api.answerCallbackQuery({ callback_query_id: cq.id });
+      } catch (_e) {}
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '📋 لیست و لغو شیفت‌ها\n\nاول کانال را انتخاب کنید:',
+        reply_markup: sanitizeMarkup(ownerShiftListChannelInline()),
+      });
+      return;
+    }
+
+    if (data.startsWith('own_shift_list:')) {
       try {
         try { await cancelInvalidShifts(); } catch (_e) {}
         if (!isOwner(userId)) {
           await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+          return;
+        }
+        const channelKey = String(data.split(':')[1] || '');
+        if (!channelKey || !DEFAULT_CHANNELS[channelKey]) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
           return;
         }
         try {
@@ -1652,19 +1674,22 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
         } catch (_e) {}
         const now = tehranNow();
         const pdate = periodDateStr(now);
+        const title =
+          (DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey;
         let all = [];
         try {
           all = (await db.select().from(shifts).all()) || [];
         } catch (e) {
-          console.error('own_shift_list select', e);
+          console.error('own_shift_list ch select', e);
           await api.sendMessage({
             chat_id: cq.message.chat.id,
-            text: 'خطا در خواندن شیفت‌ها: ' + String(e.message || e).slice(0, 150),
+            text: 'خطا در خواندن شیفت‌ها',
           });
           return;
         }
-        const today = all.filter(function (s) {
+        let group = all.filter(function (s) {
           if (String(s.status) !== 'active') return false;
+          if (String(s.channelKey || s.channel_key || '') !== channelKey) return false;
           const sd = String(s.shiftDate ?? s.shift_date ?? '');
           return (
             sd === String(pdate) ||
@@ -1673,63 +1698,54 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
             sd === String(now.date)
           );
         });
+        try {
+          group = sortShiftsByPeriod(group);
+        } catch (_e) {}
         const rows = [];
-        let t = '⏰ لیست و لغو شیفت‌ها\n📅 دوره ' + pdate + '\nنام‌ها در متن زیر؛ دکمه‌ها فقط ساعت لغو.\n';
-        if (!today.length) {
-          t += '\nخالی — شیفت فعالی برای لغو نیست.';
+        let t =
+          '⏰ لیست و لغو — «' +
+          title +
+          '»\n📅 دوره ' +
+          pdate +
+          '\nنام‌ها در متن؛ دکمه‌ها فقط ساعت لغو.\n';
+        if (!group.length) {
+          t += '\nخالی — شیفت فعالی در این کانال نیست.';
         } else {
-          const order = Object.keys(DEFAULT_CHANNELS || {});
-          for (let oi = 0; oi < order.length; oi++) {
-            const ck = order[oi];
-            let group = today.filter(function (s) {
-              return String(s.channelKey || s.channel_key || '') === String(ck);
-            });
+          t += '\n';
+          for (let gi = 0; gi < group.length; gi++) {
+            const s = group[gi];
+            let name = String(s.adminId ?? s.admin_id ?? '');
             try {
-              group = sortShiftsByPeriod(group);
+              name = displayName(
+                await getUser(Number(s.adminId ?? s.admin_id)),
+                Number(s.adminId ?? s.admin_id)
+              );
             } catch (_e) {}
-            if (!group.length) continue;
-            const title =
-              DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title
-                ? DEFAULT_CHANNELS[ck].title
-                : ck;
-            t += '\n—— «' + title + '» ——\n';
-            for (let gi = 0; gi < group.length; gi++) {
-              const s = group[gi];
-              let name = String(s.adminId ?? s.admin_id ?? '');
-              try {
-                name = displayName(await getUser(Number(s.adminId ?? s.admin_id)), Number(s.adminId ?? s.admin_id));
-              } catch (_e) {}
-              // پاک‌سازی نام برای جلوگیری از خرابی کیبورد
-              name = String(name || '')
-                .replace(/[\u0000-\u001F\u200B-\u200F\u202A-\u202E\uFEFF]/g, '')
-                .replace(/\s+/g, ' ')
-                .trim()
-                .slice(0, 24);
-              if (!name) name = String(s.adminId ?? '');
-              const tag =
-                String(s.shiftDate) === 'perm' || String(s.shiftDate) === 'permanent' ? ' · دائم' : '';
-              const line =
-                '▫️ #' +
-                s.id +
-                '  ' +
-                String(s.startHm || '').slice(0, 5) +
-                '–' +
-                String(s.endHm || '').slice(0, 5) +
-                '  ·  ' +
-                name +
-                tag +
-                '\n';
-              if ((t + line).length < 3800) t += line;
-              rows.push({
-                id: Number(s.id),
-                channelKey: s.channelKey || s.channel_key,
-                channelTitle: title,
-                startHm: String(s.startHm || '').slice(0, 5),
-                endHm: String(s.endHm || '').slice(0, 5),
-                adminId: Number(s.adminId ?? s.admin_id),
-                name: name,
-              });
-            }
+            name = String(name || '')
+              .replace(/[\u0000-\u001F\u200B-\u200F\u202A-\u202E\uFEFF]/g, '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 40);
+            if (!name) name = String(s.adminId ?? '');
+            const line =
+              '▫️ #' +
+              s.id +
+              '  ' +
+              String(s.startHm || '').slice(0, 5) +
+              '–' +
+              String(s.endHm || '').slice(0, 5) +
+              '  ·  ' +
+              name +
+              '\n';
+            if ((t + line).length < 3800) t += line;
+            rows.push({
+              id: Number(s.id),
+              channelKey: channelKey,
+              startHm: String(s.startHm || '').slice(0, 5),
+              endHm: String(s.endHm || '').slice(0, 5),
+              adminId: Number(s.adminId ?? s.admin_id),
+              name: name,
+            });
           }
         }
         const payload = {
@@ -1737,41 +1753,36 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
           text: t.slice(0, 4000),
         };
         if (rows.length) {
-          try {
-            payload.reply_markup = sanitizeMarkup(ownerCancelShiftsInline(rows));
-          } catch (eMk) {
-            console.error('ownerCancelShiftsInline', eMk);
-            // fallback: فقط چند دکمه ساده ساعت
-            const fb = [];
-            for (let i = 0; i < Math.min(rows.length, 20); i++) {
-              const r = rows[i];
-              const lab = String('❌ ' + String(r.startHm || '?').slice(0, 5));
-              fb.push([{ text: lab, callback_data: 'own_sc:' + String(r.id) }]);
-            }
-            fb.push([{ text: 'بستن', callback_data: 'shift_close' }]);
-            payload.reply_markup = sanitizeMarkup({ inline_keyboard: fb });
-          }
-        }
-        await api.sendMessage(payload);
-      } catch (e) {
-        console.error('own_shift_list', e);
-        try {
-          await api.answerCallbackQuery({
-            callback_query_id: cq.id,
-            text: 'خطا',
-            show_alert: true,
+          payload.reply_markup = sanitizeMarkup(ownerCancelShiftsInline(rows, channelKey));
+        } else {
+          payload.reply_markup = sanitizeMarkup({
+            inline_keyboard: [
+              [{ text: '◀️ انتخاب کانال', callback_data: 'own_shift_list', style: 'primary' }],
+              [{ text: 'بستن', callback_data: 'shift_close', style: 'primary' }],
+            ],
           });
-        } catch (_e) {}
+        }
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: payload.text,
+            reply_markup: payload.reply_markup,
+          });
+        } catch (_e) {
+          await api.sendMessage(payload);
+        }
+      } catch (e) {
+        console.error('own_shift_list ch', e);
         try {
           await api.sendMessage({
             chat_id: cq.message.chat.id,
             text: 'خطا در لیست شیفت‌ها: ' + String(e && (e.message || e.description) || e).slice(0, 200),
           });
-        } catch (_e2) {}
+        } catch (_e) {}
       }
       return;
     }
-
 
     if (data.startsWith('own_sc:')) {
       const sid = Number(data.split(':')[1]);
@@ -1836,7 +1847,8 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
       return;
     }
 
-    if (data === 'own_cancel_all') {
+    if (data === 'own_cancel_all' || data.startsWith('own_cancel_all:')) {
+      const cancelCh = data.indexOf(':') >= 0 ? String(data.split(':')[1] || '') : '';
       const now = tehranNow();
       const pdate = periodDateStr(now);
       let slCh = null;
@@ -1862,6 +1874,7 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
         )
           return false;
         if (slCh && String(s.channelKey) !== String(slCh)) return false;
+        if (cancelCh && String(s.channelKey || s.channel_key || '') !== String(cancelCh)) return false;
         return true;
       });
       let n = 0;
