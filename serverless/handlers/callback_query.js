@@ -2558,65 +2558,48 @@ if (data.startsWith('own_shift:')) {
       try {
         // همان منطق سبک — inline duplicate to avoid cross-handler import issues
         const PAGE = 50;
-        let rows =
-          (await db
-            .select({
-              id: messages.id,
-              userId: messages.userId,
-              content: messages.content,
-              channelKey: messages.channelKey,
-              status: messages.status,
-              rejectReason: messages.rejectReason,
-              reviewedBy: messages.reviewedBy,
-            })
-            .from(messages)
-            .all()) || [];
+        let rows = (await db.select().from(feedback).all()) || [];
         rows.sort(function (a, b) {
           return Number(b.id) - Number(a.id);
         });
         const slice = rows.slice(off, off + PAGE);
-        const statusIcon = { pending: '🟡', approved: '🟢', rejected: '🔴', publishing: '⏳' };
+        const statusLabel = {
+          open: '🟡 باز',
+          replied: '🟢 پاسخ‌داده‌شده',
+          closed: '⚫️ بسته',
+        };
         let body =
-          '📋 پیام‌های اخیر کاربران\n' +
+          '📋 پیام‌های اخیر کاربران (انتقاد/پیشنهاد)\n' +
           'از #' +
           (off + 1) +
           ' تا #' +
           (off + slice.length) +
           ' (جدید→قدیم)\n' +
-          'کل تقریبی: ' +
+          'کل: ' +
           rows.length +
           '\n────────────\n';
         if (!slice.length) {
-          body += 'پیامی در این صفحه نیست.';
+          body += 'هنوز پیامی از طریق انتقادات/پیشنهادات ثبت نشده.';
         } else {
           for (const r of slice) {
-            const st = String(r.status || '');
-            const icon = statusIcon[st] || '•';
-            const ck = String(r.channelKey || '');
-            const title =
-              (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+            const st = String(r.status || 'open');
+            const lab = statusLabel[st] || st;
             let line =
               '#' +
               r.id +
               ' ' +
-              icon +
-              ' ' +
-              title +
+              lab +
               ' | u:' +
               r.userId +
               '\n';
-            line += String(r.content || '').replace(/\s+/g, ' ').slice(0, 70);
-            if (st === 'approved') {
-              line += '\n↳ پاسخ: ✅ تأیید';
-              if (r.reviewedBy) line += ' توسط ' + r.reviewedBy;
-            } else if (st === 'rejected') {
-              line += '\n↳ پاسخ: ❌ رد';
-              if (r.rejectReason) line += ' — ' + String(r.rejectReason).slice(0, 40);
-              if (r.reviewedBy) line += ' | ' + r.reviewedBy;
-            } else if (st === 'pending') {
-              line += '\n↳ پاسخ: هنوز بررسی نشده';
+            line += '💬 ' + String(r.content || '').replace(/\s+/g, ' ').slice(0, 90);
+            const reply = r.ownerReply ?? r.owner_reply;
+            if (reply) {
+              line += '\n↳ پاسخ مالک: ' + String(reply).replace(/\s+/g, ' ').slice(0, 90);
+            } else if (st === 'closed') {
+              line += '\n↳ بسته شد (بدون متن پاسخ)';
             } else {
-              line += '\n↳ وضعیت: ' + st;
+              line += '\n↳ هنوز پاسخ داده نشده';
             }
             line += '\n────────────\n';
             if ((body + line).length > 3900) {
