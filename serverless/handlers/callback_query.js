@@ -38,6 +38,7 @@ import {
   dedupeActiveShifts,
   cancelAllPermanentShifts,
   cancelInvalidShifts,
+  shiftActiveNow,
   countAdminPeriodShifts,
   isUserChannelAdmin,
   normalizeChannelKey,
@@ -707,33 +708,183 @@ if (data.startsWith('reject_menu:')) {
     }
     if (data.startsWith('help_ok|') || data.startsWith('help_ok:')) {
       const parts = data.indexOf('|') >= 0 ? data.split('|') : data.split(':');
-      const ck = parts[1];
+      const ckRaw = parts[1];
+      const ck = normalizeChannelKey(ckRaw) || String(ckRaw || '');
       const requesterId = Number(parts[2]);
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ثبت شد' });
       try {
+        if (!ck || !DEFAULT_CHANNELS[ck]) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
+          return;
+        }
+        let isAdm = false;
+        try {
+          isAdm = await isUserChannelAdmin(userId, ck);
+        } catch (_e) {}
+        if (!isAdm && !isOwner(userId)) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'فقط ادمین همین کانال',
+            show_alert: true,
+          });
+          return;
+        }
+        if (Number(userId) === Number(requesterId)) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'درخواست خودتان است',
+            show_alert: true,
+          });
+          return;
+        }
+
+        const now = tehranNow();
+        const pdate = periodDateStr(now);
+        const takenKey = 'help_taken:' + ck + ':' + pdate + ':' + String(requesterId || 0);
+        let prev = '';
+        try {
+          prev = await settingGet(takenKey, '');
+        } catch (_e) {}
+        if (prev && Number(prev) !== Number(userId)) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'قبلاً فرد دیگری قبول کرده',
+            show_alert: true,
+          });
+          return;
+        }
+
+        let reqShift = null;
+        try {
+          const all = (await db.select().from(shifts).all()) || [];
+          for (const s of all) {
+            if (Number(s.adminId ?? s.admin_id) !== Number(requesterId)) continue;
+            if (normalizeChannelKey(s.channelKey ?? s.channel_key) !== ck) continue;
+            if (String(s.status) !== 'active') continue;
+            if (!shiftActiveNow(s, now, pdate)) continue;
+            reqShift = s;
+            break;
+          }
+        } catch (e) {
+          console.error('help_ok find shift', e);
+        }
+        if (!reqShift) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'شیفت درخواست‌دهنده فعال نیست',
+            show_alert: true,
+          });
+          return;
+        }
+
+        const endHm = String(reqShift.endHm || reqShift.end_hm || '').slice(0, 5);
+        let startHm = String(now.hm || '').slice(0, 5);
+        try {
+          if (periodOrd(startHm) >= periodOrd(endHm) && endHm !== startHm) {
+            await api.answerCallbackQuery({
+              callback_query_id: cq.id,
+              text: 'شیفت تقریباً تمام شده',
+              show_alert: true,
+            });
+            return;
+          }
+        } catch (_e) {}
+
+        try {
+          await db
+            .insert(shifts)
+            .values({
+              channelKey: ck,
+              adminId: Number(userId),
+              shiftDate: pdate,
+              startHm: startHm,
+              endHm: endHm,
+              status: 'active',
+            })
+            .run();
+        } catch (eIns) {
+          console.error('help_ok insert shift', eIns);
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'خطا در ثبت شیفت کمکی',
+            show_alert: true,
+          });
+          return;
+        }
+        try {
+          await settingSet(takenKey, String(userId));
+        } catch (_e) {}
+        try {
+          if (typeof clearMemo === 'function') clearMemo('ask:' + Number(userId));
+        } catch (_e) {}
+
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'شیفت کمکی ثبت شد',
+          show_alert: true,
+        });
+
         const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-        const me = await getUser(userId);
-        const who = displayName(me, userId);
+        let who = String(userId);
+        try {
+          who = displayName(await getUser(userId), userId);
+        } catch (_e) {}
+
         if (requesterId) {
           try {
             await api.sendMessage({
               chat_id: requesterId,
-              text: '✅ ' + who + ' برای کمک در «' + title + '» اعلام آمادگی کرد.',
+              text:
+                '✅ ' +
+                who +
+                ' کمک را پذیرفت. شیفت کمکی تا ' +
+                endHm +
+                ' در «' +
+                title +
+                '».',
             });
           } catch (_e) {}
         }
+        const doneText =
+          (cq.message && cq.message.text ? cq.message.text : '') +
+          '\n\n✅ شما قبول کردید.\nشیفت کمکی: ' +
+          startHm +
+          '–' +
+          endHm +
+          '\nالان «📥 پیام‌های در انتظار» را بزنید.';
         try {
           await api.editMessageText({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
-            text: (cq.message.text || '') + '\n\n✅ شما اعلام آمادگی کردید.',
+            text: doneText,
           });
-        } catch (_e) {}
+        } catch (_e) {
+          try {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text:
+                '✅ شیفت کمکی ثبت شد: «' +
+                title +
+                '» ' +
+                startHm +
+                '–' +
+                endHm +
+                '\n📥 پیام‌های در انتظار را بزنید.',
+            });
+          } catch (_e2) {}
+        }
       } catch (e) {
         console.error('help_ok', e);
+        try {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'خطا',
+            show_alert: true,
+          });
+        } catch (_e) {}
       }
       return;
     }
+
 
 if (data === 'review_next' || data.startsWith('review_next:')) {
       const want = data.indexOf(':') >= 0 ? Number(data.split(':')[1]) : null;
