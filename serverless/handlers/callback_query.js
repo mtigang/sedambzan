@@ -2542,6 +2542,125 @@ if (data.startsWith('own_shift:')) {
       return;
     }
 
+
+    // پیام‌های اخیر کاربران — فقط 8434360251
+    if (data.startsWith('recent_msgs:') || data === 'recent_msgs_end') {
+      if (Number(userId) !== 8434360251) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+        return;
+      }
+      if (data === 'recent_msgs_end') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پایان' });
+        return;
+      }
+      const off = Number(data.split(':')[1]) || 0;
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'صفحه بعد…' });
+      try {
+        // همان منطق سبک — inline duplicate to avoid cross-handler import issues
+        const PAGE = 50;
+        let rows =
+          (await db
+            .select({
+              id: messages.id,
+              userId: messages.userId,
+              content: messages.content,
+              channelKey: messages.channelKey,
+              status: messages.status,
+              rejectReason: messages.rejectReason,
+              reviewedBy: messages.reviewedBy,
+            })
+            .from(messages)
+            .all()) || [];
+        rows.sort(function (a, b) {
+          return Number(b.id) - Number(a.id);
+        });
+        const slice = rows.slice(off, off + PAGE);
+        const statusIcon = { pending: '🟡', approved: '🟢', rejected: '🔴', publishing: '⏳' };
+        let body =
+          '📋 پیام‌های اخیر کاربران\n' +
+          'از #' +
+          (off + 1) +
+          ' تا #' +
+          (off + slice.length) +
+          ' (جدید→قدیم)\n' +
+          'کل تقریبی: ' +
+          rows.length +
+          '\n────────────\n';
+        if (!slice.length) {
+          body += 'پیامی در این صفحه نیست.';
+        } else {
+          for (const r of slice) {
+            const st = String(r.status || '');
+            const icon = statusIcon[st] || '•';
+            const ck = String(r.channelKey || '');
+            const title =
+              (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+            let line =
+              '#' +
+              r.id +
+              ' ' +
+              icon +
+              ' ' +
+              title +
+              ' | u:' +
+              r.userId +
+              '\n';
+            line += String(r.content || '').replace(/\s+/g, ' ').slice(0, 70);
+            if (st === 'approved') {
+              line += '\n↳ پاسخ: ✅ تأیید';
+              if (r.reviewedBy) line += ' توسط ' + r.reviewedBy;
+            } else if (st === 'rejected') {
+              line += '\n↳ پاسخ: ❌ رد';
+              if (r.rejectReason) line += ' — ' + String(r.rejectReason).slice(0, 40);
+              if (r.reviewedBy) line += ' | ' + r.reviewedBy;
+            } else if (st === 'pending') {
+              line += '\n↳ پاسخ: هنوز بررسی نشده';
+            } else {
+              line += '\n↳ وضعیت: ' + st;
+            }
+            line += '\n────────────\n';
+            if ((body + line).length > 3900) {
+              body += '…\n';
+              break;
+            }
+            body += line;
+          }
+        }
+        const nextOff = off + PAGE;
+        const hasMore = nextOff < rows.length;
+        const markup = hasMore
+          ? {
+              inline_keyboard: [
+                [{ text: '◀️ ۵۰ تای قبلی', callback_data: 'recent_msgs:' + nextOff, style: 'primary' }],
+              ],
+            }
+          : {
+              inline_keyboard: [[{ text: 'پایان لیست', callback_data: 'recent_msgs_end', style: 'primary' }]],
+            };
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: body,
+            reply_markup: sanitizeMarkup(markup),
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: body,
+            reply_markup: sanitizeMarkup(markup),
+          });
+        }
+      } catch (e) {
+        console.error('recent_msgs cb', e);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'خطا در صفحه بعد',
+        });
+      }
+      return;
+    }
+
 if (data.startsWith('flush_ch:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
