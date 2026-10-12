@@ -531,36 +531,41 @@ function safeBtnLabel(v, maxLen) {
   return s;
 }
 
-/** دکمه‌های لغو — قرمز، ساعت داخل دکمه، کلیک = لغو کامل */
+/** دکمه‌های لغو — فقط ساعت (نام در متن پیام است) */
 export function ownerCancelShiftsInline(shiftRows) {
   const rows = [];
-  const list = (shiftRows || []).slice(0, 35);
+  const list = (shiftRows || []).slice(0, 40);
+  let row = [];
   for (const s of list) {
     const id = Number(s && s.id);
     if (!Number.isFinite(id) || id <= 0) continue;
-    const start = safeBtnLabel(s.startHm != null ? s.startHm : '', 5);
-    const end = safeBtnLabel(s.endHm != null ? s.endHm : '', 5);
-    const whoRaw = s.name != null ? s.name : s.adminId != null ? s.adminId : '';
-    const who = safeBtnLabel(whoRaw, 16);
-    // فقط ساعت + نام کوتاه — بدون کاراکتر عجیب
-    const label = safeBtnLabel('❌ ' + start + '-' + end + ' | ' + who, 64);
-    rows.push([
-      {
-        text: label,
-        callback_data: 'own_sc:' + String(id),
-        style: 'danger',
-      },
-    ]);
+    let start = String(s.startHm != null ? s.startHm : '').slice(0, 5);
+    let end = String(s.endHm != null ? s.endHm : '').slice(0, 5);
+    if (!/^\d{1,2}:\d{2}$/.test(start)) start = '??:??';
+    if (!/^\d{1,2}:\d{2}$/.test(end)) end = '??:??';
+    // فقط ساعت — بدون نام (نام در متن پیام آمده)
+    const label = String('❌ ' + start + '–' + end);
+    row.push({
+      text: label,
+      callback_data: 'own_sc:' + String(id),
+      style: 'danger',
+    });
+    if (row.length >= 2) {
+      rows.push(row);
+      row = [];
+    }
   }
+  if (row.length) rows.push(row);
   if (!rows.length) {
     return sanitizeMarkup({
       inline_keyboard: [[{ text: 'بستن', callback_data: 'shift_close', style: 'primary' }]],
     });
   }
   rows.push([
-    { text: '🗑 لغو همه دوره', callback_data: 'own_cancel_all', style: 'danger' },
+    { text: 'لغو همه دوره', callback_data: 'own_cancel_all', style: 'danger' },
     { text: 'بستن', callback_data: 'shift_close', style: 'primary' },
   ]);
+  // sanitize اجباری تا text همیشه String باشد
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
