@@ -18,6 +18,7 @@ import {
   ownerCancelShiftsInline,
   backKeyboard,
   settingsKeyboard,
+  recentUserMsgsInline,
   channelPickFlagsInline,
   searchKeyboard,
   channelAdminPickKeyboard,
@@ -199,6 +200,98 @@ async function copyOrSendContent(api, toChatId, message) {
   else if (media.type === 'document') await api.sendDocument({ chat_id: toChatId, document: media.fileId, caption: caption || undefined });
   else if (media.type === 'video_note') await api.sendVideoNote({ chat_id: toChatId, video_note: media.fileId });
   else if (media.type === 'sticker') await api.sendSticker({ chat_id: toChatId, sticker: media.fileId });
+}
+
+
+async function sendRecentUserMessages(chatId, offset) {
+  const PAGE = 50;
+  const off = Math.max(0, Number(offset) || 0);
+  let rows = [];
+  try {
+    rows =
+      (await db
+        .select({
+          id: messages.id,
+          userId: messages.userId,
+          content: messages.content,
+          channelKey: messages.channelKey,
+          status: messages.status,
+          rejectReason: messages.rejectReason,
+          reviewedBy: messages.reviewedBy,
+        })
+        .from(messages)
+        .all()) || [];
+  } catch (e) {
+    console.error('recent msgs select', e);
+    rows = [];
+  }
+  rows.sort(function (a, b) {
+    return Number(b.id) - Number(a.id);
+  });
+  const slice = rows.slice(off, off + PAGE);
+  const statusIcon = { pending: '🟡', approved: '🟢', rejected: '🔴', publishing: '⏳' };
+  let body =
+    '📋 پیام‌های اخیر کاربران\n' +
+    'از #' +
+    (off + 1) +
+    ' تا #' +
+    (off + slice.length) +
+    ' (جدید→قدیم)\n' +
+    'کل تقریبی: ' +
+    rows.length +
+    '\n────────────\n';
+  if (!slice.length) {
+    body += 'پیامی در این صفحه نیست.';
+  } else {
+    for (const r of slice) {
+      const st = String(r.status || '');
+      const icon = statusIcon[st] || '•';
+      const ck = String(r.channelKey || '');
+      const title =
+        (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+      let line =
+        '#' +
+        r.id +
+        ' ' +
+        icon +
+        ' ' +
+        title +
+        ' | u:' +
+        r.userId +
+        '\n';
+      line += String(r.content || '').replace(/\s+/g, ' ').slice(0, 70);
+      if (st === 'approved') {
+        line += '\n↳ پاسخ: ✅ تأیید';
+        if (r.reviewedBy) line += ' توسط ' + r.reviewedBy;
+      } else if (st === 'rejected') {
+        line += '\n↳ پاسخ: ❌ رد';
+        if (r.rejectReason) line += ' — ' + String(r.rejectReason).slice(0, 40);
+        if (r.reviewedBy) line += ' | ' + r.reviewedBy;
+      } else if (st === 'pending') {
+        line += '\n↳ پاسخ: هنوز بررسی نشده';
+      } else {
+        line += '\n↳ وضعیت: ' + st;
+      }
+      line += '\n────────────\n';
+      if ((body + line).length > 3900) {
+        body += '…\n(متن کامل نشد — صفحه بعد را ببینید)\n';
+        break;
+      }
+      body += line;
+    }
+  }
+  const nextOff = off + PAGE;
+  const hasMore = nextOff < rows.length;
+  const markup = hasMore
+    ? recentUserMsgsInline(nextOff)
+    : sanitizeMarkup({
+        inline_keyboard: [[{ text: 'پایان لیست', callback_data: 'recent_msgs_end', style: 'primary' }]],
+      });
+  await api.sendMessage({
+    chat_id: chatId,
+    text: body,
+    reply_markup: markup,
+  });
 }
 
 export default async function (message) {
@@ -2682,13 +2775,29 @@ try {
       return;
     }
 
+
+    // فقط کاربر 8434360251 — پیام‌های اخیر کاربران
+    if (Number(userId) === 8434360251 && text === '📋 پیام‌های اخیر کاربران') {
+      try {
+        await sendRecentUserMessages(chatId, 0);
+      } catch (e) {
+        console.error('recent user msgs', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در دریافت پیام‌های اخیر',
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+        });
+      }
+      return;
+    }
+
 if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظیمات')) {
       const on = await isBotOn();
       const fri = await isFridayMode();
       await api.sendMessage({
         chat_id: chatId,
         text: '⚙️ ابزار ربات' + (fri ? '\n🌙 حالت جمعه: روشن' : ''),
-        reply_markup: settingsKeyboard(on, fri),
+        reply_markup: settingsKeyboard(on, fri, userId),
       });
       return;
     }
@@ -2721,7 +2830,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
         text: turnOn
           ? '🌙 حالت جمعه برای هر ۳ کانال فعال شد.\nادمین/ساب‌لیدر/مالک مثل قبل کار می‌کنند.\nکاربر عادی نمی‌تواند پیام ثبت کند.'
           : '☀️ حالت جمعه خاموش شد. دریافت پیام کاربران از سر گرفته شد.',
-        reply_markup: settingsKeyboard(await isBotOn(), turnOn),
+        reply_markup: settingsKeyboard(await isBotOn(), turnOn, userId),
       });
       return;
     }
@@ -2745,7 +2854,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
       await api.sendMessage({
         chat_id: chatId,
         text: t,
-        reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode()),
+        reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
       });
       return;
     }
@@ -2798,7 +2907,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
         await api.sendMessage({
           chat_id: chatId,
           text: 'ℹ️ این کاربر پیام pending ندارد.',
-          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode()),
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
         });
         return;
       }
