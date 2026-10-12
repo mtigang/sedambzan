@@ -1674,7 +1674,7 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
           );
         });
         const rows = [];
-        let t = '⏰ لیست و لغو شیفت‌ها\n📅 دوره ' + pdate + '\nروی دکمه قرمز بزنید تا لغو شود.\n';
+        let t = '⏰ لیست و لغو شیفت‌ها\n📅 دوره ' + pdate + '\nنام‌ها در متن زیر؛ دکمه‌ها فقط ساعت لغو.\n';
         if (!today.length) {
           t += '\nخالی — شیفت فعالی برای لغو نیست.';
         } else {
@@ -1737,7 +1737,20 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
           text: t.slice(0, 4000),
         };
         if (rows.length) {
-          payload.reply_markup = sanitizeMarkup(ownerCancelShiftsInline(rows));
+          try {
+            payload.reply_markup = sanitizeMarkup(ownerCancelShiftsInline(rows));
+          } catch (eMk) {
+            console.error('ownerCancelShiftsInline', eMk);
+            // fallback: فقط چند دکمه ساده ساعت
+            const fb = [];
+            for (let i = 0; i < Math.min(rows.length, 20); i++) {
+              const r = rows[i];
+              const lab = String('❌ ' + String(r.startHm || '?').slice(0, 5));
+              fb.push([{ text: lab, callback_data: 'own_sc:' + String(r.id) }]);
+            }
+            fb.push([{ text: 'بستن', callback_data: 'shift_close' }]);
+            payload.reply_markup = sanitizeMarkup({ inline_keyboard: fb });
+          }
         }
         await api.sendMessage(payload);
       } catch (e) {
