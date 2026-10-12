@@ -508,6 +508,23 @@ export function announceTargetInline() {
   });
 }
 
+
+/** انتخاب کانال برای لیست/لغو شیفت مالک */
+export function ownerShiftListChannelInline() {
+  const rows = [];
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    rows.push([
+      {
+        text: String((c && c.title) || c.key || 'کانال'),
+        callback_data: 'own_shift_list:' + String(c.key),
+        style: 'primary',
+      },
+    ]);
+  }
+  rows.push([{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
+}
+
 export function ownerShiftMenuInline() {
   return sanitizeMarkup({
     inline_keyboard: [
@@ -532,7 +549,7 @@ function safeBtnLabel(v, maxLen) {
 }
 
 /** دکمه‌های لغو — فقط ساعت (نام در متن پیام است) */
-export function ownerCancelShiftsInline(shiftRows) {
+export function ownerCancelShiftsInline(shiftRows, channelKey) {
   const rows = [];
   const list = (shiftRows || []).slice(0, 40);
   let row = [];
@@ -543,7 +560,6 @@ export function ownerCancelShiftsInline(shiftRows) {
     let end = String(s.endHm != null ? s.endHm : '').slice(0, 5);
     if (!/^\d{1,2}:\d{2}$/.test(start)) start = '??:??';
     if (!/^\d{1,2}:\d{2}$/.test(end)) end = '??:??';
-    // فقط ساعت — بدون نام (نام در متن پیام آمده)
     const label = String('❌ ' + start + '–' + end);
     row.push({
       text: label,
@@ -556,16 +572,18 @@ export function ownerCancelShiftsInline(shiftRows) {
     }
   }
   if (row.length) rows.push(row);
+  const ck = channelKey ? String(channelKey) : '';
+  const cancelAllData = ck ? 'own_cancel_all:' + ck : 'own_cancel_all';
   if (!rows.length) {
     return sanitizeMarkup({
       inline_keyboard: [[{ text: 'بستن', callback_data: 'shift_close', style: 'primary' }]],
     });
   }
   rows.push([
-    { text: 'لغو همه دوره', callback_data: 'own_cancel_all', style: 'danger' },
+    { text: 'لغو همه این کانال', callback_data: cancelAllData, style: 'danger' },
     { text: 'بستن', callback_data: 'shift_close', style: 'primary' },
   ]);
-  // sanitize اجباری تا text همیشه String باشد
+  rows.push([{ text: '◀️ انتخاب کانال', callback_data: 'own_shift_list', style: 'primary' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
