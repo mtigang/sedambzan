@@ -30,6 +30,7 @@ import {
   activeShiftChannelsInline,
   reviewInline,
   ownerReviewInline,
+  searchMsgActionsInline,
   feedbackInline,
   userOpenInline,
   shiftSlotsInline,
@@ -2640,7 +2641,10 @@ try {
           '\n\n' +
           row.content +
           '\n\n🔎 آیدی یا لینک بعدی را بفرستید (یا ◀️ بازگشت):',
-        reply_markup: row.status === 'pending' ? ownerReviewInline(row.id) : backKeyboard(),
+        reply_markup:
+          row.status === 'pending' || row.status === 'rejected'
+            ? searchMsgActionsInline(row.id, row.status)
+            : sanitizeMarkup(backKeyboard()),
       });
       return;
     }
