@@ -757,7 +757,7 @@ function reviewBatchKey(adminId) {
 }
 
 /** آیا این رکورد shift همین الان (تهران) فعال است؟ */
-function shiftActiveNow(s, now, pdate) {
+export function shiftActiveNow(s, now, pdate) {
   if (!s || String(s.status) !== 'active') return false;
   if (!now) now = tehranNow();
   if (!pdate) pdate = periodDateStr(now);
