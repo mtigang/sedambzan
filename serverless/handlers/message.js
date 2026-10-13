@@ -9,6 +9,8 @@ import {
   DEFAULT_CHANNELS,
   OWNER_IDS,
   ADMIN_GROUP_IDS,
+  CHANNEL_IDS,
+  CHANNEL_USERNAMES,
 } from 'lib/config';
 import {
   userKeyboard,
@@ -2471,6 +2473,90 @@ try {
       return;
     }
 
+    if (owner && state?.kind === 'del_ch_msg' && text) {
+      try {
+        const unameToKey = {};
+        for (const [k, u] of Object.entries(CHANNEL_USERNAMES || {})) {
+          unameToKey[String(u).toLowerCase()] = k;
+        }
+        const idToChat = {};
+        for (const [k, cid] of Object.entries(CHANNEL_IDS || {})) {
+          idToChat[String(cid)] = k;
+          const bare = String(cid).replace(/^-100/, '');
+          idToChat[bare] = k;
+        }
+        const lines = String(text)
+          .split(/[\n\r]+/)
+          .map(function (l) {
+            return String(l || '').trim();
+          })
+          .filter(Boolean);
+        if (!lines.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'حداقل یک لینک بفرستید.\nمثال: https://t.me/callMeAraIl/12345',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        const results = [];
+        for (const line of lines) {
+          let chatIdCh = null;
+          let msgId = null;
+          let title = '';
+          const pub = line.match(/t\.me\/([A-Za-z0-9_]+)\/(\d+)/i);
+          const priv = line.match(/t\.me\/c\/(\d+)\/(\d+)/i);
+          if (pub) {
+            const key = unameToKey[String(pub[1]).toLowerCase()] || null;
+            msgId = Number(pub[2]);
+            if (key && CHANNEL_IDS[key]) {
+              chatIdCh = CHANNEL_IDS[key];
+              title = (DEFAULT_CHANNELS[key] && DEFAULT_CHANNELS[key].title) || key;
+            }
+          } else if (priv) {
+            const bare = String(priv[1]);
+            msgId = Number(priv[2]);
+            const key = idToChat[bare] || idToChat['-100' + bare] || null;
+            if (key && CHANNEL_IDS[key]) {
+              chatIdCh = CHANNEL_IDS[key];
+              title = (DEFAULT_CHANNELS[key] && DEFAULT_CHANNELS[key].title) || key;
+            } else {
+              chatIdCh = Number('-100' + bare);
+              title = 'c/' + bare;
+            }
+          }
+          if (!chatIdCh || !msgId) {
+            results.push('❌ نامعتبر: ' + line.slice(0, 80));
+            continue;
+          }
+          try {
+            await api.deleteMessage({ chat_id: chatIdCh, message_id: msgId });
+            results.push('✅ حذف شد · ' + (title || chatIdCh) + ' · #' + msgId);
+          } catch (e) {
+            const em =
+              (e && (e.description || e.message)) || String(e);
+            results.push('❌ #' + msgId + ' · ' + String(em).slice(0, 120));
+          }
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '🗑 نتیجه حذف\n────────────\n' +
+            results.join('\n') +
+            '\n\nلینک‌های بعدی را بفرستید یا ◀️ بازگشت.',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('del_ch_msg', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در حذف: ' + ((e && (e.message || e.description)) || e),
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      }
+      return;
+    }
+
     if (owner && state?.kind === 'search_msg' && text) {
       let id = null;
       let linkHint = '';
@@ -2722,6 +2808,25 @@ try {
           reply_markup: await roleKb(userId),
         });
       }
+      return;
+    }
+
+    if (owner && text === '🗑 حذف پیام کانال') {
+      await setState(userId, 'del_ch_msg');
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '🗑 حذف پیام از کانال\n\n' +
+          'لینک پیام(ها) را بفرستید.\n' +
+          'چند لینک را هر کدام در یک خط بنویسید.\n\n' +
+          'مثال:\n' +
+          'https://t.me/callMeAraIl/107185\n' +
+          'https://t.me/inKarbariral/15906\n' +
+          'https://t.me/c/3877061735/107353\n\n' +
+          'فقط پیام‌هایی که ربات دسترسی حذف آن‌ها را دارد پاک می‌شوند.\n' +
+          'برای انصراف: ◀️ بازگشت',
+        reply_markup: sanitizeMarkup(backKeyboard()),
+      });
       return;
     }
 
