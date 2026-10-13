@@ -1,4 +1,4 @@
-import { normalizeBody, exactBodyKey } from 'lib/validation';
+import { normalizeBody, exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { api, db, InputFile } from 'sdk';
 import { eq, and } from 'sdk/db';
 import { messages, feedback, shifts, settings, users, channelAdmins } from 'schema';
@@ -344,6 +344,169 @@ export default async function (cq) {
       return;
     }
 
+
+    // مالک از جستجو: تأیید و انتشار پیام ردشده
+    if (data.startsWith('search_approve:')) {
+      const id = Number(data.split(':')[1]);
+      try {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳ انتشار…' });
+      } catch (_e) {}
+      if (!isOwner(userId)) {
+        try {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'فقط مالک',
+            show_alert: true,
+          });
+        } catch (_e) {}
+        return;
+      }
+      const rows0 = await db.select().from(messages).where(eq(messages.id, id)).all();
+      const row = rows0 && rows0[0];
+      if (!row) {
+        try {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'پیام پیدا نشد',
+            show_alert: true,
+          });
+        } catch (_e) {}
+        return;
+      }
+      const st = String(row.status || '');
+      if (st === 'approved') {
+        try {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'قبلاً تأیید شده',
+            show_alert: true,
+          });
+        } catch (_e) {}
+        try {
+          await api.editMessageReplyMarkup({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            reply_markup: { inline_keyboard: [] },
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (st !== 'rejected' && st !== 'pending') {
+        try {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'وضعیت قابل تأیید نیست: ' + st,
+            show_alert: true,
+          });
+        } catch (_e) {}
+        return;
+      }
+      try {
+        const ckAd = String((row.channelKey ?? row.channel_key) || '');
+        if (ckAd && (await isChannelAdMode(ckAd))) {
+          try {
+            await api.answerCallbackQuery({
+              callback_query_id: cq.id,
+              text: '📢 کانال در حالت تب است',
+              show_alert: true,
+            });
+          } catch (_e) {}
+          return;
+        }
+      } catch (_e) {}
+      const conf = DEFAULT_CHANNELS[row.channelKey || row.channel_key];
+      if (!conf || !conf.chatId) {
+        try {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'کانال پیکربندی نشده',
+            show_alert: true,
+          });
+        } catch (_e) {}
+        return;
+      }
+      let link = null;
+      let mid = null;
+      try {
+        const sent = await api.sendMessage({
+          chat_id: conf.chatId,
+          text: toBoldHtml(row.content),
+          parse_mode: 'HTML',
+        });
+        mid = sent && sent.message_id;
+        if (!mid) throw new Error('message_id خالی');
+        link = channelMessageLink(conf.chatId, mid, row.channelKey || row.channel_key);
+        settingSet('chmsg:' + (row.channelKey || row.channel_key) + ':' + mid, String(id)).catch(
+          function () {}
+        );
+      } catch (e) {
+        console.error('search_approve publish', e);
+        try {
+          await api.sendMessage({
+            chat_id: userId,
+            text:
+              '⚠️ انتشار #' +
+              id +
+              ' ناموفق:\n' +
+              ((e && (e.description || e.message)) || String(e)),
+          });
+        } catch (_e) {}
+        return;
+      }
+      try {
+        await db
+          .update(messages)
+          .set({
+            status: 'approved',
+            reviewedBy: Number(userId),
+            reviewedAt: new Date(),
+            rejectReason: null,
+          })
+          .where(eq(messages.id, id))
+          .run();
+      } catch (e) {
+        console.error('search_approve status', e);
+      }
+      try {
+        const bk = exactBodyKey(row.content);
+        if (bk) {
+          await settingSet(
+            bodyIndexSettingKey(row.channelKey || row.channel_key, bk),
+            String(id) + '|approved'
+          );
+        }
+      } catch (_e) {}
+      try {
+        await api.editMessageReplyMarkup({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          reply_markup: { inline_keyboard: [] },
+        });
+      } catch (_e) {}
+      const title = conf.title || row.channelKey;
+      await api.sendMessage({
+        chat_id: userId,
+        text:
+          '✅ پیام #' +
+          id +
+          ' تأیید و منتشر شد.\n\n' +
+          'مشاهده در کانال «' +
+          title +
+          '»:\n' +
+          (link || ''),
+        link_preview_options: link ? { is_disabled: false, url: link } : undefined,
+      });
+      try {
+        let txt = '✅ پیام شما تأیید و منتشر شد.';
+        if (link) txt += '\n\nمشاهده در کانال «' + title + '»:\n' + link;
+        await api.sendMessage({
+          chat_id: row.userId,
+          text: txt,
+          link_preview_options: link ? { is_disabled: false, url: link } : undefined,
+        });
+      } catch (_e) {}
+      return;
+    }
 
     if (data.startsWith('approve:')) {
       const id = Number(data.split(':')[1]);
