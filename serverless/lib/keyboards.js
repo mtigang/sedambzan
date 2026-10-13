@@ -323,6 +323,24 @@ export function ownerReviewInline(id) {
   });
 }
 
+/** نتیجه جستجوی مالک: pending = تأیید/رد | rejected = فقط تأیید و انتشار */
+export function searchMsgActionsInline(id, status) {
+  const st = String(status || '');
+  const rows = [];
+  if (st === 'pending') {
+    rows.push([
+      { text: '✅ تأیید', callback_data: 'approve:' + id, style: 'success' },
+      { text: '❌ رد', callback_data: 'reject_direct:' + id, style: 'danger' },
+    ]);
+    rows.push([{ text: '✏️ ویرایش و ارسال', callback_data: 'edit_msg:' + id, style: 'primary' }]);
+  } else if (st === 'rejected') {
+    rows.push([
+      { text: '✅ تأیید و انتشار', callback_data: 'search_approve:' + id, style: 'success' },
+    ]);
+  }
+  return sanitizeMarkup({ inline_keyboard: rows });
+}
+
 export function reviewInline(id, showNext, batchNumber) {
   // دکمه Batch بعدی اینجا نیست — فقط بعد از اتمام Batch با پیام جداگانه می‌آید
   const rows = [
