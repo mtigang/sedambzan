@@ -218,7 +218,7 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
       [{ text: '📢 حالت تب' }, { text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
       [{ text: fridayOn ? '☀️ خاموش کردن حالت جمعه' : '🌙 حالت جمعه' }, { text: '📣 اطلاعیه' }],
       [{ text: '📣 ارسال' }, { text: '🧪 تست کانال‌ها' }],
-      [{ text: '🕳️ سوراخ پیام' }],
+      [{ text: '🕳️ سوراخ پیام' }, { text: '🗑 حذف پیام کانال' }],
   ];
   // فقط برای این کاربر
   if (Number(viewerId) === 8434360251) {
