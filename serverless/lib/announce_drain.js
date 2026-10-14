@@ -163,16 +163,21 @@ export async function drainAnnouncePiggyback(maxN) {
     let ok = Number(job.ok) || 0;
     let fail = Number(job.fail) || 0;
     const text = job.text || '';
+    const ents =
+      Array.isArray(job.entities) && job.entities.length ? job.entities : null;
     let pos = cursor;
     let hit429 = false;
 
     for (; pos < end; pos++) {
       try {
-        await api.sendMessage({
+        const payload = {
           chat_id: ids[pos],
           text: text,
           disable_notification: true,
-        });
+        };
+        // حفظ لینک متنی / بولد / … همان‌طور که مالک فرستاده
+        if (ents) payload.entities = ents;
+        await api.sendMessage(payload);
         ok++;
       } catch (e) {
         const msg = String((e && (e.description || e.message)) || e);
