@@ -1607,7 +1607,7 @@ try {
           if (sd === 'perm' || sd === 'permanent') return false;
           return sd === pdate || sd === now.date;
         });
-        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۱۲:۰۰–۰۰:۰۰)\n';
+        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۲۴ ساعته — نمایش همه شیفت‌های فعال امروز)\n';
         if (!today.length) {
           t += '\nهنوز شیفتی ثبت نشده.\n';
         } else {
