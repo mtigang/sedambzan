@@ -132,9 +132,23 @@ export function buildAvailableShiftSlots(now) {
 }
 
 export function buildOwnerShiftSlots(now) {
-  // مالک همان بازه‌های دوره کاری (۱۲→۰۰) — بدون ساعات نیمه‌شب تا ظهر
+  // مالک: بدون محدودیت ساعت کاری — ۲۴ ساعت کامل
   if (!now) now = tehranNow();
-  return buildAvailableShiftSlots(now);
+  const slots = [];
+  const pad = function (n) {
+    return String(n).padStart(2, '0');
+  };
+  for (let h = 0; h < 24; h++) {
+    const start = pad(h) + ':00';
+    const end = pad((h + 1) % 24) + ':00';
+    slots.push({
+      start: start,
+      end: end,
+      label: start + '–' + end,
+      hourKey: start,
+    });
+  }
+  return slots;
 }
 
 const JMONTHS = [
