@@ -761,8 +761,6 @@ export function shiftActiveNow(s, now, pdate) {
   if (!s || String(s.status) !== 'active') return false;
   if (!now) now = tehranNow();
   if (!pdate) pdate = periodDateStr(now);
-  // خارج از ساعت کاری (۱۲–۰۰) هیچ شیفتی فعال نیست
-  if (!isWorkHours(now)) return false;
   const start = normHm(s.startHm || s.start_hm || '');
   const end = normHm(s.endHm || s.end_hm || '');
   if (!start || !end || start === end) return false;
@@ -770,9 +768,7 @@ export function shiftActiveNow(s, now, pdate) {
   if (sd === 'perm' || sd === 'permanent') return false;
   // فقط دورهٔ تقویمی فعلی
   if (sd !== String(pdate)) return false;
-  // بازه باید داخل پنجره کاری باشد (شروع بین ۱۲ تا ۲۳)
-  const sh = Number(String(start).split(':')[0]) || 0;
-  if (sh < 12) return false;
+  // هر ساعتی که مالک/سیستم ثبت کرده — فقط بازه زمانی چک می‌شود
   return inRange(now.hm, start, end);
 }
 
@@ -846,11 +842,11 @@ export async function cancelInvalidShifts() {
     for (const s of all) {
       if (String(s.status) !== 'active') continue;
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
-      const sh = Number(String(s.startHm || s.start_hm || '0').split(':')[0]) || 0;
+      // فقط واقعاً نامعتبر: دائم قدیمی یا بازه صفر
+      // ساعت قبل از ۱۲ دیگر لغو نمی‌شود (مالک می‌تواند هر ساعتی بدهد)
       const bad =
         sd === 'perm' ||
         sd === 'permanent' ||
-        sh < 12 ||
         String(s.startHm) === String(s.endHm);
       if (!bad) continue;
       try {
@@ -899,8 +895,6 @@ export function buildTakenMapForSlots(activeShifts, slots) {
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
       if (sd === 'perm' || sd === 'permanent') continue;
       if (String(s.startHm) === String(s.endHm)) continue;
-      const sh = Number(String(s.startHm || '0').split(':')[0]) || 0;
-      if (sh < 12) continue;
       if (shiftIntervalOverlaps(ss, se, s.startHm || s.start_hm, s.endHm || s.end_hm)) {
         takenMap[ss] = s.adminId ?? s.admin_id;
         takenMap[hourKeyOf(ss)] = s.adminId ?? s.admin_id;
@@ -911,7 +905,7 @@ export function buildTakenMapForSlots(activeShifts, slots) {
   return takenMap;
 }
 
-/** فقط شیفت‌های معتبر دوره فعلی (۱۲–۰۰، غیر دائم، غیر صفر) */
+/** فقط شیفت‌های معتبر دوره فعلی (غیر دائم، غیر صفر — هر ساعتی) */
 export function filterPeriodShifts(rows, pdate) {
   return (rows || []).filter(function (s) {
     if (String(s.status) !== 'active') return false;
@@ -919,8 +913,6 @@ export function filterPeriodShifts(rows, pdate) {
     if (sd === 'perm' || sd === 'permanent') return false;
     if (sd !== String(pdate)) return false;
     if (String(s.startHm) === String(s.endHm)) return false;
-    const sh = Number(String(s.startHm || s.start_hm || '0').split(':')[0]) || 0;
-    if (sh < 12) return false;
     return true;
   });
 }
@@ -940,9 +932,6 @@ export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShif
       if (sd === 'perm' || sd === 'permanent') continue;
       if (sd !== String(pdate)) continue;
       if (String(s.startHm) === String(s.endHm)) continue;
-      // شیفت‌های نیمه‌شب تا ظهر (باقی‌مانده قدیمی) نادیده
-      const sh = Number(String(s.startHm || s.start_hm || '0').split(':')[0]) || 0;
-      if (sh < 12) continue;
       if (shiftIntervalOverlaps(startHm, endHm, s.startHm || s.start_hm, s.endHm || s.end_hm)) {
         return s;
       }
@@ -1000,8 +989,7 @@ export async function dedupeActiveShifts(channelKey) {
         const sd = String(s.shiftDate ?? s.shift_date ?? '');
         if (sd === 'perm' || sd === 'permanent') return false;
         if (sd !== String(pdate)) return false;
-        const sh = Number(String(s.startHm || s.start_hm || '0').split(':')[0]) || 0;
-        if (sh < 12) return false;
+        if (String(s.startHm) === String(s.endHm)) return false;
         return true;
       })
       .sort(function (a, b) {
@@ -1073,8 +1061,6 @@ export async function countAdminPeriodShifts(adminId, shiftDate) {
       if (sd === 'perm' || sd === 'permanent') continue;
       if (sd !== target) continue;
       if (String(s.startHm) === String(s.endHm)) continue;
-      const sh = Number(String(s.startHm || '0').split(':')[0]) || 0;
-      if (sh < 12) continue;
       n += 1;
     }
     return n;
