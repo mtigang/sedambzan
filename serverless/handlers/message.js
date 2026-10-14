@@ -1702,9 +1702,8 @@ try {
       await api.sendMessage({
         chat_id: chatId,
         text:
-          'ساعت را انتخاب کنید (' +
-          'فقط همین دوره' +
-          '):',
+          'ساعت را انتخاب کنید (۲۴ ساعت کامل — بدون محدودیت ساعت کاری):\n' +
+          'فقط همین دوره ثبت می‌شود.',
         reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, new Set(), ownerSlots, true)),
       });
       // reuse shift_pick won't know admin - use special callbacks
