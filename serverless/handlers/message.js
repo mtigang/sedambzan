@@ -150,6 +150,17 @@ async function checkRateLimit(uid) {
   return { ok: true, left: arr.length };
 }
 
+/** آیا الان شیفت فعالی روی حداقل یک کانال هست؟ (برای اجازه ارسال خارج از ساعت کاری) */
+async function hasAnyActiveShiftNow() {
+  try {
+    for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
+      const ads = await activeShiftAdmins(ck);
+      if (ads && ads.length) return true;
+    }
+  } catch (_e) {}
+  return false;
+}
+
 async function roleKb(uid) {
   const r = await getRole(uid);
   let kb =
@@ -588,12 +599,16 @@ export default async function (message) {
         return;
       }
       if (!owner && !isWorkHours()) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: workHoursClosedText(),
-          reply_markup: await roleKb(userId),
-        });
-        return;
+        // اگر مالک شیفت خارج از ساعت کاری داده و الان فعال است → اجازه بده
+        const anyShift = await hasAnyActiveShiftNow();
+        if (!anyShift) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: workHoursClosedText(),
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
       }
       await setState(userId, 'user_send');
       await api.sendMessage({
@@ -681,14 +696,7 @@ export default async function (message) {
 
     if (state?.kind === 'user_send' && text) {
       try {
-        if (!owner && !isWorkHours()) {
-          await api.sendMessage({
-            chat_id: chatId,
-            text: workHoursClosedText(),
-            reply_markup: sanitizeMarkup(backKeyboard()),
-          });
-          return;
-        }
+        // درِ ساعت کاری اینجا برداشته شد؛ بعد از تشخیص کانال، شیفت فعال چک می‌شود
         const [_fri, _botOn] = await Promise.all([isFridayMode(), isBotOn()]);
         if (!owner && _fri) {
           await clearState(userId);
@@ -726,27 +734,6 @@ export default async function (message) {
           });
           return;
         }
-        try {
-          const now = tehranNow();
-          if (ch.workStart && ch.workEnd && !inRange(now.hm, ch.workStart, ch.workEnd)) {
-            await api.sendMessage({
-              chat_id: chatId,
-              text:
-                '⏰ ساعت کاری «' +
-                ch.title +
-                '» از ' +
-                ch.workStart +
-                ' تا ' +
-                ch.workEnd +
-                ' است.',
-              reply_markup: sanitizeMarkup(backKeyboard()),
-            });
-            return;
-          }
-        } catch (_) {}
-
-        // —— ضدتکرار بدنه دقیق (بین پیشوند و نقطه پایانی) — حداکثر ۲۰۰ پیام اخیر
-
         // —— کانال خاموش / حالت تب
         try {
           const [_chOpen, _adMode] = await Promise.all([
@@ -777,7 +764,7 @@ export default async function (message) {
           console.error('ch flags', e);
         }
 
-        // —— شیفت فعال برای کانال؟ (بدون شیفت = ثبت ممنوع؛ خطا هم = ممنوع)
+        // —— شیفت فعال برای کانال؟ (معیار اصلی؛ خارج از ساعت کاری هم اگر شیفت باشد مجاز است)
         if (!owner) {
           let activeAds = [];
           try {
@@ -787,6 +774,33 @@ export default async function (message) {
             activeAds = [];
           }
           if (!activeAds || !activeAds.length) {
+            // بدون شیفت فعال: اگر خارج ساعت کاری بود همان پیام ساعت کاری، وگرنه پیام نبود شیفت
+            if (!isWorkHours()) {
+              await api.sendMessage({
+                chat_id: chatId,
+                text: workHoursClosedText(),
+                reply_markup: sanitizeMarkup(backKeyboard()),
+              });
+              return;
+            }
+            try {
+              const now = tehranNow();
+              if (ch.workStart && ch.workEnd && !inRange(now.hm, ch.workStart, ch.workEnd)) {
+                await api.sendMessage({
+                  chat_id: chatId,
+                  text:
+                    '⏰ ساعت کاری «' +
+                    ch.title +
+                    '» از ' +
+                    ch.workStart +
+                    ' تا ' +
+                    ch.workEnd +
+                    ' است.',
+                  reply_markup: sanitizeMarkup(backKeyboard()),
+                });
+                return;
+              }
+            } catch (_) {}
             let t =
               '⏰ الان شیفت فعالی برای «' +
               ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
