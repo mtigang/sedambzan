@@ -3407,6 +3407,7 @@ if (data.startsWith('ann_target:')) {
       const target = data.split(':')[1];
       const st = await getState(userId);
       const annText = st && st.annText;
+      const annEntities = st && st.annEntities ? st.annEntities : null;
       await clearState(userId);
       if (!annText) {
         await api.sendMessage({
@@ -3431,10 +3432,10 @@ if (data.startsWith('ann_target:')) {
           const all = (await db.select().from(users).all()) || [];
           for (const u of all) {
             const id = Number(u.userId || u.user_id);
-            if (id && !seen[id]) {
-              seen[id] = true;
-              ids.push(id);
-            }
+            if (!id || seen[id]) continue;
+            if (Number(u.blocked) === 1) continue;
+            seen[id] = true;
+            ids.push(id);
           }
         }
       } catch (e) {
@@ -3476,6 +3477,7 @@ if (data.startsWith('ann_target:')) {
       const job = {
         status: 'running',
         text: annText,
+        entities: Array.isArray(annEntities) && annEntities.length ? annEntities : null,
         ids: ids,
         cursor: 0,
         ok: 0,
