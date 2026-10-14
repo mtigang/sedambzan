@@ -62,6 +62,7 @@ import { setState, getState, clearState } from 'lib/state';
 import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm, sortShiftsByPeriod, periodOrd } from 'lib/time';
 // normHm via time
 import { resolveUserId, channelMessageLink, channelPublicBase } from 'lib/resolve';
+import { setBlocked } from 'lib/users';
 import { DB_EXPORT_OWNER_ID, initDbExportJob, processDbExportBatch } from 'lib/db_export';
 import {
   getSubLeaderChannel,
@@ -324,7 +325,11 @@ export default async function (message) {
 
     const u = await getUser(userId);
     if (u?.blocked && !isOwner(userId)) {
-      await api.sendMessage({ chat_id: chatId, text: '🚫 دسترسی محدود است.' });
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '🚫 از ربات مسدود شدی.\n\nامکان استفاده از هیچ‌کدام از خدمات ربات وجود ندارد.',
+      });
       return;
     }
 
@@ -2740,7 +2745,29 @@ try {
     }
 
     if (owner && state?.kind === 'announce_wait_text' && text) {
-      await setState(userId, 'announce_pick_target', { annText: text });
+      // حفظ entities (لینک متنی، بولد، …) برای ارسال یکسان به کاربران
+      let annEntities = null;
+      try {
+        const raw = message.entities || message.caption_entities || null;
+        if (Array.isArray(raw) && raw.length) {
+          annEntities = raw.map(function (e) {
+            const o = {
+              type: e.type,
+              offset: e.offset,
+              length: e.length,
+            };
+            if (e.url) o.url = e.url;
+            if (e.language) o.language = e.language;
+            if (e.custom_emoji_id) o.custom_emoji_id = e.custom_emoji_id;
+            if (e.user && e.user.id) o.user = { id: e.user.id };
+            return o;
+          });
+        }
+      } catch (_e) {}
+      await setState(userId, 'announce_pick_target', {
+        annText: text,
+        annEntities: annEntities,
+      });
       await api.sendMessage({
         chat_id: chatId,
         text: 'ارسال به چه کسانی؟',
@@ -2810,6 +2837,72 @@ try {
           chat_id: chatId,
           text: 'خطا در شروع خروجی: ' + (e && e.message ? e.message : String(e)),
           reply_markup: await roleKb(userId),
+        });
+      }
+      return;
+    }
+
+    if (owner && (text === '🚫 بن کاربر' || text === '🔓 آنبن کاربر')) {
+      const banOn = text === '🚫 بن کاربر';
+      await setState(userId, banOn ? 'ban_user' : 'unban_user');
+      await api.sendMessage({
+        chat_id: chatId,
+        text: banOn
+          ? '🚫 آیدی عددی یا @username کاربری که باید مسدود شود را بفرستید:'
+          : '🔓 آیدی عددی یا @username کاربری که باید رفع مسدودیت شود را بفرستید:',
+        reply_markup: sanitizeMarkup(backKeyboard()),
+      });
+      return;
+    }
+
+    if (owner && (state?.kind === 'ban_user' || state?.kind === 'unban_user') && text) {
+      const banOn = state.kind === 'ban_user';
+      try {
+        const tid = await resolveUserId(text);
+        if (!tid) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'کاربر پیدا نشد. آیدی عددی یا @username معتبر بفرستید:',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        if (isOwner(tid)) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'نمی‌توان مالک را مسدود کرد.',
+            reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+          });
+          await clearState(userId);
+          return;
+        }
+        await setBlocked(tid, banOn);
+        await clearState(userId);
+        const tu = await getUser(tid);
+        const label = tu
+          ? (tu.firstName || tu.username || String(tid))
+          : String(tid);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: banOn
+            ? '🚫 کاربر «' +
+              label +
+              '» (' +
+              tid +
+              ') مسدود شد.\nدیگر نمی‌تواند از ربات استفاده کند.'
+            : '🔓 کاربر «' +
+              label +
+              '» (' +
+              tid +
+              ') رفع مسدودیت شد.',
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+        });
+      } catch (e) {
+        console.error('ban/unban', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا: ' + ((e && (e.message || e.description)) || e),
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
         });
       }
       return;
