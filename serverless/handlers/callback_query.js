@@ -3765,13 +3765,8 @@ if (data === 'ann_continue') {
           });
           return;
         }
-        // اعتبارسنجی تخصیص مالک
+        // اعتبارسنجی تخصیص مالک — بدون محدودیت ساعت کاری
         {
-          const sh = Number(String(startHm).split(':')[0]) || 0;
-          if (sh < 12) {
-            await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'شیفت فقط ۱۲–۰۰', show_alert: true });
-            return;
-          }
           const isAdm = await isUserChannelAdmin(targetAdmin, channelKey);
           if (!isAdm && !isOwner(targetAdmin)) {
             await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کاربر ادمین این کانال نیست', show_alert: true });
@@ -3921,14 +3916,25 @@ if (data === 'ann_continue') {
             return;
           }
         }
-        if (isWorkHours(nowChk) && periodOrd(nowChk.hm) >= eOrd) {
-          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'این بازه تمام شده', show_alert: true });
-          return;
-        }
-        const sh = Number(String(startN).split(':')[0]) || 0;
-        if (sh < 12) {
-          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'شیفت فقط از ۱۲ تا ۰۰', show_alert: true });
-          return;
+        // مالک می‌تواند هر ساعتی بدهد؛ ادمین فقط در دوره کاری و بازهٔ تمام‌نشده
+        if (!isOwner(userId)) {
+          if (isWorkHours(nowChk) && periodOrd(nowChk.hm) >= eOrd) {
+            await api.answerCallbackQuery({
+              callback_query_id: cq.id,
+              text: 'این بازه تمام شده',
+              show_alert: true,
+            });
+            return;
+          }
+          const sh = Number(String(startN).split(':')[0]) || 0;
+          if (sh < 12) {
+            await api.answerCallbackQuery({
+              callback_query_id: cq.id,
+              text: 'شیفت فقط از ۱۲ تا ۰۰',
+              show_alert: true,
+            });
+            return;
+          }
         }
       }
 
@@ -3970,14 +3976,17 @@ if (data === 'ann_continue') {
         return;
       }
       {
-        const sh = Number(String(startHm).split(':')[0]) || 0;
-        if (sh < 12) {
-          await api.answerCallbackQuery({
-            callback_query_id: cq.id,
-            text: 'شیفت فقط از ۱۲ تا ۰۰ معتبر است',
-            show_alert: true,
-          });
-          return;
+        // ادمین: فقط ۱۲–۰۰ | مالک: بدون محدودیت
+        if (!isOwner(userId)) {
+          const sh = Number(String(startHm).split(':')[0]) || 0;
+          if (sh < 12) {
+            await api.answerCallbackQuery({
+              callback_query_id: cq.id,
+              text: 'شیفت فقط از ۱۲ تا ۰۰ معتبر است',
+              show_alert: true,
+            });
+            return;
+          }
         }
       }
       // فقط دوره فعلی — دائمی حذف شد
