@@ -381,7 +381,7 @@ export function searchKeyboard() {
   return sanitizeMarkup({
     keyboard: [
       [{ text: '🔎 جستجوی پیام' }, { text: '🔎 جستجوی کاربر' }],
-      [{ text: '👮 جستجوی ادمین' }, { text: '🗑 حذف دسته‌جمعی ادمین' }],
+      [{ text: '👮 جستجوی ادمین' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
@@ -633,6 +633,7 @@ export function adminListInline(admins, channelKey) {
   }
   rows.push([
     { text: 'افزودن ادمین', callback_data: 'aadd:' + channelKey, style: 'success' },
+    { text: 'حذف دسته‌جمعی', callback_data: 'abulk:' + channelKey, style: 'danger' },
   ]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }

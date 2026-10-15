@@ -753,6 +753,10 @@ export async function addChannelAdmin(userId, channelKey) {
         return { ok: false, reason: 'insert_fail' };
       }
     }
+    // زمان ادمین‌شدن برای گزارش‌ها
+    try {
+      await settingSet('admin_since:' + ck + ':' + uid, String(Date.now()));
+    } catch (_e) {}
   }
 
   try {

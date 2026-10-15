@@ -3037,14 +3037,15 @@ try {
 
 
     
-    // —— جستجوی ادمین: پروفایل + شیفت ۷روز به تفکیک روز/کانال + تعداد بررسی ——
+
+    // —— جستجوی ادمین ——
     if (owner && state?.kind === 'search_admin' && text) {
       try {
         const id = await resolveUserId(text);
         if (!id) {
           await api.sendMessage({
             chat_id: chatId,
-            text: 'ادمین پیدا نشد.\\nآیدی یا @username بعدی را بفرستید یا ◀️ بازگشت',
+            text: 'ادمین پیدا نشد.\nآیدی یا @username بعدی را بفرستید یا ◀️ بازگشت',
             reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
@@ -3053,6 +3054,7 @@ try {
         const chans = await adminChannels(id);
         const role = await getRole(id);
         const now = tehranNow();
+
         function dayOffset(base, off) {
           const parts = String(base).split('-').map(Number);
           const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
@@ -3065,10 +3067,10 @@ try {
             String(dt.getUTCDate()).padStart(2, '0')
           );
         }
+        // از دورترین تا نزدیک‌ترین
         const days7 = [];
-        for (let i = 0; i < 7; i++) days7.push(dayOffset(now.date, -i));
+        for (let i = 6; i >= 0; i--) days7.push(dayOffset(now.date, -i));
 
-        // شیفت‌ها
         let allSh = [];
         try {
           allSh = (await db.select().from(shifts).limit(3000).all()) || [];
@@ -3083,7 +3085,6 @@ try {
           return days7.indexOf(sd) >= 0;
         });
 
-        // پیام‌های بررسی‌شده این ادمین (نمونه)
         let revs = [];
         try {
           const raw =
@@ -3113,7 +3114,7 @@ try {
           if (ts == null) return null;
           try {
             let t = ts;
-            if (typeof t === 'string' && /^\\d+$/.test(t)) t = Number(t);
+            if (typeof t === 'string' && /^\d+$/.test(t)) t = Number(t);
             if (typeof t === 'number' && t < 1e12) t = t * 1000;
             const ms = new Date(t).getTime();
             if (!Number.isFinite(ms)) return null;
@@ -3130,8 +3131,7 @@ try {
           }
         }
 
-        // شمارش بررسی به تفکیک روز و کانال
-        const byDayCh = {}; // day -> channelKey -> {ap,rj}
+        const byDayCh = {};
         let apTot = 0;
         let rjTot = 0;
         for (const m of revs) {
@@ -3149,18 +3149,18 @@ try {
           }
         }
 
-        // شیفت به تفکیک روز و کانال
-        const shiftByDay = {}; // day -> [{channel, start, end}]
+        const shiftByDay = {};
         const permShifts = [];
         for (const s of myShifts) {
           const sd = String(s.shiftDate || '');
           const ck = String(s.channelKey || '');
           const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
           const line =
+            '• ' +
             title +
-            ' | ' +
+            '  ' +
             String(s.startHm || '').slice(0, 5) +
-            '–' +
+            ' تا ' +
             String(s.endHm || '').slice(0, 5);
           if (sd === 'perm' || sd === 'permanent') {
             permShifts.push(line);
@@ -3170,39 +3170,67 @@ try {
           }
         }
 
-        let body =
-          '👮 گزارش ادمین\\n' +
-          '👤 ' +
-          displayName(uu, id) +
-          '\\n🆔 ' +
-          id +
-          (uu && uu.username ? '\\n@' + uu.username : '') +
-          '\\nنقش: ' +
-          (role || (uu && uu.role) || '—') +
-          '\\n📢 کانال‌های ادمینی: ' +
+        const sinceLines = [];
+        let earliestSince = null;
+        for (const ck of chans) {
+          let ts = null;
+          try {
+            const v = await settingGet('admin_since:' + ck + ':' + id, '');
+            if (v) ts = Number(v) || null;
+          } catch (_e) {}
+          const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+          if (ts) {
+            if (earliestSince == null || ts < earliestSince) earliestSince = ts;
+            sinceLines.push('• «' + title + '»: ' + formatTsJalali(ts));
+          } else {
+            sinceLines.push('• «' + title + '»: نامشخص');
+          }
+        }
+
+        const nm = displayName(uu, id);
+        const un = uu && uu.username ? '@' + uu.username : '—';
+
+        const NL = String.fromCharCode(10);
+        let body = '👮 گزارش ادمین' + NL;
+        body += '━━━━━━━━━━━━' + NL;
+        body += '👤 ' + nm + NL;
+        body += '🆔 ' + id + NL;
+        body += '🔗 ' + un + NL;
+        body += '🏷 نقش: ' + (role || (uu && uu.role) || '—') + NL;
+        body +=
+          '📢 کانال‌ها: ' +
           (chans.length
             ? chans
                 .map(function (k) {
                   return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k;
                 })
                 .join('، ')
-            : '— هیچ‌کدام') +
-          '\\n\\n📊 بررسی ۷ روز: ✅' +
+            : '—') +
+          NL;
+        if (earliestSince) {
+          body += '📆 اولین ثبت ادمینی: ' + formatTsJalali(earliestSince) + NL;
+        }
+        if (sinceLines.length) {
+          body += '🕐 ادمین‌شدن به تفکیک کانال:' + NL + sinceLines.join(NL) + NL;
+        }
+        body += '━━━━━━━━━━━━' + NL;
+        body +=
+          '📊 خلاصه ۷ روز: ✅ ' +
           apTot +
-          ' ❌' +
+          '  |  ❌ ' +
           rjTot +
-          ' (جمع ' +
+          '  |  جمع ' +
           (apTot + rjTot) +
-          ')\\n';
+          NL;
 
         if (permShifts.length) {
-          body += '\\n♾️ شیفت دائمی:\\n';
-          for (const l of permShifts.slice(0, 20)) body += '• ' + l + '\\n';
+          body += NL + '♾️ شیفت دائمی' + NL;
+          for (const l of permShifts.slice(0, 15)) body += l + NL;
         }
 
-        body += '\\n📅 شیفت و بررسی به تفکیک روز:\\n';
+        body += NL + '📅 جزئیات روزانه (از قدیم → جدید)' + NL;
         for (const d of days7) {
-          const shifts = shiftByDay[d] || [];
+          const shiftsD = shiftByDay[d] || [];
           const chMap = byDayCh[d] || {};
           let dayAp = 0;
           let dayRj = 0;
@@ -3210,34 +3238,38 @@ try {
             dayAp += chMap[ck].ap;
             dayRj += chMap[ck].rj;
           }
-          body += '\\n▸ ' + d + '\\n';
-          if (shifts.length) {
-            body += '  ⏰ شیفت (' + shifts.length + '):\\n';
-            for (const l of shifts) body += '    • ' + l + '\\n';
+          const jDay = toJalaliDisplay(d);
+          body += NL + '▸ ' + jDay + NL;
+          if (shiftsD.length) {
+            body += '  ⏰ شیفت‌ها (' + shiftsD.length + ')' + NL;
+            for (const l of shiftsD) body += '  ' + l + NL;
           } else {
-            body += '  ⏰ شیفت: —\\n';
+            body += '  ⏰ شیفت: ندارد' + NL;
           }
-          body += '  🔍 بررسی: ✅' + dayAp + ' ❌' + dayRj;
+          body += '  🔍 بررسی: ✅ ' + dayAp + '   ❌ ' + dayRj + NL;
           const chKeys = Object.keys(chMap);
           if (chKeys.length) {
-            body += ' | ';
-            body += chKeys
-              .map(function (ck) {
-                const t = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-                return t + ' ✅' + chMap[ck].ap + ' ❌' + chMap[ck].rj;
-              })
-              .join(' ؛ ');
+            for (const ck of chKeys) {
+              const t = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+              body +=
+                '     «' +
+                t +
+                '»  ✅' +
+                chMap[ck].ap +
+                '  ❌' +
+                chMap[ck].rj +
+                NL;
+            }
           }
-          body += '\\n';
         }
 
-        // ارسال در چند تکه اگر لازم
         let cur = body;
         while (cur.length > 3500) {
-          let cut = cur.lastIndexOf('\\n', 3500);
+          let cut = cur.lastIndexOf(NL, 3500);
           if (cut < 2000) cut = 3500;
           await api.sendMessage({ chat_id: chatId, text: cur.slice(0, cut) });
-          cur = cur.slice(cut).replace(/^\\n+/, '');
+          cur = cur.slice(cut);
+          while (cur.charAt(0) === NL) cur = cur.slice(1);
         }
         await api.sendMessage({
           chat_id: chatId,
@@ -3255,11 +3287,12 @@ try {
       return;
     }
 
-    // —— حذف دسته‌جمعی ادمین از همه کانال‌ها ——
+    // —— حذف دسته‌جمعی ادمین (مقامداران؛ اختیاری محدود به کانال) ——
     if (owner && state?.kind === 'bulk_del_admin' && text) {
       try {
+        const scopeCh = state.channelKey || null;
         const lines = String(text)
-          .split(/[\\n,;]+/)
+          .split(/[\n,;]+/)
           .map(function (s) {
             return s.trim();
           })
@@ -3286,7 +3319,22 @@ try {
             results.push({ input: line, id: tid, ok: false, detail: 'مالک قابل حذف نیست' });
             continue;
           }
-          const chans = await adminChannels(tid);
+          let chans;
+          if (scopeCh) {
+            const allCh = await adminChannels(tid);
+            if (allCh.indexOf(scopeCh) < 0) {
+              results.push({
+                input: line,
+                id: tid,
+                ok: false,
+                detail: 'در این کانال ادمین نیست',
+              });
+              continue;
+            }
+            chans = [scopeCh];
+          } else {
+            chans = await adminChannels(tid);
+          }
           if (!chans.length) {
             results.push({
               input: line,
@@ -3317,7 +3365,16 @@ try {
             detail: removed.join('، ') || '—',
           });
         }
-        let body = '🗑 نتیجه حذف دسته‌جمعی ادمین\\n\\n';
+        const NL = String.fromCharCode(10);
+        let body = '🗑 نتیجه حذف دسته‌جمعی' + NL;
+        if (scopeCh) {
+          body +=
+            '📢 کانال: «' +
+            ((DEFAULT_CHANNELS[scopeCh] && DEFAULT_CHANNELS[scopeCh].title) || scopeCh) +
+            '»' +
+            NL +
+            NL;
+        }
         for (const r of results) {
           if (r.ok) {
             body +=
@@ -3325,20 +3382,22 @@ try {
               (r.name || r.id) +
               ' | ' +
               r.id +
-              '\\n   کانال‌ها: ' +
+              NL +
+              '   حذف از: ' +
               r.detail +
-              '\\n';
+              NL;
           } else {
             body +=
               '❌ ' +
               r.input +
               (r.id ? ' → ' + r.id : '') +
-              '\\n   ' +
+              NL +
+              '   ' +
               r.detail +
-              '\\n';
+              NL;
           }
         }
-        body += '\\nمی‌توانید لیست بعدی را بفرستید یا ◀️ بازگشت.';
+        body += NL + 'لیست بعدی را بفرستید یا ◀️ بازگشت.';
         await api.sendMessage({
           chat_id: chatId,
           text: body.slice(0, 4000),
@@ -3349,26 +3408,12 @@ try {
         await api.sendMessage({
           chat_id: chatId,
           text: '⚠️ خطا: ' + String(e.message || e).slice(0, 200),
-          reply_markup: sanitizeMarkup(searchKeyboard()),
+          reply_markup: ownerKeyboard(),
         });
       }
       return;
     }
 
-if (owner && text === '📣 اطلاعیه') {
-      try {
-        await setState(userId, 'announce_wait_text');
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'متن اطلاعیه را بفرستید:',
-          reply_markup: sanitizeMarkup(backKeyboard()),
-        });
-      } catch (e) {
-        console.error('announce', e);
-        await api.sendMessage({ chat_id: chatId, text: 'خطا: ' + (e.message || e), reply_markup: await roleKb(userId) });
-      }
-      return;
-    }
 
     if (owner && state?.kind === 'announce_wait_text' && text) {
       // حفظ entities (لینک متنی، بولد، …) برای ارسال یکسان به کاربران

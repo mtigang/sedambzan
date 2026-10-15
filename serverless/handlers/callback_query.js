@@ -1348,6 +1348,30 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
       return;
     }
 
+    if (data.startsWith('abulk:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const channelKey = data.split(':')[1];
+      await setState(userId, 'bulk_del_admin', { channelKey: channelKey || null });
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      const title =
+        (DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey || 'همه';
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '🗑 حذف دسته‌جمعی از «' +
+          title +
+          '»\n\nآیدی عددی یا @username را بفرستید (هر خط یک مورد):\n\nمثال:\n8607359838\n8086042544\n\nبرای انصراف ◀️ بازگشت.',
+        reply_markup: sanitizeMarkup({
+          keyboard: [[{ text: '◀️ بازگشت' }]],
+          resize_keyboard: true,
+        }),
+      });
+      return;
+    }
+
     if (data.startsWith('async:')) {
       await api.answerCallbackQuery({
         callback_query_id: cq.id,
