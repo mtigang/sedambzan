@@ -279,15 +279,31 @@ export function disableModesInline(opts) {
   });
 }
 
-/** گیت عضویت اجباری برای کاربر عادی */
+/** گیت عضویت اجباری — یک دکمه لینک برای هر کانال/گروه */
 export function forceJoinInline(camp) {
   const rows = [];
-  let link = camp && camp.inviteLink ? String(camp.inviteLink) : '';
-  if (!link && camp && camp.username) {
-    link = 'https://t.me/' + String(camp.username).replace(/^@/, '');
+  let list = [];
+  if (camp && Array.isArray(camp.channels) && camp.channels.length) {
+    list = camp.channels;
+  } else if (camp && camp.chatId) {
+    list = [camp];
   }
-  if (link) {
-    rows.push([{ text: '📢 عضویت در کانال', url: link }]);
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i] || {};
+    let link = c.inviteLink ? String(c.inviteLink) : '';
+    if (!link && c.username) {
+      link = 'https://t.me/' + String(c.username).replace(/^@/, '');
+    }
+    if (!link && camp && !c.chatId && camp.inviteLink) link = String(camp.inviteLink);
+    if (!link) continue;
+    const label =
+      list.length === 1
+        ? '📢 عضویت در کانال'
+        : '📢 ' + (c.title || c.username || 'کانال ' + (i + 1));
+    // متن دکمه url حداکثر محدودیت تلگرام — کوتاه نگه دار
+    const short =
+      label.length > 40 ? label.slice(0, 37) + '…' : label;
+    rows.push([{ text: short, url: link }]);
   }
   rows.push([{ text: '✅ تأیید عضویت', callback_data: 'fj_check', style: 'success' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
