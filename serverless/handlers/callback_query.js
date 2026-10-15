@@ -1652,20 +1652,21 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
       }
       if (data === 'fj_new') {
         await api.answerCallbackQuery({ callback_query_id: cq.id });
-        await setState(userId, 'force_join_link');
+        await setState(userId, 'force_join_link', { channels: [] });
         try {
           await api.editMessageText({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
             text:
-              '🔗 لینک کانال را بفرستید (عمومی یا خصوصی).\n\n' +
-              'قبلش ربات را در کانال ادمین کنید و دسترسی مشاهدهٔ اعضا بدهید.\n' +
-              'مثال: https://t.me/name یا @name',
+              '🔗 لینک کانال یا گروه را بفرستید.\n' +
+              'می‌توانید چند لینک پشت‌سرهم بفرستید.\n' +
+              'وقتی تمام شد، عدد هدف را بفرستید (مثلاً 100).\n\n' +
+              'ربات باید در هر مورد ادمین باشد (مشاهده اعضا).',
           });
         } catch (_e) {}
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: 'لینک کانال را همین‌جا بفرستید:',
+          text: 'لینک اول را بفرستید:',
           reply_markup: sanitizeMarkup({ keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true }),
         });
         return;
