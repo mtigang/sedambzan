@@ -23,6 +23,8 @@ import {
   recentUserMsgsInline,
   channelPickFlagsInline,
   disableModesInline,
+  forceJoinInline,
+  forceJoinOwnerInline,
   searchKeyboard,
   channelAdminPickKeyboard,
   shiftChannelPickKeyboard,
@@ -89,6 +91,12 @@ import {
   setFridayMode,
   isQueueBusyMode,
   QUEUE_BUSY_TEXT,
+  forceJoinNeedGate,
+  getForceJoinCampaign,
+  getForceJoinHistory,
+  saveForceJoinCampaign,
+  parseChannelLinkInput,
+  inspectChannelForForceJoin,
   FRIDAY_MODE_TEXT,
   setChannelEnabled,
   setChannelAdMode,
@@ -356,6 +364,35 @@ export default async function (message) {
     try {
       state = await getState(userId);
     } catch (_) {}
+
+    // —— عضویت اجباری: فقط کاربر عادی؛ هر دکمه/استارت ——
+    // مالک در حال تنظیم کمپین (state) از گیت رد شود
+    const ownerFjSetup =
+      owner &&
+      state &&
+      (state.kind === 'force_join_link' || state.kind === 'force_join_count');
+    if (!ownerFjSetup) {
+      try {
+        const campGate = await forceJoinNeedGate(userId);
+        if (campGate) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text:
+              '🔐 برای استفاده از ربات و ارسال پیام، در کانال زیر عضو شوید:\n\n' +
+              '📢 «' +
+              (campGate.title || 'کانال') +
+              '»\n\n' +
+              '۱) روی دکمه عضویت بزنید\n' +
+              '۲) عضو شوید\n' +
+              '۳) «✅ تأیید عضویت» را بزنید',
+            reply_markup: sanitizeMarkup(forceJoinInline(campGate)),
+          });
+          return;
+        }
+      } catch (e) {
+        console.error('forceJoin gate', e);
+      }
+    }
 
     if (text === '/start' || text.startsWith('/start ')) {
       try {
@@ -3019,6 +3056,166 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
       return;
     }
 
+
+    if (owner && text === '🔐 عضویت اجباری') {
+      try {
+        const camp = await getForceJoinCampaign();
+        const hist = await getForceJoinHistory();
+        let t = '🔐 عضویت اجباری\n\n';
+        if (camp && camp.active) {
+          t +=
+            '🟢 کمپین فعال:\n' +
+            '• کانال: «' +
+            (camp.title || '') +
+            '»\n' +
+            '• هدف: ' +
+            camp.targetCount +
+            ' نفر\n' +
+            '• تأییدشده: ' +
+            (camp.confirmedCount || 0) +
+            '\n' +
+            '• اعضای کانال در شروع: ' +
+            (camp.startMembers || '—') +
+            '\n\n';
+        } else {
+          t += 'الان کمپین فعالی نیست.\n\n';
+        }
+        if (hist.length) {
+          t += '📋 کمپین‌های قبلی (' + hist.length + '):\n';
+          for (let i = 0; i < Math.min(hist.length, 10); i++) {
+            const h = hist[i];
+            t +=
+              '• «' +
+              (h.title || '') +
+              '» — هدف ' +
+              (h.targetCount || 0) +
+              ' / تأیید ' +
+              (h.confirmedCount || 0) +
+              '\n';
+          }
+        } else {
+          t += 'هنوز کمپین قبلی ثبت نشده.';
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text: t,
+          reply_markup: sanitizeMarkup(forceJoinOwnerInline(!!(camp && camp.active))),
+        });
+      } catch (e) {
+        console.error('force join menu', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در پنل عضویت اجباری',
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+        });
+      }
+      return;
+    }
+
+    if (owner && state?.kind === 'force_join_link' && text) {
+      try {
+        const parsed = parseChannelLinkInput(text);
+        if (!parsed) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'لینک نامعتبر است. مثال:\nhttps://t.me/channelname\nیا @channelname\nیا آیدی عددی -100…',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        const info = await inspectChannelForForceJoin(parsed);
+        if (!info.ok) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '❌ ' + info.error,
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        await setState(userId, 'force_join_count', {
+          chatId: info.chatId,
+          title: info.title,
+          username: info.username,
+          inviteLink: info.inviteLink,
+          startMembers: info.memberCount,
+        });
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '✅ کانال آماده است.\n\n' +
+            '📢 «' +
+            info.title +
+            '»\n' +
+            'الان ' +
+            info.memberCount +
+            ' عضو دارد.\n\n' +
+            'چند عضو از طریق ربات می‌خواهید؟\n' +
+            '(فقط عدد بفرستید، مثلاً 100)',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('force_join_link', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا: ' + ((e && (e.message || e.description)) || e),
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      }
+      return;
+    }
+
+    if (owner && state?.kind === 'force_join_count' && text) {
+      try {
+        const n = parseInt(String(text).replace(/[^\d]/g, ''), 10);
+        if (!n || n < 1 || n > 100000) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'یک عدد معتبر بین ۱ تا ۱۰۰۰۰۰ بفرستید.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        const d = state.data || {};
+        const camp = {
+          id: String(Date.now()),
+          active: true,
+          chatId: d.chatId,
+          title: d.title,
+          username: d.username || null,
+          inviteLink: d.inviteLink || null,
+          targetCount: n,
+          confirmedCount: 0,
+          startMembers: d.startMembers || 0,
+          startedAt: new Date().toISOString(),
+        };
+        await saveForceJoinCampaign(camp);
+        await clearState(userId);
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '🔐 عضویت اجباری شروع شد.\n\n' +
+            'کانال: «' +
+            camp.title +
+            '»\n' +
+            'هدف: ' +
+            n +
+            ' تأیید عضویت از طریق ربات\n' +
+            'اعضای فعلی کانال: ' +
+            camp.startMembers +
+            '\n\n' +
+            'تا تکمیل سهمیه، کاربران عادی فقط با عضویت و تأیید می‌توانند از ربات استفاده کنند.',
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+        });
+      } catch (e) {
+        console.error('force_join_count', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در شروع کمپین',
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+        });
+      }
+      return;
+    }
 
     if (owner && text === '🛑 انواع غیرفعال‌سازی') {
       try {
