@@ -206,6 +206,247 @@ export const QUEUE_BUSY_TEXT =
   '⏳ حجم پیام‌های در انتظار زیاد است.\n\n' +
   'لطفاً کمی صبر کنید و بعداً دوباره امتحان کنید.';
 
+// ——— عضویت اجباری ———
+const FJ_ACTIVE_KEY = 'force_join_active';
+const FJ_HISTORY_KEY = 'force_join_history';
+
+export async function getForceJoinCampaign() {
+  try {
+    const raw = await settingGet(FJ_ACTIVE_KEY, '');
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (o && o.active) return o;
+    return null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+export async function saveForceJoinCampaign(camp) {
+  if (!camp) {
+    await settingSet(FJ_ACTIVE_KEY, '');
+    return;
+  }
+  await settingSet(FJ_ACTIVE_KEY, JSON.stringify(camp));
+}
+
+export async function getForceJoinHistory() {
+  try {
+    const raw = await settingGet(FJ_HISTORY_KEY, '[]');
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch (_e) {
+    return [];
+  }
+}
+
+export async function pushForceJoinHistory(entry) {
+  const arr = await getForceJoinHistory();
+  arr.unshift(entry);
+  if (arr.length > 30) arr.length = 30;
+  await settingSet(FJ_HISTORY_KEY, JSON.stringify(arr));
+}
+
+export async function isForceJoinUserOk(campaignId, userId) {
+  return (await settingGet('fj_ok:' + campaignId + ':' + userId, '')) === '1';
+}
+
+export async function markForceJoinUserOk(campaignId, userId) {
+  await settingSet('fj_ok:' + campaignId + ':' + userId, '1');
+}
+
+/** مالک / ساب‌لیدر / ادمین کانال — معاف از عضویت اجباری */
+export async function isForceJoinExempt(userId) {
+  if (isOwner(userId)) return true;
+  try {
+    const r = await getRole(userId);
+    if (r === 'owner' || r === 'admin' || r === 'subleader') return true;
+  } catch (_e) {}
+  try {
+    const rows =
+      (await db.select().from(channelAdmins).where(eq(channelAdmins.userId, Number(userId))).all()) ||
+      [];
+    if (rows.length) return true;
+  } catch (_e) {}
+  return false;
+}
+
+/**
+ * پارس لینک کانال: @name | t.me/name | t.me/+hash | -100id
+ * برای لینک خصوصی باید ربات از قبل عضو باشد.
+ */
+export function parseChannelLinkInput(input) {
+  const s = String(input || '').trim();
+  if (!s) return null;
+  if (/^-?\d+$/.test(s)) return { chatId: Number(s), username: null, inviteLink: null };
+  let m = s.match(/(?:https?:\/\/)?t\.me\/\+([A-Za-z0-9_-]+)/i);
+  if (m) return { chatId: null, username: null, inviteLink: 'https://t.me/+' + m[1] };
+  m = s.match(/(?:https?:\/\/)?t\.me\/joinchat\/([A-Za-z0-9_-]+)/i);
+  if (m) return { chatId: null, username: null, inviteLink: 'https://t.me/joinchat/' + m[1] };
+  m = s.match(/(?:https?:\/\/)?t\.me\/([A-Za-z0-9_]+)/i);
+  if (m && m[1] && m[1].toLowerCase() !== 'joinchat') {
+    return { chatId: null, username: m[1], inviteLink: 'https://t.me/' + m[1] };
+  }
+  if (s.startsWith('@')) return { chatId: null, username: s.slice(1), inviteLink: 'https://t.me/' + s.slice(1) };
+  if (/^[A-Za-z0-9_]+$/.test(s)) return { chatId: null, username: s, inviteLink: 'https://t.me/' + s };
+  return null;
+}
+
+/** بررسی عضویت و ادمین بودن ربات در کانال + تعداد اعضا */
+export async function inspectChannelForForceJoin(parsed) {
+  let chatId = parsed.chatId;
+  let title = '';
+  let username = parsed.username || null;
+  let inviteLink = parsed.inviteLink || null;
+  try {
+    let chat = null;
+    if (chatId) {
+      chat = await api.getChat({ chat_id: chatId });
+    } else if (username) {
+      chat = await api.getChat({ chat_id: '@' + username });
+    } else if (inviteLink) {
+      try {
+        chat = await api.getChat({ chat_id: inviteLink });
+      } catch (_e) {
+        return {
+          ok: false,
+          error:
+            'لینک خصوصی است یا ربات داخل کانال نیست.\nربات را به کانال اضافه و ادمین کنید (دسترسی مشاهدهٔ اعضا)، سپس دوباره لینک یا @یوزرنیم کانال را بفرستید.',
+        };
+      }
+    }
+    if (!chat || !chat.id) {
+      return {
+        ok: false,
+        error:
+          'کانال پیدا نشد.\nربات را به کانال اضافه و ادمین کنید، بعد لینک یا @یوزرنیم را بفرستید.',
+      };
+    }
+    chatId = chat.id;
+    title = chat.title || chat.username || String(chatId);
+    if (chat.username) {
+      username = chat.username;
+      inviteLink = 'https://t.me/' + chat.username;
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      error:
+        'ربات به این کانال دسترسی ندارد.\nربات را اضافه کنید، ادمین کنید و فقط دسترسی «مشاهده اعضا» بدهید.\n\n' +
+        ((e && (e.message || e.description)) || ''),
+    };
+  }
+
+  try {
+    const me = await api.getMe();
+    const mem = await api.getChatMember({ chat_id: chatId, user_id: me.id });
+    const st = String(mem && mem.status ? mem.status : '');
+    if (st !== 'administrator' && st !== 'creator') {
+      return {
+        ok: false,
+        error:
+          'ربات داخل کانال عضو است ولی ادمین نیست.\nربات را ادمین کنید و دسترسی مشاهدهٔ اعضا را بدهید.',
+      };
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      error:
+        'ربات داخل کانال عضو نیست یا دسترسی ندارد.\nربات را به کانال اضافه و ادمین کنید (مشاهده اعضا).\n\n' +
+        ((e && (e.message || e.description)) || ''),
+    };
+  }
+
+  let memberCount = 0;
+  try {
+    memberCount = await api.getChatMemberCount({ chat_id: chatId });
+  } catch (e) {
+    return {
+      ok: false,
+      error:
+        'نتوانستم تعداد اعضا را بخوانم. دسترسی مشاهدهٔ اعضا را برای ربات فعال کنید.\n\n' +
+        ((e && (e.message || e.description)) || ''),
+    };
+  }
+
+  return {
+    ok: true,
+    chatId,
+    title,
+    username,
+    inviteLink: inviteLink || (username ? 'https://t.me/' + username : null),
+    memberCount: Number(memberCount) || 0,
+  };
+}
+
+export async function isUserMemberOfChat(chatId, userId) {
+  try {
+    const mem = await api.getChatMember({ chat_id: chatId, user_id: userId });
+    const st = String(mem && mem.status ? mem.status : '');
+    return st === 'member' || st === 'administrator' || st === 'creator' || st === 'restricted';
+  } catch (_e) {
+    return false;
+  }
+}
+
+export async function forceJoinNeedGate(userId) {
+  if (await isForceJoinExempt(userId)) return null;
+  const camp = await getForceJoinCampaign();
+  if (!camp || !camp.active) return null;
+  if (await isForceJoinUserOk(camp.id, userId)) return null;
+  return camp;
+}
+
+export async function confirmForceJoinUser(userId) {
+  const camp = await getForceJoinCampaign();
+  if (!camp || !camp.active) {
+    return { ok: true, done: true, message: 'عضویت اجباری فعال نیست.' };
+  }
+  if (await isForceJoinUserOk(camp.id, userId)) {
+    return { ok: true, already: true, camp };
+  }
+  const member = await isUserMemberOfChat(camp.chatId, userId);
+  if (!member) {
+    return {
+      ok: false,
+      message: 'هنوز در کانال عضو نیستید. اول عضو شوید، بعد «تأیید عضویت» را بزنید.',
+    };
+  }
+  await markForceJoinUserOk(camp.id, userId);
+  camp.confirmedCount = (Number(camp.confirmedCount) || 0) + 1;
+  if (camp.confirmedCount >= Number(camp.targetCount)) {
+    camp.active = false;
+    camp.endedAt = new Date().toISOString();
+    await pushForceJoinHistory({
+      id: camp.id,
+      title: camp.title,
+      chatId: camp.chatId,
+      targetCount: camp.targetCount,
+      confirmedCount: camp.confirmedCount,
+      startMembers: camp.startMembers,
+      endedAt: camp.endedAt,
+    });
+    await saveForceJoinCampaign(null);
+    return {
+      ok: true,
+      finished: true,
+      camp,
+      message: 'عضویت تأیید شد. سهمیهٔ عضویت اجباری تکمیل شد و دیگر اجباری نیست.',
+    };
+  }
+  await saveForceJoinCampaign(camp);
+  return {
+    ok: true,
+    camp,
+    message:
+      'عضویت تأیید شد ✅\n(' +
+      camp.confirmedCount +
+      ' از ' +
+      camp.targetCount +
+      ')',
+  };
+}
+
 /** نزدیک‌ترین شیفت فعال بعدی برای کانال (بعد از الان) */
 export async function nextShiftAfterNow(channelKey) {
   try {
