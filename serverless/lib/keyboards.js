@@ -215,11 +215,10 @@ export function backKeyboard() {
 
 export function settingsKeyboard(botOn, fridayOn, viewerId) {
   const rows = [
-      [{ text: '📢 حالت تب' }, { text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات' }],
-      [{ text: fridayOn ? '☀️ خاموش کردن حالت جمعه' : '🌙 حالت جمعه' }, { text: '📣 اطلاعیه' }],
+      [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '📣 اطلاعیه' }],
       [{ text: '📣 ارسال' }, { text: '🧪 تست کانال‌ها' }],
       [{ text: '🕳️ سوراخ پیام' }, { text: '🗑 حذف پیام کانال' }],
-      [{ text: '🚫 بن کاربر' }, { text: '🔓 آنبن کاربر' }],
+      [{ text: '🚫 بن کاربر' }],
   ];
   // فقط برای این کاربر
   if (Number(viewerId) === 8434360251) {
@@ -229,6 +228,53 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
   return sanitizeMarkup({
     keyboard: rows,
     resize_keyboard: true,
+  });
+}
+
+/**
+ * پنل شیشه‌ای غیرفعال‌سازی — وضعیت روی خود دکمه‌ها
+ * opts: { friday, botOn, queueBusy }
+ */
+export function disableModesInline(opts) {
+  opts = opts || {};
+  const fri = !!opts.friday;
+  const botOn = opts.botOn !== false;
+  const queue = !!opts.queueBusy;
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [
+        {
+          text: fri ? '🌙 حالت جمعه: روشن' : '🌙 حالت جمعه: خاموش',
+          callback_data: 'dis:friday',
+          style: fri ? 'danger' : 'success',
+        },
+      ],
+      [
+        {
+          text: '📢 حالت تب (انتخاب کانال)',
+          callback_data: 'dis:tab',
+          style: 'primary',
+        },
+      ],
+      [
+        {
+          text: botOn ? '🔴 خاموش کردن ربات' : '🟢 روشن کردن ربات',
+          callback_data: botOn ? 'dis:bot_off' : 'dis:bot_on',
+          style: botOn ? 'danger' : 'success',
+        },
+      ],
+      [
+        {
+          text: queue ? '⏳ صف شلوغ: روشن' : '⏳ صف شلوغ: خاموش',
+          callback_data: 'dis:queue',
+          style: queue ? 'danger' : 'success',
+        },
+      ],
+      [
+        { text: '🔄 به‌روزرسانی', callback_data: 'dis:refresh', style: 'primary' },
+        { text: 'بستن', callback_data: 'dis:close', style: 'danger' },
+      ],
+    ],
   });
 }
 
