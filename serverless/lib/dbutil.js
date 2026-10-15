@@ -193,6 +193,18 @@ export const FRIDAY_MODE_TEXT =
   'تکست و این حرفا کنسله.\n\n' +
   'شنبه برگرد، با انرژی بیشتر منتظرتیم 🌸';
 
+/** صف شلوغ — کاربر پیام نمی‌فرستد؛ ادمین تأیید/رد می‌کند */
+export async function isQueueBusyMode() {
+  return (await settingGet('queue_busy_mode', '0')) === '1';
+}
+
+export async function setQueueBusyMode(on) {
+  await settingSet('queue_busy_mode', on ? '1' : '0');
+}
+
+export const QUEUE_BUSY_TEXT =
+  '⏳ حجم پیام‌های در انتظار زیاد است.\n\n' +
+  'لطفاً کمی صبر کنید و بعداً دوباره امتحان کنید.';
 
 /** نزدیک‌ترین شیفت فعال بعدی برای کانال (بعد از الان) */
 export async function nextShiftAfterNow(channelKey) {
