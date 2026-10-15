@@ -25,6 +25,8 @@ import {
   disableModesInline,
   forceJoinInline,
   forceJoinOwnerInline,
+  staffPickInline,
+  dataAnalysisChannelInline,
   searchKeyboard,
   channelAdminPickKeyboard,
   shiftChannelPickKeyboard,
@@ -1164,7 +1166,7 @@ export default async function (message) {
     // ========== PENDING ==========
 
     if ((role === 'admin' || role === 'subleader' || owner) && state?.kind === 'reject_custom' && text) {
-      const reason = String(text).trim().slice(0, 22);
+      const reason = String(text).trim().slice(0, 30);
       const msgId = Number(state.msgId);
       await clearState(userId);
       if (!msgId) {
@@ -1782,6 +1784,15 @@ try {
       return;
     }
 
+    if (owner && text === '👑 مقامداران') {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '👑 مقامداران\nیکی را انتخاب کنید:',
+        reply_markup: sanitizeMarkup(staffPickInline()),
+      });
+      return;
+    }
+
     if (owner && text === '👥 ادمین‌ها') {
       await api.sendMessage({
         chat_id: chatId,
@@ -1791,7 +1802,7 @@ try {
             [{ text: 'ادمین‌های صدام بزن' }],
             [{ text: 'ادمین‌های این کاربر' }],
             [{ text: 'ادمین‌های تو زندگی بعدی' }],
-                        [{ text: '◀️ بازگشت' }],
+            [{ text: '◀️ بازگشت' }],
           ],
           resize_keyboard: true,
         },
@@ -2442,13 +2453,6 @@ try {
         await api.sendMessage({
           chat_id: chatId,
           text: text,
-          reply_markup: sanitizeMarkup({
-            inline_keyboard: [
-              [{ text: '👮 آمار ادمین‌ها (امروز)', callback_data: 'admin_stats:0', style: 'primary' }],
-              [{ text: '📅 دیروز', callback_data: 'admin_stats:1', style: 'primary' }],
-              [{ text: '📅 ۲ روز پیش', callback_data: 'admin_stats:2', style: 'primary' }],
-            ],
-          }),
         });
       } catch (e) {
         console.error('stats', e);
@@ -2458,6 +2462,15 @@ try {
           reply_markup: ownerKeyboard(),
         });
       }
+      return;
+    }
+
+    if (owner && text === '📈 تحلیل داده') {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '📈 تحلیل داده\nکانال را انتخاب کنید:',
+        reply_markup: sanitizeMarkup(dataAnalysisChannelInline()),
+      });
       return;
     }
 
