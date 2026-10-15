@@ -2134,11 +2134,7 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
     try {
       const ck = String((row.channelKey ?? row.channel_key) || '');
       const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-      let who = String(row.userId || '');
-      try {
-        const sender = await getUser(row.userId);
-        who = displayName(sender, row.userId);
-      } catch (_e) {}
+      // ادمین/ساب‌لیدر نباید مشخصات فرستنده را ببینند
       await api.sendMessage({
         chat_id: chatId,
         text:
@@ -2146,8 +2142,6 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
           row.id +
           ' | ' +
           title +
-          ' | کاربر: ' +
-          who +
           '\n\n' +
           String(row.content || '').slice(0, 3800),
         // فقط زیر آخرین پیام Batch دکمه «Batch بعدی» باشد
