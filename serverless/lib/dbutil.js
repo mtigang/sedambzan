@@ -431,19 +431,14 @@ export async function confirmForceJoinUser(userId) {
       ok: true,
       finished: true,
       camp,
-      message: 'عضویت تأیید شد. سهمیهٔ عضویت اجباری تکمیل شد و دیگر اجباری نیست.',
+      message: '✅ عضویت تأیید شد.',
     };
   }
   await saveForceJoinCampaign(camp);
   return {
     ok: true,
     camp,
-    message:
-      'عضویت تأیید شد ✅\n(' +
-      camp.confirmedCount +
-      ' از ' +
-      camp.targetCount +
-      ')',
+    message: '✅ عضویت تأیید شد.',
   };
 }
 
