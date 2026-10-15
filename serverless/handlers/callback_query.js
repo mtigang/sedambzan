@@ -528,16 +528,25 @@ export default async function (cq) {
 
     if (data.startsWith('approve:')) {
       const id = Number(data.split(':')[1]);
-      // پاسخ فوری به تلگرام تا دکمه حس کندگی ندهد
-      try {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '…' });
-      } catch (_e) {}
+      let answered = false;
+      async function ans(text, alert) {
+        if (answered) return;
+        answered = true;
+        try {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: text || '…',
+            show_alert: !!alert,
+          });
+        } catch (_e) {}
+      }
       const rows0 = await db.select().from(messages).where(eq(messages.id, id)).all();
       const pendingRow = rows0 && rows0[0];
-      if (!pendingRow || String(pendingRow.status) !== 'pending') {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'قبلاً بررسی شده', show_alert: true });
+      if (!pendingRow || (String(pendingRow.status) !== 'pending' && String(pendingRow.status) !== 'publishing')) {
+        await ans('قبلاً بررسی شده', true);
         try {
-          await dropMessageFromReviewBatch(userId, id).catch(function(){}); await dropMessageFromAllReviewBatches(id);
+          await dropMessageFromReviewBatch(userId, id).catch(function () {});
+          await dropMessageFromAllReviewBatches(id);
         } catch (_e) {}
         try {
           await api.editMessageReplyMarkup({
@@ -550,43 +559,58 @@ export default async function (cq) {
         await editReviewResult(
           cq,
           'ℹ️ این پیام قبلاً بررسی شده #' + id,
-          fin && fin.complete ? fin : { inBatch: true, complete: true, hasMore: !!(fin && fin.hasMore), batch: fin && fin.batch }
+          fin && fin.complete
+            ? fin
+            : { inBatch: true, complete: true, hasMore: !!(fin && fin.hasMore), batch: fin && fin.batch }
         );
         return;
       }
       try {
         const ckAd = String((pendingRow.channelKey ?? pendingRow.channel_key) || '');
         if (ckAd && (await isChannelAdMode(ckAd))) {
-          await api.answerCallbackQuery({
-            callback_query_id: cq.id,
-            text: '📢 کانال در حالت تب است؛ تأیید و انتشار فعلاً ممکن نیست.',
-            show_alert: true,
-          });
+          await ans('📢 کانال در حالت تب است؛ تأیید ممکن نیست.', true);
           return;
         }
       } catch (_e) {}
-      const acc = await checkReviewAccess(userId, pendingRow);
-      if (!acc.ok) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: acc.text, show_alert: true });
+
+      const wasPublishing = String(pendingRow.status) === 'publishing';
+      if (!wasPublishing) {
+        const acc = await checkReviewAccess(userId, pendingRow);
+        if (!acc.ok) {
+          await ans(acc.text || 'دسترسی ندارید', true);
+          return;
+        }
+      }
+      await ans('⏳ در حال انتشار…', false);
+
+      const ckRaw = String((pendingRow.channelKey ?? pendingRow.channel_key) || '');
+      const ckNorm = normalizeChannelKey(ckRaw) || ckRaw;
+      const conf = DEFAULT_CHANNELS[ckNorm] || DEFAULT_CHANNELS[ckRaw];
+      if (!conf || !conf.chatId) {
+        try {
+          await db.update(messages).set({ status: 'pending' }).where(eq(messages.id, id)).run();
+        } catch (_e) {}
+        try {
+          await api.sendMessage({ chat_id: userId, text: 'کانال پیکربندی نشده #' + id });
+        } catch (_e2) {}
         return;
       }
-      // پاسخ سریع به تلگرام تا دکمه گیر نکند
-      try {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳ در حال انتشار…' });
-      } catch (_e) {}
+      pendingRow.channelKey = conf.key || ckNorm;
 
-      // ۱) رزرو اتمیک pending → publishing
-      try {
-        await db
-          .update(messages)
-          .set({ status: 'publishing' })
-          .where(and(eq(messages.id, id), eq(messages.status, 'pending')))
-          .run();
-      } catch (e) {
-        console.error('reserve', e);
-      }
-      // فقط status — سبک و ضد انتشار دوبل
-      {
+      let link = null;
+      let mid = null;
+
+      // اگر قبلاً publishing مانده و پست شده ممکن است — دوباره در کانال نفرست
+      if (!wasPublishing) {
+        try {
+          await db
+            .update(messages)
+            .set({ status: 'publishing' })
+            .where(and(eq(messages.id, id), eq(messages.status, 'pending')))
+            .run();
+        } catch (e) {
+          console.error('reserve', e);
+        }
         const check =
           (await db
             .select({ status: messages.status })
@@ -597,67 +621,50 @@ export default async function (cq) {
           try {
             await api.sendMessage({
               chat_id: userId,
-              text: 'این پیام توسط شخص دیگری در حال بررسی است.',
+              text: 'این پیام توسط شخص دیگری در حال بررسی است یا دوباره امتحان کنید.',
             });
           } catch (_e) {}
           return;
         }
         pendingRow.status = 'publishing';
-      }
-      const conf = DEFAULT_CHANNELS[pendingRow.channelKey];
-      if (!conf || !conf.chatId) {
-        await db.update(messages).set({ status: 'pending' }).where(eq(messages.id, id)).run();
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'کانال پیکربندی نشده',
-          show_alert: true,
-        });
-        return;
-      }
-      let link = null;
-      let mid = null;
-      try {
-        const sent = await api.sendMessage({
-          chat_id: conf.chatId,
-          text: toBoldHtml(pendingRow.content),
-          parse_mode: 'HTML',
-        });
-        mid = sent && sent.message_id;
-        if (!mid) throw new Error('message_id خالی');
-        link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
-        // resolveChannelMessageLink حذف شد برای سرعت (یوزرنیم کانال کافی است)
-        settingSet('chmsg:' + pendingRow.channelKey + ':' + mid, String(id)).catch(function () {});
-      } catch (e) {
-        console.error('publish first', e);
         try {
-          await db.update(messages).set({ status: 'pending' }).where(eq(messages.id, id)).run();
-        } catch (_e) {}
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'ارسال به کانال ناموفق — تأیید نشد',
-          show_alert: true,
-        });
+          const sent = await api.sendMessage({
+            chat_id: conf.chatId,
+            text: toBoldHtml(pendingRow.content),
+            parse_mode: 'HTML',
+          });
+          mid = sent && sent.message_id;
+          if (!mid) throw new Error('message_id خالی');
+          link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
+          settingSet('chmsg:' + pendingRow.channelKey + ':' + mid, String(id)).catch(function () {});
+        } catch (e) {
+          console.error('publish first', e);
+          try {
+            await db.update(messages).set({ status: 'pending' }).where(eq(messages.id, id)).run();
+          } catch (_e) {}
+          try {
+            await api.sendMessage({
+              chat_id: userId,
+              text:
+                '⚠️ پیام #' +
+                id +
+                ' تأیید نشد چون در کانال منتشر نشد.\n' +
+                (e && (e.description || e.message) ? e.description || e.message : String(e)),
+            });
+          } catch (_e) {}
+          return;
+        }
+      }
+
+      // ۲) بعد از انتشار موفق (یا تکمیل publishing قبلی) → وضعیت approved
+      const dec = await decideMessage(userId, id, 'approve');
+      if (!dec.ok) {
         try {
           await api.sendMessage({
             chat_id: userId,
-            text:
-              '⚠️ پیام #' +
-              id +
-              ' تأیید نشد چون در کانال منتشر نشد.\n' +
-              (e && (e.description || e.message) ? e.description || e.message : String(e)),
+            text: 'منتشر شد ولی ثبت وضعیت: ' + (dec.text || 'خطا') + ' — #' + id,
           });
         } catch (_e) {}
-        return;
-      }
-
-      // ۲) بعد از انتشار موفق → وضعیت approved
-      const dec = await decideMessage(userId, id, 'approve');
-      if (!dec.ok) {
-        await api.answerCallbackQuery({
-          callback_query_id: cq.id,
-          text: 'منتشر شد ولی ثبت وضعیت: ' + (dec.text || 'خطا'),
-          show_alert: true,
-        });
         return;
       }
       const row = dec.row || pendingRow;
