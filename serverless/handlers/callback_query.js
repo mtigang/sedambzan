@@ -2849,12 +2849,23 @@ if (data.startsWith('own_shift:')) {
       const scope = data.split(':')[2] || 'all';
       try {
         const report = await buildDataAnalysisReport(scope);
-        let cur = report;
+        // شکستن هوشمند روی خط جدید تا پیام‌ها خوانا بمانند
+        const chunks = [];
+        let cur = String(report || '');
         while (cur.length > 3500) {
-          await api.sendMessage({ chat_id: cq.message.chat.id, text: cur.slice(0, 3500) });
-          cur = cur.slice(3500);
+          let cut = cur.lastIndexOf('\n', 3500);
+          if (cut < 2000) cut = 3500;
+          chunks.push(cur.slice(0, cut));
+          cur = cur.slice(cut).replace(/^\n+/, '');
         }
-        await api.sendMessage({ chat_id: cq.message.chat.id, text: cur });
+        if (cur) chunks.push(cur);
+        for (let i = 0; i < chunks.length; i++) {
+          const prefix = chunks.length > 1 ? '(' + (i + 1) + '/' + chunks.length + ')\n' : '';
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: prefix + chunks[i],
+          });
+        }
       } catch (e) {
         console.error('data analysis', e);
         await api.sendMessage({
