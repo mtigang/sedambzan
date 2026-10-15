@@ -1481,19 +1481,41 @@ export async function hasActiveShift(adminId, channelKey) {
 }
 
 
-/** کانال‌هایی که کاربر حق بررسی دارد: اسکوپ ساب‌لیدر ∪ شیفت‌های فعال */
+/**
+ * کانال‌هایی که کاربر حق بررسی پیام دارد.
+ * اولویت:
+ *  1) فقط کانال‌هایی که همین الان شیفت فعال دارد (حتی اگر ساب‌لیدر کانال دیگری هم باشد)
+ *  2) اگر هیچ شیفت فعالی نداشت و ساب‌لیدر است → فقط کانال اسکوپ خودش
+ * مالک: همه کانال‌ها
+ *
+ * قبلاً اسکوپ ساب‌لیدر همیشه با شیفت‌ها OR می‌شد؛ در نتیجه کسی که
+ * ساب‌لیدر «این کاربر» بود و شیفت «صدام بزن» داشت، پیام هر دو را می‌گرفت.
+ */
 export async function allowedReviewChannels(userId) {
   if (isOwner(userId)) return Object.keys(DEFAULT_CHANNELS || {});
-  const set = {};
-  try {
-    const sl = await getActiveSubLeaderChannel(userId);
-    if (sl) set[String(sl)] = true;
-  } catch (_e) {}
   try {
     const keys = await activeShiftChannelKeys(userId);
-    for (const k of keys || []) if (k) set[String(k)] = true;
+    if (keys && keys.length) {
+      // نرمال‌سازی و یکتا
+      const seen = {};
+      const out = [];
+      for (const k of keys) {
+        const nk = normalizeChannelKey(k) || String(k || '');
+        if (!nk || seen[nk]) continue;
+        seen[nk] = true;
+        out.push(nk);
+      }
+      return out;
+    }
   } catch (_e) {}
-  return Object.keys(set);
+  try {
+    const sl = await getActiveSubLeaderChannel(userId);
+    if (sl) {
+      const nk = normalizeChannelKey(sl) || String(sl);
+      return nk ? [nk] : [];
+    }
+  } catch (_e) {}
+  return [];
 }
 
 export async function canAdminReviewMessage(adminId, channelKey) {
@@ -1770,9 +1792,15 @@ async function selectReviewablePending(adminId) {
     const allowList = await allowedReviewChannels(adminId);
     if (!allowList.length) return [];
     const allowed = {};
-    for (const k of allowList) allowed[String(k)] = true;
+    for (const k of allowList) {
+      const nk = normalizeChannelKey(k) || String(k);
+      if (nk) allowed[nk] = true;
+      allowed[String(k)] = true;
+    }
     filtered = light.filter(function (m) {
-      return !!allowed[msgCh(m)];
+      const ck = msgCh(m);
+      const nk = normalizeChannelKey(ck) || ck;
+      return !!(allowed[ck] || allowed[nk]);
     });
   }
 
@@ -2017,10 +2045,15 @@ export async function createReviewBatch(adminId) {
       if (!owner) {
         const allowed = await allowedReviewChannels(adminId);
         const allowSet = {};
-        for (const k of allowed) allowSet[String(k)] = true;
+        for (const k of allowed) {
+          const nk = normalizeChannelKey(k) || String(k);
+          if (nk) allowSet[nk] = true;
+          allowSet[String(k)] = true;
+        }
         pendingRows = pendingRows.filter(function (r) {
           const ck = String((r.channelKey ?? r.channel_key) || '');
-          return !!allowSet[ck];
+          const nk = normalizeChannelKey(ck) || ck;
+          return !!(allowSet[ck] || allowSet[nk]);
         });
       }
       if (pendingRows.length) {
@@ -2136,13 +2169,17 @@ export async function checkReviewAccess(adminId, row) {
   const ch = String((row.channelKey ?? row.channel_key) || '');
   const allowed = await allowedReviewChannels(adminId);
   if (!allowed.length) {
-    return { ok: false, code: 'shift_ended', text: '❌ شیفت فعالی ندارید و اسکوپ ساب‌لیدر هم نیست.' };
+    return { ok: false, code: 'shift_ended', text: '❌ الان شیفت فعالی ندارید.' };
   }
-  if (!allowed.includes(ch)) {
+  const chN = normalizeChannelKey(ch) || ch;
+  const allowedN = allowed.map(function (k) {
+    return normalizeChannelKey(k) || k;
+  });
+  if (allowedN.indexOf(chN) < 0 && allowed.indexOf(ch) < 0) {
     return {
       ok: false,
       code: 'channel',
-      text: '⛔ این پیام خارج از محدوده شماست (نه کانال ساب‌لیدری‌تان است نه شیفت فعال).',
+      text: '⛔ این پیام مربوط به کانال شیفت فعلی شما نیست.',
     };
   }
   const batch = await getReviewBatch(adminId);
