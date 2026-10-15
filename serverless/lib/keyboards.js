@@ -282,8 +282,12 @@ export function disableModesInline(opts) {
 /** گیت عضویت اجباری برای کاربر عادی */
 export function forceJoinInline(camp) {
   const rows = [];
-  if (camp && camp.inviteLink) {
-    rows.push([{ text: '📢 عضویت در کانال', url: camp.inviteLink }]);
+  let link = camp && camp.inviteLink ? String(camp.inviteLink) : '';
+  if (!link && camp && camp.username) {
+    link = 'https://t.me/' + String(camp.username).replace(/^@/, '');
+  }
+  if (link) {
+    rows.push([{ text: '📢 عضویت در کانال', url: link }]);
   }
   rows.push([{ text: '✅ تأیید عضویت', callback_data: 'fj_check', style: 'success' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
