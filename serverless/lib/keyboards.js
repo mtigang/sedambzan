@@ -494,6 +494,8 @@ export function reviewTakenInline() {
 export function rejectReasonsInline(id) {
   const reasons = [
     'حاوی کلمات ناسزا',
+    'هیت یا بی احترامی',
+    'تکراری',
     'نامفهوم',
     'طولانی',
     'سیاسی',
