@@ -12,6 +12,11 @@ import {
   isBotOn,
   isQueueBusyMode,
   setQueueBusyMode,
+  getForceJoinCampaign,
+  getForceJoinHistory,
+  saveForceJoinCampaign,
+  pushForceJoinHistory,
+  confirmForceJoinUser,
   getActiveSubLeaderChannel,
   removeChannelAdmin,
   listAdminsByChannel,
@@ -72,7 +77,7 @@ import {
   listActiveSubLeaders,
 } from 'lib/subleader';
 import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod, toJalaliDisplay, periodOrd, isWorkHours, normHm } from 'lib/time';
-import { DEFAULT_CHANNELS } from 'lib/config';
+import { DEFAULT_CHANNELS, OWNER_IDS } from 'lib/config';
 import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
 import { DB_EXPORT_OWNER_ID, processDbExportBatch, clearDbExportJob, getDbExportJob } from 'lib/db_export';
 import {
@@ -105,6 +110,11 @@ import {
   postChannelInline,
   disableModesInline,
   channelPickFlagsInline,
+  forceJoinInline,
+  forceJoinOwnerInline,
+  ownerKeyboard,
+  userKeyboard,
+  adminKeyboard,
   sendDestInline,
   confirmPostInline,
   activeShiftChannelsInline,
@@ -1532,6 +1542,135 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
         });
       }
       return;
+    }
+
+    // —— عضویت اجباری
+    if (data === 'fj_check') {
+      try {
+        const res = await confirmForceJoinUser(userId);
+        if (!res.ok) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: res.message || 'عضو نیستید',
+            show_alert: true,
+          });
+          return;
+        }
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: res.finished ? 'سهمیه تکمیل شد' : 'تأیید شد',
+        });
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: '✅ ' + (res.message || 'عضویت تأیید شد.'),
+          });
+        } catch (_e) {}
+        let replyKb = userKeyboard();
+        try {
+          const r = await getRole(userId);
+          if (r === 'owner') replyKb = ownerKeyboard(userId);
+          else if (r === 'subleader') replyKb = subLeaderKeyboard();
+          else if (r === 'admin') replyKb = adminKeyboard();
+        } catch (_e) {}
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: res.finished
+            ? '🎉 عضویت اجباری تمام شد. از منوی زیر استفاده کنید.'
+            : 'می‌توانید از ربات استفاده کنید.',
+          reply_markup: replyKb,
+        });
+        if (res.finished) {
+          for (const oid of OWNER_IDS || []) {
+            try {
+              await api.sendMessage({
+                chat_id: oid,
+                text:
+                  '🔐 عضویت اجباری به هدف رسید و خاموش شد.\n' +
+                  'تأیید: ' +
+                  ((res.camp && res.camp.confirmedCount) || '') +
+                  ' / ' +
+                  ((res.camp && res.camp.targetCount) || ''),
+              });
+            } catch (_e) {}
+          }
+        }
+      } catch (e) {
+        console.error('fj_check', e);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'خطا در بررسی',
+          show_alert: true,
+        });
+      }
+      return;
+    }
+
+    if (data === 'fj_new' || data === 'fj_cancel' || data === 'fj_close') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      if (data === 'fj_close') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'بسته شد' });
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: 'پنل عضویت اجباری بسته شد.',
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (data === 'fj_cancel') {
+        const camp = await getForceJoinCampaign();
+        if (camp) {
+          camp.active = false;
+          camp.endedAt = new Date().toISOString();
+          await pushForceJoinHistory({
+            id: camp.id,
+            title: camp.title,
+            chatId: camp.chatId,
+            targetCount: camp.targetCount,
+            confirmedCount: camp.confirmedCount || 0,
+            startMembers: camp.startMembers,
+            endedAt: camp.endedAt,
+            cancelled: true,
+          });
+          await saveForceJoinCampaign(null);
+        }
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کمپین لغو شد' });
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: '⏹ کمپین عضویت اجباری لغو شد.',
+            reply_markup: sanitizeMarkup(forceJoinOwnerInline(false)),
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (data === 'fj_new') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id });
+        await setState(userId, 'force_join_link');
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text:
+              '🔗 لینک کانال را بفرستید (عمومی یا خصوصی).\n\n' +
+              'قبلش ربات را در کانال ادمین کنید و دسترسی مشاهدهٔ اعضا بدهید.\n' +
+              'مثال: https://t.me/name یا @name',
+          });
+        } catch (_e) {}
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'لینک کانال را همین‌جا بفرستید:',
+          reply_markup: sanitizeMarkup({ keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true }),
+        });
+        return;
+      }
     }
 
     // —— پنل شیشه‌ای انواع غیرفعال‌سازی
