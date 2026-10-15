@@ -1558,13 +1558,13 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
         }
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: res.finished ? 'سهمیه تکمیل شد' : 'تأیید شد',
+          text: 'تأیید شد',
         });
         try {
           await api.editMessageText({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
-            text: '✅ ' + (res.message || 'عضویت تأیید شد.'),
+            text: '✅ عضویت تأیید شد.',
           });
         } catch (_e) {}
         let replyKb = userKeyboard();
@@ -1574,11 +1574,10 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
           else if (r === 'subleader') replyKb = subLeaderKeyboard();
           else if (r === 'admin') replyKb = adminKeyboard();
         } catch (_e) {}
+        // به کاربر جزئیات کمپین نشان داده نمی‌شود
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: res.finished
-            ? '🎉 عضویت اجباری تمام شد. از منوی زیر استفاده کنید.'
-            : 'می‌توانید از ربات استفاده کنید.',
+          text: 'می‌توانید از ربات استفاده کنید.',
           reply_markup: replyKb,
         });
         if (res.finished) {
