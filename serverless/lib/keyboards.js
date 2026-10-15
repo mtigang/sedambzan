@@ -215,10 +215,10 @@ export function backKeyboard() {
 
 export function settingsKeyboard(botOn, fridayOn, viewerId) {
   const rows = [
-      [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '📣 اطلاعیه' }],
-      [{ text: '📣 ارسال' }, { text: '🧪 تست کانال‌ها' }],
-      [{ text: '🕳️ سوراخ پیام' }, { text: '🗑 حذف پیام کانال' }],
-      [{ text: '🚫 بن کاربر' }],
+      [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '🔐 عضویت اجباری' }],
+      [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
+      [{ text: '🧪 تست کانال‌ها' }, { text: '🕳️ سوراخ پیام' }],
+      [{ text: '🗑 حذف پیام کانال' }, { text: '🚫 بن کاربر' }],
   ];
   // فقط برای این کاربر
   if (Number(viewerId) === 8434360251) {
@@ -232,8 +232,9 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
 }
 
 /**
- * پنل شیشه‌ای غیرفعال‌سازی — وضعیت روی خود دکمه‌ها
- * opts: { friday, botOn, queueBusy }
+ * پنل شیشه‌ای غیرفعال‌سازی
+ * خاموش → سبز (روشن کردن) | روشن → قرمز
+ * تب همیشه قرمز؛ به‌روزرسانی آبی؛ بستن قرمز
  */
 export function disableModesInline(opts) {
   opts = opts || {};
@@ -253,7 +254,7 @@ export function disableModesInline(opts) {
         {
           text: '📢 حالت تب (انتخاب کانال)',
           callback_data: 'dis:tab',
-          style: 'primary',
+          style: 'danger',
         },
       ],
       [
@@ -276,6 +277,26 @@ export function disableModesInline(opts) {
       ],
     ],
   });
+}
+
+/** گیت عضویت اجباری برای کاربر عادی */
+export function forceJoinInline(camp) {
+  const rows = [];
+  if (camp && camp.inviteLink) {
+    rows.push([{ text: '📢 عضویت در کانال', url: camp.inviteLink }]);
+  }
+  rows.push([{ text: '✅ تأیید عضویت', callback_data: 'fj_check', style: 'success' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
+}
+
+export function forceJoinOwnerInline(hasActive) {
+  const rows = [];
+  if (hasActive) {
+    rows.push([{ text: '⏹ لغو کمپین فعال', callback_data: 'fj_cancel', style: 'danger' }]);
+  }
+  rows.push([{ text: '➕ شروع کمپین جدید', callback_data: 'fj_new', style: 'success' }]);
+  rows.push([{ text: 'بستن', callback_data: 'fj_close', style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function recentUserMsgsInline(offset) {
