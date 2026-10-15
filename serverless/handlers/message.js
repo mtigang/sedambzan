@@ -490,6 +490,187 @@ export default async function (message) {
     // ========== USER ==========
     
     // ——— فراخوان کانال (ادمین / ساب‌لیدر با شیفت فعال) ———
+    // ——— حذف پیام کانال (ادمین/ساب‌لیدر فقط در شیفت، فقط پیام‌های تأیید خودشان، حداکثر ۱۰) ———
+    if ((role === 'admin' || role === 'subleader') && text === '🗑 حذف پیام کانال') {
+      try {
+        const keys = await activeShiftChannelKeys(userId);
+        if (!keys || !keys.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '⏰ فقط در زمان شیفت فعال می‌توانید پیام کانال را حذف کنید.\nالان شیفت فعالی ندارید.',
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+        const titles = keys
+          .map(function (k) {
+            return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k;
+          })
+          .join('، ');
+        await setState(userId, 'admin_del_ch');
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '🗑 حذف پیام کانال\n\n' +
+            '• فقط پیام‌هایی که خودتان تأیید کرده‌اید\n' +
+            '• فقط کانال شیفت فعلی: ' +
+            titles +
+            '\n' +
+            '• حداکثر ۱۰ لینک در هر ارسال\n\n' +
+            'لینک عمومی پیام(ها) را بفرستید (هر خط یک لینک):\n' +
+            'مثال:\nhttps://t.me/callMeAraIl/12345',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('admin del btn', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا',
+          reply_markup: await roleKb(userId),
+        });
+      }
+      return;
+    }
+
+    if ((role === 'admin' || role === 'subleader') && state?.kind === 'admin_del_ch' && text) {
+      try {
+        const keys = await activeShiftChannelKeys(userId);
+        if (!keys || !keys.length) {
+          await clearState(userId);
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '⏰ شیفت شما تمام شده؛ حذف لغو شد.',
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+        const allowCh = {};
+        for (const k of keys) {
+          allowCh[String(k)] = true;
+          const nk = normalizeChannelKey(k);
+          if (nk) allowCh[nk] = true;
+        }
+        const unameToKey = {};
+        for (const [k, u] of Object.entries(CHANNEL_USERNAMES || {})) {
+          unameToKey[String(u).toLowerCase()] = k;
+        }
+        const idToChat = {};
+        for (const [k, cid] of Object.entries(CHANNEL_IDS || {})) {
+          idToChat[String(cid)] = k;
+          idToChat[String(cid).replace(/^-100/, '')] = k;
+        }
+        const lines = String(text)
+          .split(/[\n\r]+/)
+          .map(function (l) {
+            return String(l || '').trim();
+          })
+          .filter(Boolean);
+        if (!lines.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'حداقل یک لینک بفرستید.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        if (lines.length > 10) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'حداکثر ۱۰ لینک در هر بار. الان ' + lines.length + ' خط فرستادید.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        const results = [];
+        for (const line of lines) {
+          let channelKey = null;
+          let chatIdCh = null;
+          let msgId = null;
+          const pub = line.match(/t\.me\/([A-Za-z0-9_]+)\/(\d+)/i);
+          const priv = line.match(/t\.me\/c\/(\d+)\/(\d+)/i);
+          if (pub) {
+            channelKey = unameToKey[String(pub[1]).toLowerCase()] || null;
+            msgId = Number(pub[2]);
+            if (channelKey && CHANNEL_IDS[channelKey]) chatIdCh = CHANNEL_IDS[channelKey];
+          } else if (priv) {
+            const bare = String(priv[1]);
+            msgId = Number(priv[2]);
+            channelKey = idToChat[bare] || idToChat['-100' + bare] || null;
+            if (channelKey && CHANNEL_IDS[channelKey]) chatIdCh = CHANNEL_IDS[channelKey];
+          }
+          if (!channelKey || !chatIdCh || !msgId) {
+            results.push('❌ نامعتبر: ' + line.slice(0, 60));
+            continue;
+          }
+          if (!allowCh[channelKey] && !allowCh[normalizeChannelKey(channelKey) || '']) {
+            results.push('❌ خارج از شیفت شما: ' + ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey));
+            continue;
+          }
+          let internalId = null;
+          try {
+            const mapVal = await settingGet('chmsg:' + channelKey + ':' + msgId, '');
+            if (mapVal) internalId = Number(String(mapVal).split('|')[0]) || Number(mapVal);
+          } catch (_e) {}
+          if (!internalId) {
+            results.push('❌ این پیام در سیستم ثبت نشده یا توسط ربات منتشر نشده: #' + msgId);
+            continue;
+          }
+          let row = null;
+          try {
+            const rows =
+              (await db
+                .select()
+                .from(messages)
+                .where(eq(messages.id, internalId))
+                .all()) || [];
+            row = rows[0] || null;
+          } catch (_e) {}
+          if (!row) {
+            results.push('❌ پیام داخلی #' + internalId + ' پیدا نشد');
+            continue;
+          }
+          if (String(row.status) !== 'approved') {
+            results.push('❌ #' + internalId + ' تأییدشده نیست');
+            continue;
+          }
+          if (Number(row.reviewedBy) !== Number(userId)) {
+            results.push('❌ #' + internalId + ' را شما تأیید نکرده‌اید (فقط تأییدکننده می‌تواند حذف کند)');
+            continue;
+          }
+          try {
+            await api.deleteMessage({ chat_id: chatIdCh, message_id: msgId });
+            results.push(
+              '✅ حذف شد · «' +
+                ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
+                '» · داخلی #' +
+                internalId +
+                ' · کانال #' +
+                msgId
+            );
+          } catch (e) {
+            const em = (e && (e.description || e.message)) || String(e);
+            results.push('❌ حذف #' + msgId + ' · ' + String(em).slice(0, 100));
+          }
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '🗑 نتیجه حذف\n────────────\n' +
+            results.join('\n') +
+            '\n\nلینک بعدی را بفرستید یا ◀️ بازگشت.',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('admin_del_ch', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در حذف: ' + ((e && (e.message || e.description)) || e),
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      }
+      return;
+    }
+
     if ((role === 'admin' || role === 'subleader') && text === '📌 فراخوان کانال') {
       try {
         const keys = await activeShiftChannelKeys(userId);
