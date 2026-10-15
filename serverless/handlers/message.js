@@ -133,6 +133,7 @@ import {
   acquireLock,
   releaseLock,
   listAdminsByChannel,
+  removeChannelAdmin,
   syncAdminsFromGroup,
   syncAllAdminGroups,
   notifyShiftAdmins,
@@ -2742,6 +2743,49 @@ try {
       return;
     }
 
+    if (owner && text === '👮 جستجوی ادمین') {
+      try {
+        await setState(userId, 'search_admin');
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            'آیدی عددی یا @username ادمین را بفرستید:\n' +
+            'گزارش شامل کانال‌ها، شیفت ۷ روز اخیر (به تفکیک روز و کانال) و تعداد بررسی پیام است.',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('search_admin', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: ownerKeyboard(),
+        });
+      }
+      return;
+    }
+
+    if (owner && text === '🗑 حذف دسته‌جمعی ادمین') {
+      try {
+        await setState(userId, 'bulk_del_admin');
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            'آیدی عددی یا @username ادمین‌ها را بفرستید (هر خط یک مورد):\n\n' +
+            'مثال:\n8607359838\n8086042544\n@username\n\n' +
+            'از همه کانال‌ها حذف می‌شوند. برای انصراف ◀️ بازگشت.',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('bulk_del_admin', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا: ' + (e && e.message ? e.message : String(e)),
+          reply_markup: ownerKeyboard(),
+        });
+      }
+      return;
+    }
+
     if (owner && state?.kind === 'del_ch_msg' && text) {
       try {
         const unameToKey = {};
@@ -2992,7 +3036,326 @@ try {
     
 
 
-    if (owner && text === '📣 اطلاعیه') {
+    
+    // —— جستجوی ادمین: پروفایل + شیفت ۷روز به تفکیک روز/کانال + تعداد بررسی ——
+    if (owner && state?.kind === 'search_admin' && text) {
+      try {
+        const id = await resolveUserId(text);
+        if (!id) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'ادمین پیدا نشد.\\nآیدی یا @username بعدی را بفرستید یا ◀️ بازگشت',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        const uu = await getUser(id);
+        const chans = await adminChannels(id);
+        const role = await getRole(id);
+        const now = tehranNow();
+        function dayOffset(base, off) {
+          const parts = String(base).split('-').map(Number);
+          const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+          dt.setUTCDate(dt.getUTCDate() + off);
+          return (
+            dt.getUTCFullYear() +
+            '-' +
+            String(dt.getUTCMonth() + 1).padStart(2, '0') +
+            '-' +
+            String(dt.getUTCDate()).padStart(2, '0')
+          );
+        }
+        const days7 = [];
+        for (let i = 0; i < 7; i++) days7.push(dayOffset(now.date, -i));
+
+        // شیفت‌ها
+        let allSh = [];
+        try {
+          allSh = (await db.select().from(shifts).limit(3000).all()) || [];
+        } catch (e) {
+          console.error('search_admin shifts', e);
+        }
+        const myShifts = allSh.filter(function (s) {
+          if (Number(s.adminId) !== Number(id)) return false;
+          if (String(s.status) === 'cancelled') return false;
+          const sd = String(s.shiftDate || '');
+          if (sd === 'perm' || sd === 'permanent') return true;
+          return days7.indexOf(sd) >= 0;
+        });
+
+        // پیام‌های بررسی‌شده این ادمین (نمونه)
+        let revs = [];
+        try {
+          const raw =
+            (await db
+              .select({
+                id: messages.id,
+                status: messages.status,
+                channelKey: messages.channelKey,
+                reviewedBy: messages.reviewedBy,
+                reviewedAt: messages.reviewedAt,
+              })
+              .from(messages)
+              .orderBy(desc(messages.id))
+              .limit(4000)
+              .all()) || [];
+          revs = raw.filter(function (m) {
+            return (
+              Number(m.reviewedBy) === Number(id) &&
+              (m.status === 'approved' || m.status === 'rejected')
+            );
+          });
+        } catch (e) {
+          console.error('search_admin msgs', e);
+        }
+
+        function tehranDay(ts) {
+          if (ts == null) return null;
+          try {
+            let t = ts;
+            if (typeof t === 'string' && /^\\d+$/.test(t)) t = Number(t);
+            if (typeof t === 'number' && t < 1e12) t = t * 1000;
+            const ms = new Date(t).getTime();
+            if (!Number.isFinite(ms)) return null;
+            const adj = new Date(ms + 3.5 * 3600 * 1000);
+            return (
+              adj.getUTCFullYear() +
+              '-' +
+              String(adj.getUTCMonth() + 1).padStart(2, '0') +
+              '-' +
+              String(adj.getUTCDate()).padStart(2, '0')
+            );
+          } catch (_e) {
+            return null;
+          }
+        }
+
+        // شمارش بررسی به تفکیک روز و کانال
+        const byDayCh = {}; // day -> channelKey -> {ap,rj}
+        let apTot = 0;
+        let rjTot = 0;
+        for (const m of revs) {
+          const d = tehranDay(m.reviewedAt);
+          if (!d || days7.indexOf(d) < 0) continue;
+          const ck = String(m.channelKey || '—');
+          if (!byDayCh[d]) byDayCh[d] = {};
+          if (!byDayCh[d][ck]) byDayCh[d][ck] = { ap: 0, rj: 0 };
+          if (m.status === 'approved') {
+            byDayCh[d][ck].ap++;
+            apTot++;
+          } else {
+            byDayCh[d][ck].rj++;
+            rjTot++;
+          }
+        }
+
+        // شیفت به تفکیک روز و کانال
+        const shiftByDay = {}; // day -> [{channel, start, end}]
+        const permShifts = [];
+        for (const s of myShifts) {
+          const sd = String(s.shiftDate || '');
+          const ck = String(s.channelKey || '');
+          const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+          const line =
+            title +
+            ' | ' +
+            String(s.startHm || '').slice(0, 5) +
+            '–' +
+            String(s.endHm || '').slice(0, 5);
+          if (sd === 'perm' || sd === 'permanent') {
+            permShifts.push(line);
+          } else {
+            if (!shiftByDay[sd]) shiftByDay[sd] = [];
+            shiftByDay[sd].push(line);
+          }
+        }
+
+        let body =
+          '👮 گزارش ادمین\\n' +
+          '👤 ' +
+          displayName(uu, id) +
+          '\\n🆔 ' +
+          id +
+          (uu && uu.username ? '\\n@' + uu.username : '') +
+          '\\nنقش: ' +
+          (role || (uu && uu.role) || '—') +
+          '\\n📢 کانال‌های ادمینی: ' +
+          (chans.length
+            ? chans
+                .map(function (k) {
+                  return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k;
+                })
+                .join('، ')
+            : '— هیچ‌کدام') +
+          '\\n\\n📊 بررسی ۷ روز: ✅' +
+          apTot +
+          ' ❌' +
+          rjTot +
+          ' (جمع ' +
+          (apTot + rjTot) +
+          ')\\n';
+
+        if (permShifts.length) {
+          body += '\\n♾️ شیفت دائمی:\\n';
+          for (const l of permShifts.slice(0, 20)) body += '• ' + l + '\\n';
+        }
+
+        body += '\\n📅 شیفت و بررسی به تفکیک روز:\\n';
+        for (const d of days7) {
+          const shifts = shiftByDay[d] || [];
+          const chMap = byDayCh[d] || {};
+          let dayAp = 0;
+          let dayRj = 0;
+          for (const ck of Object.keys(chMap)) {
+            dayAp += chMap[ck].ap;
+            dayRj += chMap[ck].rj;
+          }
+          body += '\\n▸ ' + d + '\\n';
+          if (shifts.length) {
+            body += '  ⏰ شیفت (' + shifts.length + '):\\n';
+            for (const l of shifts) body += '    • ' + l + '\\n';
+          } else {
+            body += '  ⏰ شیفت: —\\n';
+          }
+          body += '  🔍 بررسی: ✅' + dayAp + ' ❌' + dayRj;
+          const chKeys = Object.keys(chMap);
+          if (chKeys.length) {
+            body += ' | ';
+            body += chKeys
+              .map(function (ck) {
+                const t = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+                return t + ' ✅' + chMap[ck].ap + ' ❌' + chMap[ck].rj;
+              })
+              .join(' ؛ ');
+          }
+          body += '\\n';
+        }
+
+        // ارسال در چند تکه اگر لازم
+        let cur = body;
+        while (cur.length > 3500) {
+          let cut = cur.lastIndexOf('\\n', 3500);
+          if (cut < 2000) cut = 3500;
+          await api.sendMessage({ chat_id: chatId, text: cur.slice(0, cut) });
+          cur = cur.slice(cut).replace(/^\\n+/, '');
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text: cur,
+          reply_markup: sanitizeMarkup(searchKeyboard()),
+        });
+      } catch (e) {
+        console.error('search_admin', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '⚠️ خطا در جستجوی ادمین: ' + String(e.message || e).slice(0, 200),
+          reply_markup: sanitizeMarkup(searchKeyboard()),
+        });
+      }
+      return;
+    }
+
+    // —— حذف دسته‌جمعی ادمین از همه کانال‌ها ——
+    if (owner && state?.kind === 'bulk_del_admin' && text) {
+      try {
+        const lines = String(text)
+          .split(/[\\n,;]+/)
+          .map(function (s) {
+            return s.trim();
+          })
+          .filter(Boolean);
+        if (!lines.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'لیست خالی است. آیدی‌ها را بفرستید یا ◀️ بازگشت',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        const results = [];
+        for (const line of lines.slice(0, 40)) {
+          let tid = null;
+          try {
+            tid = await resolveUserId(line);
+          } catch (_e) {}
+          if (!tid) {
+            results.push({ input: line, ok: false, detail: 'پیدا نشد' });
+            continue;
+          }
+          if (isOwner(tid)) {
+            results.push({ input: line, id: tid, ok: false, detail: 'مالک قابل حذف نیست' });
+            continue;
+          }
+          const chans = await adminChannels(tid);
+          if (!chans.length) {
+            results.push({
+              input: line,
+              id: tid,
+              ok: false,
+              detail: 'در هیچ کانالی ادمین نیست',
+            });
+            continue;
+          }
+          const removed = [];
+          for (const ck of chans) {
+            try {
+              await removeChannelAdmin(tid, ck);
+              removed.push((DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck);
+            } catch (e) {
+              console.error('bulk remove', tid, ck, e);
+            }
+          }
+          let name = String(tid);
+          try {
+            name = displayName(await getUser(tid), tid);
+          } catch (_e) {}
+          results.push({
+            input: line,
+            id: tid,
+            name: name,
+            ok: true,
+            detail: removed.join('، ') || '—',
+          });
+        }
+        let body = '🗑 نتیجه حذف دسته‌جمعی ادمین\\n\\n';
+        for (const r of results) {
+          if (r.ok) {
+            body +=
+              '✅ ' +
+              (r.name || r.id) +
+              ' | ' +
+              r.id +
+              '\\n   کانال‌ها: ' +
+              r.detail +
+              '\\n';
+          } else {
+            body +=
+              '❌ ' +
+              r.input +
+              (r.id ? ' → ' + r.id : '') +
+              '\\n   ' +
+              r.detail +
+              '\\n';
+          }
+        }
+        body += '\\nمی‌توانید لیست بعدی را بفرستید یا ◀️ بازگشت.';
+        await api.sendMessage({
+          chat_id: chatId,
+          text: body.slice(0, 4000),
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('bulk_del_admin', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '⚠️ خطا: ' + String(e.message || e).slice(0, 200),
+          reply_markup: sanitizeMarkup(searchKeyboard()),
+        });
+      }
+      return;
+    }
+
+if (owner && text === '📣 اطلاعیه') {
       try {
         await setState(userId, 'announce_wait_text');
         await api.sendMessage({
