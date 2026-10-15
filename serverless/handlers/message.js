@@ -2764,27 +2764,6 @@ try {
       return;
     }
 
-    if (owner && text === '🗑 حذف دسته‌جمعی ادمین') {
-      try {
-        await setState(userId, 'bulk_del_admin');
-        await api.sendMessage({
-          chat_id: chatId,
-          text:
-            'آیدی عددی یا @username ادمین‌ها را بفرستید (هر خط یک مورد):\n\n' +
-            'مثال:\n8607359838\n8086042544\n@username\n\n' +
-            'از همه کانال‌ها حذف می‌شوند. برای انصراف ◀️ بازگشت.',
-          reply_markup: sanitizeMarkup(backKeyboard()),
-        });
-      } catch (e) {
-        console.error('bulk_del_admin', e);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'خطا: ' + (e && e.message ? e.message : String(e)),
-          reply_markup: ownerKeyboard(),
-        });
-      }
-      return;
-    }
 
     if (owner && state?.kind === 'del_ch_msg' && text) {
       try {
