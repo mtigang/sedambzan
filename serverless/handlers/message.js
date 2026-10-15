@@ -2339,17 +2339,16 @@ try {
         try {
           reviewer = formatReviewerLabel(await getUser(row.reviewedBy), row.reviewedBy);
         } catch (_e) {
-          reviewer = String(row.reviewedBy);
+          reviewer = 'ادمین';
         }
       }
+      // ساب‌لیدر نباید آیدی/اسم فرستنده را ببیند
       const body =
         '#' +
         row.id +
         ' | ' +
         row.status +
-        '\nکاربر: ' +
-        row.userId +
-        '\nبررسی‌کننده (کسی که دکمه را زد): ' +
+        '\nبررسی‌کننده: ' +
         reviewer +
         (row.reviewedAt ? '\n🕐 زمان بررسی: ' + formatTsJalali(row.reviewedAt) : '') +
         (row.submittedAt ? '\n🕐 زمان ارسال: ' + formatTsJalali(row.submittedAt) : '') +
