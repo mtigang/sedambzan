@@ -7,6 +7,11 @@ import {
   setChannelEnabled,
   setChannelAdMode,
   isChannelAdMode,
+  isFridayMode,
+  setFridayMode,
+  isBotOn,
+  isQueueBusyMode,
+  setQueueBusyMode,
   getActiveSubLeaderChannel,
   removeChannelAdmin,
   listAdminsByChannel,
@@ -98,6 +103,8 @@ import {
   sanitizeMarkup,
   dbExportContinueInline,
   postChannelInline,
+  disableModesInline,
+  channelPickFlagsInline,
   sendDestInline,
   confirmPostInline,
   activeShiftChannelsInline,
@@ -1527,6 +1534,132 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
       return;
     }
 
+    // —— پنل شیشه‌ای انواع غیرفعال‌سازی
+    if (data.startsWith('dis:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const action = data.slice(4);
+      async function refreshDisablePanel(extraLine) {
+        const [fri, botOn, queue] = await Promise.all([
+          isFridayMode(),
+          isBotOn(),
+          isQueueBusyMode(),
+        ]);
+        let body =
+          '🛑 انواع غیرفعال‌سازی ربات\n\n' +
+          '• 🌙 جمعه: ' +
+          (fri ? 'روشن' : 'خاموش') +
+          '\n• 🔴 ربات: ' +
+          (botOn ? 'روشن' : 'خاموش') +
+          '\n• ⏳ صف شلوغ: ' +
+          (queue ? 'روشن' : 'خاموش') +
+          '\n\nدکمه‌ها را بزنید؛ وضعیت لحظه‌ای عوض می‌شود.';
+        if (extraLine) body += '\n\n' + extraLine;
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: body,
+            reply_markup: sanitizeMarkup(
+              disableModesInline({ friday: fri, botOn: botOn, queueBusy: queue })
+            ),
+          });
+        } catch (_e) {
+          try {
+            await api.editMessageReplyMarkup({
+              chat_id: cq.message.chat.id,
+              message_id: cq.message.message_id,
+              reply_markup: sanitizeMarkup(
+                disableModesInline({ friday: fri, botOn: botOn, queueBusy: queue })
+              ),
+            });
+          } catch (_e2) {}
+        }
+      }
+      if (action === 'close') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'بسته شد' });
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: 'پنل غیرفعال‌سازی بسته شد.',
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (action === 'refresh') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'به‌روز شد' });
+        await refreshDisablePanel();
+        return;
+      }
+      if (action === 'friday') {
+        const cur = await isFridayMode();
+        await setFridayMode(!cur);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: !cur ? '🌙 حالت جمعه روشن' : '☀️ حالت جمعه خاموش',
+        });
+        await refreshDisablePanel(!cur ? '✅ حالت جمعه فعال شد.' : '✅ حالت جمعه خاموش شد.');
+        return;
+      }
+      if (action === 'queue') {
+        const cur = await isQueueBusyMode();
+        await setQueueBusyMode(!cur);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: !cur ? '⏳ صف شلوغ روشن' : 'صف شلوغ خاموش',
+        });
+        await refreshDisablePanel(
+          !cur
+            ? '✅ صف شلوغ فعال شد.\nکاربر پیام نمی‌فرستد؛ ادمین تأیید می‌کند.'
+            : '✅ صف شلوغ خاموش شد.'
+        );
+        return;
+      }
+      if (action === 'tab') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id });
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text:
+              '📢 حالت تب — کانال را انتخاب کنید\n' +
+              'با هر کلیک وضعیت تب آن کانال عوض می‌شود.\n' +
+              'کاربر برای آن کانال پیام نمی‌فرستد.',
+            reply_markup: sanitizeMarkup(channelPickFlagsInline('chad')),
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (action === 'bot_off') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id });
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: '🔴 کدام کانال(ها) خاموش شوند؟',
+            reply_markup: sanitizeMarkup(channelPickFlagsInline('choff')),
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (action === 'bot_on') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id });
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: '🟢 کدام کانال(ها) روشن شوند؟',
+            reply_markup: sanitizeMarkup(channelPickFlagsInline('chon')),
+          });
+        } catch (_e) {}
+        return;
+      }
+      return;
+    }
+
     if (data.startsWith('choff:') || data.startsWith('chon:') || data.startsWith('chad:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
@@ -1536,10 +1669,34 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
       const mode = parts[0]; // choff | chon | chad
       const key = parts[1];
       await api.answerCallbackQuery({ callback_query_id: cq.id });
-      if (key === 'cancel') {
+      async function backToDisable(extra) {
+        const [fri, botOn, queue] = await Promise.all([
+          isFridayMode(),
+          isBotOn(),
+          isQueueBusyMode(),
+        ]);
+        let body =
+          '🛑 انواع غیرفعال‌سازی ربات\n\n' +
+          '• 🌙 جمعه: ' +
+          (fri ? 'روشن' : 'خاموش') +
+          '\n• 🔴 ربات: ' +
+          (botOn ? 'روشن' : 'خاموش') +
+          '\n• ⏳ صف شلوغ: ' +
+          (queue ? 'روشن' : 'خاموش');
+        if (extra) body += '\n\n' + extra;
         try {
-          await api.editMessageText({ chat_id: cq.message.chat.id, message_id: cq.message.message_id, text: 'لغو شد.' });
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: body,
+            reply_markup: sanitizeMarkup(
+              disableModesInline({ friday: fri, botOn: botOn, queueBusy: queue })
+            ),
+          });
         } catch (_e) {}
+      }
+      if (key === 'cancel') {
+        await backToDisable('لغو شد.');
         return;
       }
       const keys = key === 'all' ? Object.keys(DEFAULT_CHANNELS) : [key];
@@ -1547,26 +1704,14 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
         for (const k of keys) await setChannelEnabled(k, false);
         if (key === 'all') await settingSet('bot_enabled', '0');
         const names = keys.map(function (k) { return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k; }).join('، ');
-        try {
-          await api.editMessageText({
-            chat_id: cq.message.chat.id,
-            message_id: cq.message.message_id,
-            text: '🔴 خاموش شد: ' + names,
-          });
-        } catch (_e) {}
+        await backToDisable('🔴 خاموش شد: ' + names);
         return;
       }
       if (mode === 'chon') {
         for (const k of keys) await setChannelEnabled(k, true);
         await settingSet('bot_enabled', '1');
         const names = keys.map(function (k) { return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k; }).join('، ');
-        try {
-          await api.editMessageText({
-            chat_id: cq.message.chat.id,
-            message_id: cq.message.message_id,
-            text: '🟢 روشن شد: ' + names,
-          });
-        } catch (_e) {}
+        await backToDisable('🟢 روشن شد: ' + names);
         return;
       }
       if (mode === 'chad') {
@@ -1579,11 +1724,13 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
           const on = await isChannelAdMode(k);
           lines.push(((DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k) + ': ' + (on ? '📢 تب روشن' : '✅ تب خاموش'));
         }
+        // برای تب بعد از انتخاب یک کانال، همان پنل کانال بماند تا سریع چند کانال عوض شود
         try {
           await api.editMessageText({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
-            text: '📢 حالت تب\n' + lines.join('\n'),
+            text: '📢 حالت تب\n' + lines.join('\n') + '\n\nکانال دیگر را بزنید یا انصراف.',
+            reply_markup: sanitizeMarkup(channelPickFlagsInline('chad')),
           });
         } catch (_e) {}
         return;
