@@ -1,6 +1,6 @@
 import { normalizeBody, exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { api, db, InputFile } from 'sdk';
-import { eq, and } from 'sdk/db';
+import { eq, and, desc } from 'sdk/db';
 import { messages, feedback, shifts, settings, users, channelAdmins } from 'schema';
 import {
   isOwner,
@@ -61,6 +61,7 @@ import {
   acquireLock,
   releaseLock,
   shiftIntervalOverlaps,
+  buildDataAnalysisReport,
 } from 'lib/dbutil';
 import { drainHoleWave, startHoleJob, getHoleJob, saveHoleJob, drainHolePiggyback } from 'lib/hole_drain';
 import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob } from 'lib/announce_drain';
@@ -781,7 +782,7 @@ if (data.startsWith('reject_menu:')) {
       await setState(userId, 'reject_custom', { msgId: id });
       await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: 'دلیل رد را بنویسید (حداکثر ۲۲ کاراکتر):',
+        text: 'دلیل رد را بنویسید (حداکثر ۳۰ کاراکتر):',
       });
       return;
     }
@@ -2795,6 +2796,68 @@ if (data.startsWith('own_shift:')) {
 
 
 
+    if (data === 'staff:admins') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'کانال ادمین‌ها را انتخاب کنید:',
+        reply_markup: {
+          keyboard: [
+            [{ text: 'ادمین‌های صدام بزن' }],
+            [{ text: 'ادمین‌های این کاربر' }],
+            [{ text: 'ادمین‌های تو زندگی بعدی' }],
+            [{ text: '◀️ بازگشت' }],
+          ],
+          resize_keyboard: true,
+        },
+      });
+      return;
+    }
+
+    if (data === 'staff:subleaders') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '🛡️ مدیریت ساب‌لیدرها',
+        reply_markup: sanitizeMarkup(ownerSubLeaderMenuKeyboard()),
+      });
+      return;
+    }
+
+    // —— تحلیل داده ——
+    if (data.startsWith('da:ch:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'در حال تحلیل…' });
+      const scope = data.split(':')[2] || 'all';
+      try {
+        const report = await buildDataAnalysisReport(scope);
+        let cur = report;
+        while (cur.length > 3500) {
+          await api.sendMessage({ chat_id: cq.message.chat.id, text: cur.slice(0, 3500) });
+          cur = cur.slice(3500);
+        }
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: cur });
+      } catch (e) {
+        console.error('data analysis', e);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '⚠️ خطا در تحلیل: ' + String(e.message || e).slice(0, 200),
+        });
+      }
+      return;
+    }
+
     if (data.startsWith('admin_stats:')) {
       let slScope = null;
       if (!isOwner(userId)) {
@@ -2818,9 +2881,10 @@ if (data.startsWith('own_shift:')) {
         String(dt.getUTCMonth() + 1).padStart(2, '0') +
         '-' +
         String(dt.getUTCDate()).padStart(2, '0');
+      // فقط پیام‌های بررسی‌شده — و حداکثر ۳۰۰۰ رکورد اخیر برای جلوگیری از timeout
       let allMsg = [];
       try {
-        allMsg =
+        const raw =
           (await db
             .select({
               id: messages.id,
@@ -2830,7 +2894,12 @@ if (data.startsWith('own_shift:')) {
               reviewedAt: messages.reviewedAt,
             })
             .from(messages)
+            .orderBy(desc(messages.id))
+            .limit(3000)
             .all()) || [];
+        allMsg = raw.filter(function (m) {
+          return m.reviewedBy && (m.status === 'approved' || m.status === 'rejected');
+        });
       } catch (e) {
         console.error('admin_stats messages', e);
         await api.sendMessage({
@@ -2840,7 +2909,13 @@ if (data.startsWith('own_shift:')) {
         return;
       }
 
-      const allSh = (await db.select().from(shifts).all()) || [];
+      let allSh = [];
+      try {
+        allSh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(2000).all()) || [];
+      } catch (e) {
+        console.error('admin_stats shifts', e);
+        allSh = [];
+      }
       let body =
         '👮 آمار ادمین‌ها\n📅 ' +
         day +
