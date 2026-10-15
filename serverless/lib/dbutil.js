@@ -389,6 +389,38 @@ export async function isUserMemberOfChat(chatId, userId) {
   }
 }
 
+/** لیست کانال/گروه‌های کمپین (پشتیبانی از فرمت قدیمی تک‌کاناله) */
+export function forceJoinChannelList(camp) {
+  if (!camp) return [];
+  if (Array.isArray(camp.channels) && camp.channels.length) {
+    return camp.channels.filter(function (c) {
+      return c && c.chatId;
+    });
+  }
+  if (camp.chatId) {
+    return [
+      {
+        chatId: camp.chatId,
+        title: camp.title || null,
+        username: camp.username || null,
+        inviteLink: camp.inviteLink || null,
+        startMembers: camp.startMembers || 0,
+      },
+    ];
+  }
+  return [];
+}
+
+export function forceJoinTitlesText(camp) {
+  const list = forceJoinChannelList(camp);
+  if (!list.length) return 'کانال';
+  return list
+    .map(function (c) {
+      return c.title || c.username || String(c.chatId);
+    })
+    .join('، ');
+}
+
 export async function forceJoinNeedGate(userId) {
   if (await isForceJoinExempt(userId)) return null;
   const camp = await getForceJoinCampaign();
@@ -405,11 +437,24 @@ export async function confirmForceJoinUser(userId) {
   if (await isForceJoinUserOk(camp.id, userId)) {
     return { ok: true, already: true, camp };
   }
-  const member = await isUserMemberOfChat(camp.chatId, userId);
-  if (!member) {
+  const channels = forceJoinChannelList(camp);
+  if (!channels.length) {
+    return { ok: false, message: 'کمپین نامعتبر است.' };
+  }
+  const missing = [];
+  for (const ch of channels) {
+    const member = await isUserMemberOfChat(ch.chatId, userId);
+    if (!member) {
+      missing.push(ch.title || ch.username || String(ch.chatId));
+    }
+  }
+  if (missing.length) {
     return {
       ok: false,
-      message: 'هنوز در کانال عضو نیستید. اول عضو شوید، بعد «تأیید عضویت» را بزنید.',
+      message:
+        missing.length === 1
+          ? 'هنوز عضو «' + missing[0] + '» نیستید. عضو شوید، بعد تأیید کنید.'
+          : 'هنوز عضو این‌ها نیستید: ' + missing.join('، ') + '\nعضو شوید، بعد تأیید کنید.',
     };
   }
   await markForceJoinUserOk(camp.id, userId);
@@ -419,8 +464,11 @@ export async function confirmForceJoinUser(userId) {
     camp.endedAt = new Date().toISOString();
     await pushForceJoinHistory({
       id: camp.id,
-      title: camp.title,
-      chatId: camp.chatId,
+      title: forceJoinTitlesText(camp),
+      channels: channels.map(function (c) {
+        return { chatId: c.chatId, title: c.title, username: c.username };
+      }),
+      chatId: channels[0] && channels[0].chatId,
       targetCount: camp.targetCount,
       confirmedCount: camp.confirmedCount,
       startMembers: camp.startMembers,
