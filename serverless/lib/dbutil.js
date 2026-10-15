@@ -1447,30 +1447,58 @@ export async function canManageOthersShifts(userId, channelKey) {
 
 export async function activeShiftChannelKeys(adminId) {
   const uid = Number(adminId);
-  return memo('ask:' + uid, async function () {
+  // خالی را memo نکن — خطای موقت باعث قفل ۲.۵ثانیه‌ای نشود
+  const cacheKey = 'ask:' + uid;
+  const nowMs = Date.now();
+  if (
+    __reqMemo[cacheKey] &&
+    Array.isArray(__reqMemo[cacheKey]) &&
+    __reqMemo[cacheKey].length > 0 &&
+    nowMs - (Number(__reqMemoTs[cacheKey]) || 0) < MEMO_TTL_MS
+  ) {
+    return __reqMemo[cacheKey];
+  }
   try {
     const now = tehranNow();
     const pdate = periodDateStr(now);
-    // select-all مقاوم به mismatch نوع
-    const all = (await db.select().from(shifts).all()) || [];
-    const rows = all.filter(function (s) {
-      return Number(s.adminId ?? s.admin_id) === uid && String(s.status) === 'active';
-    });
+    let rows = [];
+    try {
+      rows =
+        (await db
+          .select()
+          .from(shifts)
+          .where(and(eq(shifts.adminId, uid), eq(shifts.status, 'active')))
+          .all()) || [];
+    } catch (_e1) {
+      try {
+        const all = (await db.select().from(shifts).all()) || [];
+        rows = all.filter(function (s) {
+          return Number(s.adminId ?? s.admin_id) === uid && String(s.status) === 'active';
+        });
+      } catch (e2) {
+        console.error('activeShiftChannelKeys', e2);
+        return [];
+      }
+    }
     const keys = [];
     const seen = {};
     for (const s of rows) {
       if (!shiftActiveNow(s, now, pdate)) continue;
       const ck = String((s.channelKey ?? s.channel_key) || '');
-      if (!ck || seen[ck]) continue;
-      seen[ck] = true;
-      keys.push(ck);
+      const nk = normalizeChannelKey(ck) || ck;
+      if (!nk || seen[nk]) continue;
+      seen[nk] = true;
+      keys.push(nk);
+    }
+    if (keys.length) {
+      __reqMemo[cacheKey] = keys;
+      __reqMemoTs[cacheKey] = nowMs;
     }
     return keys;
   } catch (e) {
     console.error('activeShiftChannelKeys', e);
     return [];
   }
-  });
 }
 
 /** مالک همیشه true. ادمین: شیفت فعال (اختیاری: برای کانال مشخص) */
@@ -2154,20 +2182,47 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
 }
 
 /**
- * بررسی مجوز ادمین برای یک پیام (هر Callback باید دوباره بررسی کند).
- * مالک: مستثنی. ادمین: شیفت فعال همان کانال + عضویت در Batch فعلی.
+ * بررسی مجوز ادمین برای یک پیام.
+ * مالک: مستثنی.
+ * ادمین/ساب‌لیدر: فقط کانال مجاز (شیفت فعال یا اسکوپ ساب‌لیدر بدون شیفت).
+ * عضویت در Batch دیگر اجباری نیست — اگر Batch از بین برود دکمه تأیید گیر نکند.
  */
 export async function checkReviewAccess(adminId, row) {
   if (isOwner(adminId)) return { ok: true };
   if (!row) return { ok: false, code: 'missing', text: 'پیام یافت نشد.' };
+  const st = String(row.status || '');
+  if (st === 'publishing') return { ok: true }; // رزرو خود ادمین
+  if (st !== 'pending') {
+    return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
+  }
   const ch = String((row.channelKey ?? row.channel_key) || '');
-  const allowed = await allowedReviewChannels(adminId);
-  if (!allowed.length) {
+  const chN = normalizeChannelKey(ch) || ch;
+  let allowed = [];
+  try {
+    allowed = await allowedReviewChannels(adminId);
+  } catch (e) {
+    console.error('checkReviewAccess allowed', e);
+    // fail-open جزئی: اگر Batch موجود باشد و پیام داخلش باشد، اجازه بده
+    try {
+      const batch = await getReviewBatch(adminId);
+      if (batch && (batch.ids || []).map(Number).includes(Number(row.id))) {
+        return { ok: true };
+      }
+    } catch (_e) {}
     return { ok: false, code: 'shift_ended', text: '❌ الان شیفت فعالی ندارید.' };
   }
-  const chN = normalizeChannelKey(ch) || ch;
+  if (!allowed.length) {
+    // آخرین شانس: پیام داخل Batch فعلی است
+    try {
+      const batch = await getReviewBatch(adminId);
+      if (batch && (batch.ids || []).map(Number).includes(Number(row.id))) {
+        return { ok: true };
+      }
+    } catch (_e) {}
+    return { ok: false, code: 'shift_ended', text: '❌ الان شیفت فعالی ندارید.' };
+  }
   const allowedN = allowed.map(function (k) {
-    return normalizeChannelKey(k) || k;
+    return normalizeChannelKey(k) || String(k);
   });
   if (allowedN.indexOf(chN) < 0 && allowed.indexOf(ch) < 0) {
     return {
@@ -2175,10 +2230,6 @@ export async function checkReviewAccess(adminId, row) {
       code: 'channel',
       text: '⛔ این پیام مربوط به کانال شیفت فعلی شما نیست.',
     };
-  }
-  const batch = await getReviewBatch(adminId);
-  if (!batch || !batch.ids.map(Number).includes(Number(row.id))) {
-    return { ok: false, code: 'not_in_batch', text: '⛔ این پیام در Batch فعلی شما نیست.' };
   }
   return { ok: true };
 }
