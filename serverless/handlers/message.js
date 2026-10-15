@@ -375,16 +375,10 @@ export default async function (message) {
       try {
         const campGate = await forceJoinNeedGate(userId);
         if (campGate) {
+          const tname = campGate.title || campGate.username || 'کانال';
           await api.sendMessage({
             chat_id: chatId,
-            text:
-              '🔐 برای استفاده از ربات و ارسال پیام، در کانال زیر عضو شوید:\n\n' +
-              '📢 «' +
-              (campGate.title || 'کانال') +
-              '»\n\n' +
-              '۱) روی دکمه عضویت بزنید\n' +
-              '۲) عضو شوید\n' +
-              '۳) «✅ تأیید عضویت» را بزنید',
+            text: '🔐 برای استفاده از ربات عضو «' + tname + '» شوید، بعد تأیید کنید.',
             reply_markup: sanitizeMarkup(forceJoinInline(campGate)),
           });
           return;
@@ -3175,17 +3169,20 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
           });
           return;
         }
-        const d = state.data || {};
+        // setState فیلدها را در ریشه می‌چیند (نه state.data)
+        const d = state || {};
+        let invite = d.inviteLink || null;
+        if (!invite && d.username) invite = 'https://t.me/' + String(d.username).replace(/^@/, '');
         const camp = {
           id: String(Date.now()),
           active: true,
           chatId: d.chatId,
-          title: d.title,
+          title: d.title || d.username || String(d.chatId || ''),
           username: d.username || null,
-          inviteLink: d.inviteLink || null,
+          inviteLink: invite,
           targetCount: n,
           confirmedCount: 0,
-          startMembers: d.startMembers || 0,
+          startMembers: Number(d.startMembers) || 0,
           startedAt: new Date().toISOString(),
         };
         await saveForceJoinCampaign(camp);
