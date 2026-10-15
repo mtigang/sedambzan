@@ -157,7 +157,7 @@ export function ownerKeyboard(uid) {
     [{ text: '📥 پیام‌های در انتظار' }, { text: '📬 پیام کاربران' }],
     [{ text: '⏰ شیفت‌ها' }, { text: '📊 آمار' }],
     [{ text: '👮 آمار ادمین‌ها' }, { text: '🔍 جستجو' }],
-    [{ text: '👥 ادمین‌ها' }, { text: '🛡️ ساب‌لیدرها' }],
+    [{ text: '👑 مقامداران' }],
     [{ text: '⚙️ ابزار ربات' }],
   ];
   // فقط مالک ۶۶۶۶۶۱۰۶۴۶
@@ -167,6 +167,16 @@ export function ownerKeyboard(uid) {
   return sanitizeMarkup({
     keyboard: rows,
     resize_keyboard: true,
+  });
+}
+
+/** انتخاب ادمین / ساب‌لیدر از مقامداران */
+export function staffPickInline() {
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: '👥 ادمین‌ها', callback_data: 'staff:admins', style: 'primary' }],
+      [{ text: '🛡️ ساب‌لیدرها', callback_data: 'staff:subleaders', style: 'primary' }],
+    ],
   });
 }
 
@@ -219,6 +229,7 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
       [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
       [{ text: '🧪 تست کانال‌ها' }, { text: '🕳️ سوراخ پیام' }],
       [{ text: '🗑 حذف پیام کانال' }, { text: '🚫 بن کاربر' }],
+      [{ text: '📈 تحلیل داده' }],
   ];
   // فقط برای این کاربر
   if (Number(viewerId) === 8434360251) {
@@ -228,6 +239,18 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
   return sanitizeMarkup({
     keyboard: rows,
     resize_keyboard: true,
+  });
+}
+
+/** انتخاب کانال برای تحلیل داده */
+export function dataAnalysisChannelInline() {
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: 'صدام بزن', callback_data: 'da:ch:sadambazan', style: 'primary' }],
+      [{ text: 'این کاربر', callback_data: 'da:ch:inkarbar', style: 'primary' }],
+      [{ text: 'تو زندگی بعدی', callback_data: 'da:ch:zendegi', style: 'primary' }],
+      [{ text: 'همه کانال‌ها', callback_data: 'da:ch:all', style: 'success' }],
+    ],
   });
 }
 
@@ -468,13 +491,20 @@ export function reviewTakenInline() {
 }
 
 export function rejectReasonsInline(id) {
-  const reasons = ['نامناسب', 'هیت یا بی احترامی', 'تکراری', 'سیاسی', 'نامفهوم'];
+  const reasons = [
+    'حاوی کلمات ناسزا',
+    'نامفهوم',
+    'طولانی',
+    'سیاسی',
+    'عدم رعایت قوانین ارسال',
+    'دارای کاراکتر های نامناسب',
+  ];
   return sanitizeMarkup({
     inline_keyboard: [
       ...reasons.map((r) => [
         { text: btnText(r, 'دلیل'), callback_data: 'reject:' + id + ':' + r, style: 'danger' },
       ]),
-      [{ text: 'سایر (تایپ دلیل)', callback_data: 'reject_other:' + id, style: 'primary' }],
+      [{ text: 'سایر موارد (تایپ دلیل)', callback_data: 'reject_other:' + id, style: 'primary' }],
       [{ text: 'انصراف', callback_data: 'reject_cancel:' + id, style: 'primary' }],
     ],
   });
