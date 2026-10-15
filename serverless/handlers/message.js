@@ -22,6 +22,7 @@ import {
   settingsKeyboard,
   recentUserMsgsInline,
   channelPickFlagsInline,
+  disableModesInline,
   searchKeyboard,
   channelAdminPickKeyboard,
   shiftChannelPickKeyboard,
@@ -86,6 +87,8 @@ import {
   isChannelAdMode,
   isFridayMode,
   setFridayMode,
+  isQueueBusyMode,
+  QUEUE_BUSY_TEXT,
   FRIDAY_MODE_TEXT,
   setChannelEnabled,
   setChannelAdMode,
@@ -598,6 +601,14 @@ export default async function (message) {
         });
         return;
       }
+      if (!owner && (await isQueueBusyMode())) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: QUEUE_BUSY_TEXT,
+          reply_markup: await roleKb(userId),
+        });
+        return;
+      }
       if (!owner && !isWorkHours()) {
         // اگر مالک شیفت خارج از ساعت کاری داده و الان فعال است → اجازه بده
         const anyShift = await hasAnyActiveShiftNow();
@@ -697,12 +708,25 @@ export default async function (message) {
     if (state?.kind === 'user_send' && text) {
       try {
         // درِ ساعت کاری اینجا برداشته شد؛ بعد از تشخیص کانال، شیفت فعال چک می‌شود
-        const [_fri, _botOn] = await Promise.all([isFridayMode(), isBotOn()]);
+        const [_fri, _botOn, _qBusy] = await Promise.all([
+          isFridayMode(),
+          isBotOn(),
+          isQueueBusyMode(),
+        ]);
         if (!owner && _fri) {
           await clearState(userId);
           await api.sendMessage({
             chat_id: chatId,
             text: FRIDAY_MODE_TEXT,
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+        if (!owner && _qBusy) {
+          await clearState(userId);
+          await api.sendMessage({
+            chat_id: chatId,
+            text: QUEUE_BUSY_TEXT,
             reply_markup: await roleKb(userId),
           });
           return;
@@ -2855,21 +2879,17 @@ try {
       return;
     }
 
-    if (owner && (text === '🚫 بن کاربر' || text === '🔓 آنبن کاربر')) {
-      const banOn = text === '🚫 بن کاربر';
-      await setState(userId, banOn ? 'ban_user' : 'unban_user');
+    if (owner && text === '🚫 بن کاربر') {
+      await setState(userId, 'ban_user');
       await api.sendMessage({
         chat_id: chatId,
-        text: banOn
-          ? '🚫 آیدی عددی یا @username کاربری که باید مسدود شود را بفرستید:'
-          : '🔓 آیدی عددی یا @username کاربری که باید رفع مسدودیت شود را بفرستید:',
+        text: '🚫 آیدی عددی یا @username کاربری که باید مسدود شود را بفرستید:',
         reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
     }
 
-    if (owner && (state?.kind === 'ban_user' || state?.kind === 'unban_user') && text) {
-      const banOn = state.kind === 'ban_user';
+    if (owner && state?.kind === 'ban_user' && text) {
       try {
         const tid = await resolveUserId(text);
         if (!tid) {
@@ -2889,7 +2909,7 @@ try {
           await clearState(userId);
           return;
         }
-        await setBlocked(tid, banOn);
+        await setBlocked(tid, true);
         await clearState(userId);
         const tu = await getUser(tid);
         const label = tu
@@ -2897,21 +2917,16 @@ try {
           : String(tid);
         await api.sendMessage({
           chat_id: chatId,
-          text: banOn
-            ? '🚫 کاربر «' +
-              label +
-              '» (' +
-              tid +
-              ') مسدود شد.\nدیگر نمی‌تواند از ربات استفاده کند.'
-            : '🔓 کاربر «' +
-              label +
-              '» (' +
-              tid +
-              ') رفع مسدودیت شد.',
+          text:
+            '🚫 کاربر «' +
+            label +
+            '» (' +
+            tid +
+            ') مسدود شد.\nدیگر نمی‌تواند از ربات استفاده کند.',
           reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
         });
       } catch (e) {
-        console.error('ban/unban', e);
+        console.error('ban', e);
         await api.sendMessage({
           chat_id: chatId,
           text: 'خطا: ' + ((e && (e.message || e.description)) || e),
@@ -3005,44 +3020,34 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
     }
 
 
-    if (owner && text === '🔴 خاموش کردن ربات') {
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '🔴 کدام کانال(ها) خاموش شوند؟',
-        reply_markup: sanitizeMarkup(channelPickFlagsInline('choff')),
-      });
-      return;
-    }
-
-    if (owner && text === '🟢 روشن کردن ربات') {
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '🟢 کدام کانال(ها) روشن شوند؟',
-        reply_markup: sanitizeMarkup(channelPickFlagsInline('chon')),
-      });
-      return;
-    }
-
-
-    if (owner && (text === '🌙 حالت جمعه' || text === '☀️ خاموش کردن حالت جمعه')) {
-      const turnOn = text === '🌙 حالت جمعه';
-      await setFridayMode(turnOn);
-      await api.sendMessage({
-        chat_id: chatId,
-        text: turnOn
-          ? '🌙 حالت جمعه برای هر ۳ کانال فعال شد.\nادمین/ساب‌لیدر/مالک مثل قبل کار می‌کنند.\nکاربر عادی نمی‌تواند پیام ثبت کند.'
-          : '☀️ حالت جمعه خاموش شد. دریافت پیام کاربران از سر گرفته شد.',
-        reply_markup: settingsKeyboard(await isBotOn(), turnOn, userId),
-      });
-      return;
-    }
-
-    if (owner && text === '📢 حالت تب') {
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '📢 حالت تب (تبلیغات/تبادل) برای کدام کانال؟\nدر این حالت کاربر پیام جدید برای آن کانال ثبت نمی‌کند.',
-        reply_markup: sanitizeMarkup(channelPickFlagsInline('chad')),
-      });
+    if (owner && text === '🛑 انواع غیرفعال‌سازی') {
+      try {
+        const [fri, botOn, queue] = await Promise.all([
+          isFridayMode(),
+          isBotOn(),
+          isQueueBusyMode(),
+        ]);
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '🛑 انواع غیرفعال‌سازی ربات\n\n' +
+            'دکمه‌های شیشه‌ای را بزنید؛ وضعیت همان لحظه عوض می‌شود.\n\n' +
+            '• 🌙 جمعه: کاربر پیام نمی‌فرستد\n' +
+            '• 📢 تب: کاربر برای کانال انتخابی پیام نمی‌فرستد\n' +
+            '• 🔴 خاموش: کانال/ربات بسته\n' +
+            '• ⏳ صف شلوغ: کاربر پیام نمی‌فرستد، ادمین تأیید می‌کند',
+          reply_markup: sanitizeMarkup(
+            disableModesInline({ friday: fri, botOn: botOn, queueBusy: queue })
+          ),
+        });
+      } catch (e) {
+        console.error('disable modes menu', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در باز کردن پنل',
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+        });
+      }
       return;
     }
 
