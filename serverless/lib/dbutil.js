@@ -2272,6 +2272,283 @@ export async function pendingForViewer(userId) {
   }
 }
 
+/**
+ * گزارش تحلیل داده برای مالک — سبک و بدون content پیام‌ها
+ * scope: sadambazan | inkarbar | zendegi | all
+ */
+export async function buildDataAnalysisReport(scope) {
+  const now = tehranNow();
+  const channelKeys =
+    scope === 'all'
+      ? Object.keys(DEFAULT_CHANNELS || {})
+      : [scope].filter(function (k) {
+          return DEFAULT_CHANNELS && DEFAULT_CHANNELS[k];
+        });
+  if (!channelKeys.length) return 'کانال نامعتبر.';
+
+  const dayList = [];
+  for (let i = 0; i < 7; i++) {
+    const parts = now.date.split('-').map(Number);
+    const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+    dt.setUTCDate(dt.getUTCDate() - i);
+    dayList.push(
+      dt.getUTCFullYear() +
+        '-' +
+        String(dt.getUTCMonth() + 1).padStart(2, '0') +
+        '-' +
+        String(dt.getUTCDate()).padStart(2, '0')
+    );
+  }
+  const last3 = dayList.slice(0, 3);
+  const last7 = dayList;
+
+  let allSh = [];
+  try {
+    allSh = (await db.select().from(shifts).limit(2500).all()) || [];
+  } catch (e) {
+    console.error('da shifts', e);
+  }
+
+  let allAdmins = [];
+  try {
+    allAdmins = (await db.select().from(channelAdmins).all()) || [];
+  } catch (e) {
+    console.error('da admins', e);
+  }
+
+  // فقط متادیتای بررسی — حداکثر ۲۵۰۰ پیام اخیر بررسی‌شده
+  let reviews = [];
+  try {
+    const raw =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+          reviewedBy: messages.reviewedBy,
+          reviewedAt: messages.reviewedAt,
+          rejectReason: messages.rejectReason,
+        })
+        .from(messages)
+        .limit(3000)
+        .all()) || [];
+    reviews = raw
+      .filter(function (m) {
+        return m.reviewedBy && (m.status === 'approved' || m.status === 'rejected');
+      })
+      .sort(function (a, b) {
+        return (b.id || 0) - (a.id || 0);
+      })
+      .slice(0, 2500);
+  } catch (e) {
+    console.error('da messages', e);
+  }
+
+  function tehranDay(ts) {
+    if (!ts) return null;
+    try {
+      const t = new Date(ts).getTime();
+      if (!Number.isFinite(t)) return null;
+      const adj = new Date(t + 3.5 * 3600 * 1000);
+      return (
+        adj.getUTCFullYear() +
+        '-' +
+        String(adj.getUTCMonth() + 1).padStart(2, '0') +
+        '-' +
+        String(adj.getUTCDate()).padStart(2, '0')
+      );
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  let pendingCount = 0;
+  try {
+    const pend =
+      (await db
+        .select({ id: messages.id, channelKey: messages.channelKey, status: messages.status })
+        .from(messages)
+        .limit(2000)
+        .all()) || [];
+    pendingCount = pend.filter(function (m) {
+      return m.status === 'pending' && (scope === 'all' || m.channelKey === scope);
+    }).length;
+  } catch (_e) {}
+
+  let body = '📈 تحلیل داده\n';
+  body +=
+    scope === 'all'
+      ? '📺 همه کانال‌ها\n'
+      : '📺 «' + ((DEFAULT_CHANNELS[scope] && DEFAULT_CHANNELS[scope].title) || scope) + '»\n';
+  body += '📅 امروز تهران: ' + now.date + '\n';
+  body += '🟡 pending تقریبی (نمونه): ' + pendingCount + '\n';
+
+  for (const ck of channelKeys) {
+    const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+    const ads = allAdmins
+      .filter(function (a) {
+        return String(a.channelKey || a.channel_key) === ck;
+      })
+      .map(function (a) {
+        return Number(a.userId || a.user_id);
+      })
+      .filter(Boolean);
+
+    const sh3 = allSh.filter(function (s) {
+      return (
+        String(s.channelKey) === ck &&
+        String(s.status) === 'active' &&
+        last3.indexOf(String(s.shiftDate)) >= 0 &&
+        String(s.startHm) !== String(s.endHm)
+      );
+    });
+    const sh7 = allSh.filter(function (s) {
+      return (
+        String(s.channelKey) === ck &&
+        String(s.status) === 'active' &&
+        last7.indexOf(String(s.shiftDate)) >= 0 &&
+        String(s.startHm) !== String(s.endHm)
+      );
+    });
+
+    const shifted3 = {};
+    for (const s of sh3) shifted3[Number(s.adminId)] = true;
+    const shifted7 = {};
+    for (const s of sh7) {
+      const id = Number(s.adminId);
+      if (!shifted7[id]) shifted7[id] = [];
+      shifted7[id].push(String(s.shiftDate) + ' ' + String(s.startHm).slice(0, 5));
+    }
+
+    const noShift3 = ads.filter(function (id) {
+      return !shifted3[id];
+    });
+
+    const revByAdmin = {};
+    for (const m of reviews) {
+      if (String(m.channelKey) !== ck) continue;
+      const d = tehranDay(m.reviewedAt);
+      if (!d || last7.indexOf(d) < 0) continue;
+      const aid = Number(m.reviewedBy);
+      if (!revByAdmin[aid]) revByAdmin[aid] = { ap: 0, rj: 0, reasons: {} };
+      if (m.status === 'approved') revByAdmin[aid].ap++;
+      else {
+        revByAdmin[aid].rj++;
+        const rr = String(m.rejectReason || '—').slice(0, 40);
+        revByAdmin[aid].reasons[rr] = (revByAdmin[aid].reasons[rr] || 0) + 1;
+      }
+    }
+
+    // شیفت گرفته ولی تأیید کم (۷ روز)
+    const lowPerf = [];
+    for (const aid of Object.keys(shifted7)) {
+      const id = Number(aid);
+      const st = revByAdmin[id] || { ap: 0, rj: 0 };
+      const total = st.ap + st.rj;
+      const shiftN = shifted7[id].length;
+      if (shiftN >= 1 && total < Math.max(2, shiftN)) {
+        lowPerf.push({ id: id, shifts: shiftN, ap: st.ap, rj: st.rj, total: total });
+      }
+    }
+    lowPerf.sort(function (a, b) {
+      return a.total - b.total;
+    });
+
+    // برترین‌ها
+    const top = Object.keys(revByAdmin)
+      .map(function (k) {
+        const st = revByAdmin[k];
+        return { id: Number(k), ap: st.ap, rj: st.rj, total: st.ap + st.rj };
+      })
+      .sort(function (a, b) {
+        return b.total - a.total;
+      })
+      .slice(0, 5);
+
+    body += '\n━━━━━━━━━━━━\n📢 «' + title + '»\n';
+    body += '👮 ادمین ثبت‌شده: ' + ads.length + '\n';
+    body += '⏰ شیفت‌دار ۳ روز اخیر: ' + Object.keys(shifted3).length + '\n';
+    body += '⏰ شیفت‌دار ۷ روز اخیر: ' + Object.keys(shifted7).length + '\n';
+
+    body += '\n🚫 بدون شیفت در ۳ روز اخیر:\n';
+    if (!noShift3.length) body += '— همه حداقل یک شیفت داشته‌اند\n';
+    else {
+      for (let i = 0; i < Math.min(noShift3.length, 15); i++) {
+        const id = noShift3[i];
+        let name = String(id);
+        try {
+          name = displayName(await getUser(id), id);
+        } catch (_e) {}
+        body += '• ' + name + '\n';
+      }
+      if (noShift3.length > 15) body += '… و ' + (noShift3.length - 15) + ' نفر دیگر\n';
+    }
+
+    body += '\n⚠️ شیفت گرفته ولی بررسی کم (۷ روز):\n';
+    if (!lowPerf.length) body += '— موردی نبود\n';
+    else {
+      for (let i = 0; i < Math.min(lowPerf.length, 12); i++) {
+        const p = lowPerf[i];
+        let name = String(p.id);
+        try {
+          name = displayName(await getUser(p.id), p.id);
+        } catch (_e) {}
+        body +=
+          '• ' +
+          name +
+          ' | شیفت ' +
+          p.shifts +
+          ' | ✅' +
+          p.ap +
+          ' ❌' +
+          p.rj +
+          '\n';
+      }
+    }
+
+    body += '\n🏆 بیشترین بررسی ۷ روز:\n';
+    if (!top.length) body += '— بدون بررسی در نمونه\n';
+    else {
+      for (const p of top) {
+        let name = String(p.id);
+        try {
+          name = displayName(await getUser(p.id), p.id);
+        } catch (_e) {}
+        body += '• ' + name + ' | ✅' + p.ap + ' ❌' + p.rj + ' (جمع ' + p.total + ')\n';
+      }
+    }
+
+    // دلایل رد در نمونه
+    const reasonTot = {};
+    for (const m of reviews) {
+      if (String(m.channelKey) !== ck || m.status !== 'rejected') continue;
+      const d = tehranDay(m.reviewedAt);
+      if (!d || last7.indexOf(d) < 0) continue;
+      const rr = String(m.rejectReason || '—').slice(0, 40);
+      reasonTot[rr] = (reasonTot[rr] || 0) + 1;
+    }
+    const reasonArr = Object.keys(reasonTot)
+      .map(function (k) {
+        return { k: k, n: reasonTot[k] };
+      })
+      .sort(function (a, b) {
+        return b.n - a.n;
+      })
+      .slice(0, 8);
+    body += '\n🔴 دلایل رد (۷ روز، نمونه):\n';
+    if (!reasonArr.length) body += '—\n';
+    else {
+      for (const r of reasonArr) body += '• ' + r.k + ': ' + r.n + '\n';
+    }
+  }
+
+  body +=
+    '\n────────────\n' +
+    'ℹ️ آمار از نمونهٔ پیام‌های اخیر ساخته شده تا timeout نخورد.\n' +
+    'شیفت‌ها از جدول شیفت کامل‌تر خوانده می‌شوند.';
+  return body;
+}
+
 export async function testChannels() {
   const results = [];
   for (const [key, conf] of Object.entries(DEFAULT_CHANNELS)) {
