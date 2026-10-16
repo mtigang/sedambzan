@@ -1,0 +1,16 @@
+{
+  "hash": "14758a5ad53b774bcafbcec57277a0ffe48c8dc620be408ac35214cad4e274c5",
+  "manifest": {
+    "index.html": {
+      "hash": "55897f961c68eebda8358bf936fc6a8d5c71c544b90e60dc6f0b6aa3c1fe1fbb",
+      "size": 5314
+    }
+  },
+  "config": {
+    "spa": true,
+    "immutable": [],
+    "headers": [],
+    "redirects": []
+  },
+  "url": "https://app8730417878.tgcloud.ai/"
+}

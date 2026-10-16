@@ -1,0 +1,270 @@
+/** زمان تهران — دوره شیفت ۱۲:۰۰ تا ۰۰:۰۰ (نیمه‌شب) + شمسی */
+
+const PERIOD_START_MIN = 12 * 60; // ۱۲ ظهر
+const PERIOD_END_MIN = 0 * 60; // ۰۰:۰۰ نیمه‌شب
+
+export function tehranNow() {
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Tehran',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(new Date()).map((p) => [p.type, p.value]));
+  const hour = Number(parts.hour);
+  const minute = Number(parts.minute);
+  return {
+    date: parts.year + '-' + parts.month + '-' + parts.day,
+    hm: String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0'),
+    hour,
+    minute,
+  };
+}
+
+export function hmToMin(hm) {
+  const [h, m] = String(hm || '0:0').split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+export function minToHm(mins) {
+  const m = ((mins % (24 * 60)) + 24 * 60) % (24 * 60);
+  return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+}
+
+/** نرمال HH:MM */
+export function normHm(hm) {
+  const [h, m] = String(hm || '0:0').split(':').map(Number);
+  return String(h || 0).padStart(2, '0') + ':' + String(m || 0).padStart(2, '0');
+}
+
+/** ساعت باکت (برای مقایسه پر بودن شیفت) */
+export function hourKeyOf(hm) {
+  const [h] = String(hm || '0').split(':').map(Number);
+  return String(h || 0).padStart(2, '0') + ':00';
+}
+
+/**
+ * ترتیب داخل دوره ۱۲:۰۰→۰۰:۰۰:
+ * ۱۲:۰۰=720 … ۲۳:۵۹=1439 ، ۰۰:۰۰=1440
+ * قبل از ۱۲ ظهر → +۲۴س برای مقایسه
+ */
+export function periodOrd(hm) {
+  let m = hmToMin(normHm(hm));
+  if (m < PERIOD_START_MIN) m += 24 * 60;
+  return m;
+}
+
+/**
+ * آیا hm داخل [startHm, endHm) است؟
+ * پشتیبانی overnight (مثلاً ۲۳→۰۰).
+ * شیفت با طول صفر (start===end) هرگز فعال نیست.
+ */
+export function inRange(hm, startHm, endHm) {
+  const start = normHm(startHm);
+  const end = normHm(endHm);
+  if (start === end) return false;
+  const t = periodOrd(hm);
+  let s = periodOrd(start);
+  let e = periodOrd(end);
+  if (e <= s) e += 24 * 60;
+  if (e - s > 15 * 60) return false;
+  return t >= s && t < e;
+}
+
+/**
+ * کلید تاریخ دوره شیفت (یک‌بارمصرف روزانه).
+ * دوره = از ۱۲:۰۰ تا ۰۰:۰۰ همان تقویم تهران.
+ * بعد از نیمه‌شب تا ظهر: دوره «امروز» هنوز شروع نشده (از ۱۲:۰۰).
+ * شیفت‌های دیروز دیگر متعلق به دوره فعلی نیستند.
+ */
+export function periodDateStr(now) {
+  if (!now) now = tehranNow();
+  return now.date;
+}
+
+function addDays(iso, delta) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + delta);
+  return (
+    dt.getUTCFullYear() +
+    '-' +
+    String(dt.getUTCMonth() + 1).padStart(2, '0') +
+    '-' +
+    String(dt.getUTCDate()).padStart(2, '0')
+  );
+}
+
+export function isWorkHours(now) {
+  if (!now) now = tehranNow();
+  // ۱۲:۰۰ تا ۰۰:۰۰ (نیمه‌شب) — نه بعد از نیمه‌شب
+  return inRange(now.hm, '12:00', '00:00');
+}
+
+/**
+ * شیفت‌های قابل انتخاب: ۱۲:۰۰–۱۳:۰۰ … ۲۳:۰۰–۰۰:۰۰
+ */
+export function buildAvailableShiftSlots(now) {
+  if (!now) now = tehranNow();
+  const slots = [];
+  const pad = (n) => String(n).padStart(2, '0');
+  const inWork = isWorkHours(now);
+  const nowOrd = periodOrd(now.hm);
+  // دوره رسمی: ۱۲:۰۰–۱۳:۰۰ … ۲۳:۰۰–۰۰:۰۰
+  for (let h = 12; h <= 23; h++) {
+    const start = pad(h) + ':00';
+    const end = pad((h + 1) % 24) + ':00';
+    if (inWork) {
+      const endOrd = periodOrd(end);
+      if (nowOrd >= endOrd) continue; // بازه تمام شده
+    }
+    slots.push({
+      start: start,
+      end: end,
+      label: start + '–' + end,
+      hourKey: start,
+    });
+  }
+  return slots;
+}
+
+export function buildOwnerShiftSlots(now) {
+  // مالک: بدون محدودیت ساعت کاری — ۲۴ ساعت کامل
+  if (!now) now = tehranNow();
+  const slots = [];
+  const pad = function (n) {
+    return String(n).padStart(2, '0');
+  };
+  for (let h = 0; h < 24; h++) {
+    const start = pad(h) + ':00';
+    const end = pad((h + 1) % 24) + ':00';
+    slots.push({
+      start: start,
+      end: end,
+      label: start + '–' + end,
+      hourKey: start,
+    });
+  }
+  return slots;
+}
+
+const JMONTHS = [
+  '',
+  'فروردین',
+  'اردیبهشت',
+  'خرداد',
+  'تیر',
+  'مرداد',
+  'شهریور',
+  'مهر',
+  'آبان',
+  'آذر',
+  'دی',
+  'بهمن',
+  'اسفند',
+];
+
+function gregorianToJalali(gy, gm, gd) {
+  const g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+  let jy = gy <= 1600 ? 0 : 979;
+  gy -= gy <= 1600 ? 621 : 1600;
+  const gy2 = gm > 2 ? gy + 1 : gy;
+  let days =
+    365 * gy +
+    Math.floor((gy2 + 3) / 4) -
+    Math.floor((gy2 + 99) / 100) +
+    Math.floor((gy2 + 399) / 400) -
+    80 +
+    gd +
+    g_d_m[gm - 1];
+  jy += 33 * Math.floor(days / 12053);
+  days %= 12053;
+  jy += 4 * Math.floor(days / 1461);
+  days %= 1461;
+  if (days > 365) {
+    jy += Math.floor((days - 1) / 365);
+    days = (days - 1) % 365;
+  }
+  const jm = days < 186 ? 1 + Math.floor(days / 31) : 7 + Math.floor((days - 186) / 30);
+  const jd = 1 + (days < 186 ? days % 31 : (days - 186) % 30);
+  return [jy, jm, jd];
+}
+
+export function toJalaliDisplay(isoDate, hm) {
+  let datePart = '';
+  if (isoDate) {
+    const p = String(isoDate).split(/[T\s]/)[0];
+    const [gy, gm, gd] = p.split('-').map(Number);
+    if (gy && gm && gd) {
+      const [jy, jm, jd] = gregorianToJalali(gy, gm, gd);
+      datePart = jd + ' ' + JMONTHS[jm] + ' ' + jy;
+    }
+  }
+  const timePart = hm ? String(hm).slice(0, 5) : '';
+  if (datePart && timePart) return datePart + ' — ' + timePart;
+  return datePart || timePart || '—';
+}
+
+export function formatTsJalali(ts) {
+  if (ts == null || ts === '') return '—';
+  let ms = NaN;
+  if (ts instanceof Date) ms = ts.getTime();
+  else if (typeof ts === 'number') ms = ts > 1e12 ? ts : ts * 1000;
+  else if (typeof ts === 'string' && /^\d+$/.test(ts.trim())) {
+    const n = Number(ts.trim());
+    ms = n > 1e12 ? n : n * 1000;
+  } else ms = new Date(ts).getTime();
+  if (!Number.isFinite(ms) || ms <= 0) return '—';
+  if (ms >= 1e9 && ms < 1e12) ms = ms * 1000;
+  const IRAN_OFFSET = 3.5 * 3600 * 1000;
+  const adj = new Date(ms + IRAN_OFFSET);
+  const y = adj.getUTCFullYear();
+  const mo = adj.getUTCMonth() + 1;
+  const da = adj.getUTCDate();
+  const hh = adj.getUTCHours();
+  const mi = adj.getUTCMinutes();
+  const pad = (n) => String(n).padStart(2, '0');
+  return toJalaliDisplay(y + '-' + pad(mo) + '-' + da, pad(hh) + ':' + pad(mi));
+}
+
+export { formatTsJalali as formatTehranJalali };
+
+export function toFaDigits(s) {
+  return String(s).replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[Number(d)]);
+}
+
+export function hoursUntilWorkOpen(now) {
+  if (!now) now = tehranNow();
+  if (isWorkHours(now)) return 0;
+  const nowM = hmToMin(now.hm);
+  const openM = 12 * 60;
+  // ۰۰:۰۰–۱۱:۵۹ تا ظهر
+  if (nowM < openM) return Math.max(1, Math.ceil((openM - nowM) / 60));
+  // بعد از نیمه‌شب از مسیر دیگر نمی‌آید چون isWorkHours تا ۰۰:۰۰ است
+  return Math.max(1, Math.ceil((openM + 24 * 60 - nowM) / 60));
+}
+
+export function workHoursClosedText() {
+  const h = hoursUntilWorkOpen();
+  return (
+    '⏰ ساعت کاری از ' +
+    toFaDigits('12:00') +
+    ' تا ' +
+    toFaDigits('00:00') +
+    ' است.\nالان خارج از ساعت کاری هستید.\nحدود ' +
+    toFaDigits(h) +
+    ' ساعت تا شروع کار مانده.'
+  );
+}
+
+/** مرتب‌سازی شیفت‌ها داخل دوره ۱۲→۰۰ */
+export function sortShiftsByPeriod(list) {
+  return (list || []).slice().sort(function (a, b) {
+    const sa = periodOrd(normHm(a.startHm || a.start_hm || '12:00'));
+    const sb = periodOrd(normHm(b.startHm || b.start_hm || '12:00'));
+    return sa - sb;
+  });
+}
