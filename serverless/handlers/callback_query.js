@@ -929,7 +929,38 @@ if (data.startsWith('reject_menu:')) {
     }
 
     
-    if (data === 'admin_help') {
+    
+    if (data.startsWith('ban_user:') || data.startsWith('unban_user:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const tid = Number(data.split(':')[1]);
+      const makeBlock = data.startsWith('ban_user:');
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        const existing = (await db.select().from(users).where(eq(users.userId, tid)).all()) || [];
+        if (existing.length) {
+          await db.update(users).set({ blocked: makeBlock ? 1 : 0 }).where(eq(users.userId, tid)).run();
+        } else {
+          await db.insert(users).values({ userId: tid, role: 'user', started: 0, blocked: makeBlock ? 1 : 0 }).run();
+        }
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: makeBlock
+            ? '🚫 کاربر ' + tid + ' بن شد و از خدمات ربات محروم است.'
+            : '✅ بن کاربر ' + tid + ' برداشته شد.',
+        });
+      } catch (e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'خطا: ' + (e.message || e),
+        });
+      }
+      return;
+    }
+
+if (data === 'admin_help') {
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       try {
         await api.sendMessage({
