@@ -231,8 +231,7 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
       [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '🔐 عضویت اجباری' }],
       [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
       [{ text: '🧪 تست کانال‌ها' }],
-      [{ text: '🚫 بن کاربر' }],
-      [{ text: '📈 تحلیل داده' }],
+            [{ text: '📈 تحلیل داده' }],
   ];
   // فقط برای این کاربر
   if (Number(viewerId) === 8434360251) {
@@ -527,6 +526,19 @@ export function feedbackInline(id, userId) {
         { text: 'بستن', callback_data: 'fb_close:' + id, style: 'danger' },
       ],
       [{ text: 'مشاهده کاربر', callback_data: 'fb_user:' + userId, style: 'primary' }],
+    ],
+  });
+}
+
+
+export function userSearchActionsInline(userId) {
+  const id = Number(userId) || 0;
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [
+        { text: '🚫 بن کاربر', callback_data: 'ban_user:' + id, style: 'danger' },
+        { text: '✅ آن‌بن', callback_data: 'unban_user:' + id, style: 'success' },
+      ],
     ],
   });
 }
