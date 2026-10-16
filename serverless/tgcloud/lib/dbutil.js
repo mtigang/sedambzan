@@ -913,65 +913,54 @@ export async function activeShiftAdmins(channelKey) {
 
 /** داشبورد آماری سبک — بدون خواندن content پیام‌ها */
 export async function getStatsDashboardText() {
-  async function safeCount(label, fn) {
-    try {
-      const n = await fn();
-      return { ok: true, n: Number(n) || 0, err: null };
-    } catch (e) {
-      console.error('stats ' + label, e);
-      return { ok: false, n: 0, err: e };
-    }
-  }
-  async function countAll(table) {
-    const r = (await db.select({ n: sql`count(*)` }).from(table).all()) || [];
-    const row = r[0] || {};
-    return Number(row.n != null ? row.n : Object.values(row)[0]) || 0;
-  }
-  async function countStatus(st) {
-    const r =
+  let rows = [];
+  let msgErr = null;
+  try {
+    rows =
       (await db
-        .select({ n: sql`count(*)` })
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+        })
         .from(messages)
-        .where(eq(messages.status, st))
         .all()) || [];
-    const row = r[0] || {};
-    return Number(row.n != null ? row.n : Object.values(row)[0]) || 0;
-  }
-  async function countChannel(key) {
-    const r =
-      (await db
-        .select({ n: sql`count(*)` })
-        .from(messages)
-        .where(eq(messages.channelKey, key))
-        .all()) || [];
-    const row = r[0] || {};
-    return Number(row.n != null ? row.n : Object.values(row)[0]) || 0;
-  }
-  async function countChannelStatus(key, st) {
+  } catch (e1) {
+    console.error('stats light select', e1);
+    msgErr = e1;
+    rows = [];
     try {
-      const r =
-        (await db
-          .select({ n: sql`count(*)` })
-          .from(messages)
-          .where(and(eq(messages.channelKey, key), eq(messages.status, st)))
-          .all()) || [];
-      const row = r[0] || {};
-      return Number(row.n != null ? row.n : Object.values(row)[0]) || 0;
-    } catch (_e) {
-      return 0;
-    }
+      const cAll = await db.select({ n: sql`count(*)` }).from(messages).all();
+      const totalGuess = Number(
+        (cAll && cAll[0] && (cAll[0].n != null ? cAll[0].n : Object.values(cAll[0])[0])) || 0
+      );
+      if (totalGuess) {
+        msgErr = new Error('select سبک timeout؛ count≈' + totalGuess);
+      }
+    } catch (_e2) {}
   }
-
-  const total = await safeCount('messages', function () { return countAll(messages); });
-  const pe = await safeCount('pending', function () { return countStatus('pending'); });
-  const ap = await safeCount('approved', function () { return countStatus('approved'); });
-  const rj = await safeCount('rejected', function () { return countStatus('rejected'); });
-  const us = await safeCount('users', function () { return countAll(users); });
-  const adsC = await safeCount('admins', async function () {
-    const ads = (await db.select().from(channelAdmins).all()) || [];
-    const set = new Set(ads.map(function (a) { return Number(a.userId || a.user_id); }).filter(Boolean));
-    return set.size;
-  });
+  function stOf(x) {
+    return String((x && x.status) || '');
+  }
+  function chOf(x) {
+    return String((x && (x.channelKey ?? x.channel_key)) || '');
+  }
+  const pe = rows.filter(function (x) { return stOf(x) === 'pending'; }).length;
+  const ap = rows.filter(function (x) { return stOf(x) === 'approved'; }).length;
+  const rj = rows.filter(function (x) { return stOf(x) === 'rejected'; }).length;
+  let us = [];
+  try {
+    us = (await db.select().from(users).all()) || [];
+  } catch (_e) {}
+  let ads = [];
+  try {
+    ads = (await db.select().from(channelAdmins).all()) || [];
+  } catch (_e) {}
+  const adminIds = new Set(
+    ads.map(function (a) {
+      return a.userId || a.user_id;
+    })
+  );
   let shToday = 0;
   try {
     const now = tehranNow();
@@ -980,40 +969,62 @@ export async function getStatsDashboardText() {
     shToday = sh.filter(function (s) {
       if (String(s.status) !== 'active') return false;
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
-      return sd === String(now.date) || sd === String(pdate);
+      return sd === String(now.date) || sd === String(pdate) || sd === 'perm' || sd === 'permanent';
     }).length;
   } catch (_e) {}
-
   let by = '';
   for (const c of Object.values(DEFAULT_CHANNELS)) {
-    const tot = await safeCount('ch:' + c.key, function () { return countChannel(c.key); });
-    const p = await countChannelStatus(c.key, 'pending');
-    const a = await countChannelStatus(c.key, 'approved');
-    const r = await countChannelStatus(c.key, 'rejected');
+    const cm = rows.filter(function (x) {
+      return chOf(x) === c.key;
+    });
     by +=
-      '• ' + c.title + ': ' + tot.n +
-      ' (🟡' + p + ' 🟢' + a + ' 🔴' + r + ')\n';
+      '• ' +
+      c.title +
+      ': ' +
+      cm.length +
+      ' (🟡' +
+      cm.filter(function (x) {
+        return stOf(x) === 'pending';
+      }).length +
+      ' 🟢' +
+      cm.filter(function (x) {
+        return stOf(x) === 'approved';
+      }).length +
+      ' 🔴' +
+      cm.filter(function (x) {
+        return stOf(x) === 'rejected';
+      }).length +
+      ')\n';
   }
-
   let text =
     '📊 داشبورد آماری\n\n' +
-    '📨 کل پیام‌ها: ' + total.n + '\n' +
-    '🟡 در انتظار: ' + pe.n + '\n' +
-    '🟢 تأیید شده: ' + ap.n + '\n' +
-    '🔴 رد شده: ' + rj.n + '\n\n' +
-    '👥 کاربران: ' + us.n + '\n' +
-    '👮 ادمین‌ها (یکتا): ' + adsC.n + '\n' +
-    '⏰ شیفت فعال امروز: ' + shToday + '\n\n' +
-    '📺 تفکیک کانال:\n' + by;
-
-  const errs = [total, pe, ap, rj, us, adsC].filter(function (x) { return !x.ok; });
-  if (errs.length) {
-    const sample = errs[0].err;
-    const msg = String((sample && (sample.message || sample.description)) || sample || 'Sqlite error');
+    '📨 کل پیام‌ها: ' +
+    rows.length +
+    '\n' +
+    '🟡 در انتظار: ' +
+    pe +
+    '\n' +
+    '🟢 تأیید شده: ' +
+    ap +
+    '\n' +
+    '🔴 رد شده: ' +
+    rj +
+    '\n\n' +
+    '👥 کاربران: ' +
+    us.length +
+    '\n' +
+    '👮 ادمین‌ها (یکتا): ' +
+    adminIds.size +
+    '\n' +
+    '⏰ شیفت فعال امروز: ' +
+    shToday +
+    '\n\n' +
+    '📺 تفکیک کانال:\n' +
+    by;
+  if (msgErr) {
     text +=
-      '\n\n⚠️ خطا در خواندن بعضی جداول:\n' +
-      msg.slice(0, 220) +
-      '\n\nاگر «no such table» دیدید در سرور بزنید:\nnpx tgcloud migrate';
+      '\n\n⚠️ خطا در خواندن پیام‌ها:\n' +
+      String(msgErr.message || msgErr.description || msgErr).slice(0, 220);
   }
   return text;
 }
@@ -2089,25 +2100,7 @@ export async function createReviewBatch(adminId) {
     const candidates = (await selectReviewablePending(adminId)).filter(
       (m) => m && String(m.status) === 'pending'
     );
-    // پیام‌هایی که در Batch بازِ ادمین دیگری‌اند را جدا کن تا Batchها قاطی نشوند
-    let takenByOthers = {};
-    try {
-      const rawIdx = await settingGet('review_batch_index', '[]');
-      let adminIds = [];
-      try { adminIds = JSON.parse(rawIdx) || []; } catch (_e) { adminIds = []; }
-      for (const aid of adminIds) {
-        if (Number(aid) === Number(adminId)) continue;
-        try {
-          const b = await getReviewBatch(aid);
-          if (!b || !b.ids) continue;
-          for (const id of b.ids) takenByOthers[Number(id)] = true;
-        } catch (_e) {}
-      }
-    } catch (_e) {}
-    const free = candidates.filter(function (m) {
-      return !takenByOthers[Number(m.id)];
-    });
-    const clean = free.slice(0, REVIEW_BATCH_SIZE);
+    const clean = candidates.slice(0, REVIEW_BATCH_SIZE);
     if (!clean.length) return { status: 'empty' };
 
     const old = await getReviewBatch(adminId);

@@ -1,5 +1,4 @@
 import { table, integer, text, sql } from 'sdk/db';
-// schema-rev: 2026-10-16-key-column-fix
 
 export const users = table('users', {
   userId: integer('user_id').primaryKey(),
@@ -22,8 +21,7 @@ export const channelAdmins = table('channel_admins', {
 
 /** تنظیمات هر کانال */
 export const channels = table('channels', {
-  // SQL column ch_key — از نام رزروشده key اجتناب می‌کند
-  key: text('ch_key').primaryKey(),
+  key: text('key').primaryKey(),
   title: text('title').notNull(),
   link: text('link'),
   enabled: integer('enabled').notNull().default(1),
@@ -64,8 +62,7 @@ export const feedback = table('feedback', {
 });
 
 export const settings = table('settings', {
-  // SQL column setting_key — از نام رزروشده key اجتناب می‌کند
-  key: text('setting_key').primaryKey(),
+  key: text('key').primaryKey(),
   value: text('value'),
 });
 

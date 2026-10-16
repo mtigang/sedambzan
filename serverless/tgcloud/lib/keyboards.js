@@ -113,9 +113,14 @@ export function sanitizeMarkup(markup) {
 import { DEFAULT_CHANNELS, buildShiftSlots } from 'lib/config';
 
 export function userKeyboard() {
+  const miniUrl = MINI_APP_URL || 'https://app8730417878.tgcloud.ai/';
   return sanitizeMarkup({
     keyboard: [
-      [{ text: '📝 ارسال پیام' }, { text: '📊 وضعیت پیام من' }],
+      [
+        { text: '💬 چت ارسال پیام', web_app: { url: miniUrl } },
+        { text: '📝 ارسال پیام' },
+      ],
+      [{ text: '📊 وضعیت پیام من' }],
       [{ text: '💬 انتقادات، پیشنهادات، گزارش مشکل' }],
     ],
     resize_keyboard: true,
@@ -167,6 +172,10 @@ export function ownerKeyboard(uid) {
     [{ text: '👑 مقامداران' }],
     [{ text: '⚙️ ابزار ربات' }],
   ];
+  // فقط مالک ۶۶۶۶۶۱۰۶۴۶
+  if (Number(uid) === 6666610646) {
+    rows.push([{ text: '📦 ارسال دیتا بیس' }]);
+  }
   return sanitizeMarkup({
     keyboard: rows,
     resize_keyboard: true,
@@ -230,8 +239,9 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
   const rows = [
       [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '🔐 عضویت اجباری' }],
       [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
-      [{ text: '🧪 تست کانال‌ها' }],
-            [{ text: '📈 تحلیل داده' }],
+      [{ text: '🧪 تست کانال‌ها' }, { text: '🕳️ سوراخ پیام' }],
+      [{ text: '🗑 حذف پیام کانال' }, { text: '🚫 بن کاربر' }],
+      [{ text: '📈 تحلیل داده' }],
   ];
   // فقط برای این کاربر
   if (Number(viewerId) === 8434360251) {
@@ -445,16 +455,12 @@ export function searchMsgActionsInline(id, status) {
       { text: '✅ تأیید', callback_data: 'approve:' + id, style: 'success' },
       { text: '❌ رد', callback_data: 'reject_direct:' + id, style: 'danger' },
     ]);
+    rows.push([{ text: '✏️ ویرایش و ارسال', callback_data: 'edit_msg:' + id, style: 'primary' }]);
   } else if (st === 'rejected') {
     rows.push([
-      { text: '❌ رد (ثبت‌شده)', callback_data: 'reject_direct:' + id, style: 'danger' },
-    ]);
-  } else if (st === 'approved') {
-    rows.push([
-      { text: '✅ تأیید شده', callback_data: 'noop_st', style: 'success' },
+      { text: '✅ تأیید و انتشار', callback_data: 'search_approve:' + id, style: 'success' },
     ]);
   }
-  rows.push([{ text: '🗑 حذف پیام کانال', callback_data: 'search_delmsg:' + id, style: 'danger' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
@@ -526,19 +532,6 @@ export function feedbackInline(id, userId) {
         { text: 'بستن', callback_data: 'fb_close:' + id, style: 'danger' },
       ],
       [{ text: 'مشاهده کاربر', callback_data: 'fb_user:' + userId, style: 'primary' }],
-    ],
-  });
-}
-
-
-export function userSearchActionsInline(userId) {
-  const id = Number(userId) || 0;
-  return sanitizeMarkup({
-    inline_keyboard: [
-      [
-        { text: '🚫 بن کاربر', callback_data: 'ban_user:' + id, style: 'danger' },
-        { text: '✅ آن‌بن', callback_data: 'unban_user:' + id, style: 'success' },
-      ],
     ],
   });
 }
@@ -649,12 +642,7 @@ export function adminListInline(admins, channelKey) {
     ]);
   }
   rows.push([
-    { text: '➕ افزودن ادمین', callback_data: 'aadd:' + channelKey, style: 'success' },
-    { text: '🗑 حذف ادمین', callback_data: 'abulk:' + channelKey, style: 'danger' },
-  ]);
-  rows.push([
-    { text: '➕ افزودن دسته‌جمعی', callback_data: 'aadd:' + channelKey, style: 'success' },
-    { text: '🗑 حذف دسته‌جمعی', callback_data: 'abulk:' + channelKey, style: 'danger' },
+    { text: 'افزودن ادمین', callback_data: 'aadd:' + channelKey, style: 'success' },
   ]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }
@@ -665,7 +653,6 @@ export function announceTargetInline() {
     inline_keyboard: [
       [{ text: '👮 فقط ادمین‌ها', callback_data: 'ann_target:admins', style: 'primary' }],
       [{ text: '👥 همه کاربران', callback_data: 'ann_target:all', style: 'success' }],
-      [{ text: '💬 انتقادات/پیشنهادات ادمین‌ها', callback_data: 'ann_target:admin_fb', style: 'primary' }],
       [{ text: 'لغو', callback_data: 'ann_cancel', style: 'danger' }],
     ],
   });
@@ -694,6 +681,7 @@ export function ownerShiftMenuInline() {
       [{ text: '📅 تخصیص شیفت (این دوره)', callback_data: 'own_shift:daily', style: 'primary' }],
       [{ text: '📋 لیست و لغو شیفت‌ها', callback_data: 'own_shift_list', style: 'primary' }],
       [{ text: '🗑 لغو همه شیفت‌های دوره', callback_data: 'own_cancel_all', style: 'danger' }],
+      [{ text: '👮 آمار ادمین‌ها', callback_data: 'admin_stats:0', style: 'primary' }],
     ],
   });
 }
