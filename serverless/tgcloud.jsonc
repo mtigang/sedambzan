@@ -1,0 +1,7 @@
+{
+  // اگر CLI قدیمی schema را نپذیرفت، این فایل را به tgcloud.json بدون کامنت تبدیل کنید
+  "static": {
+    "source": "miniapp",
+    "spa": true
+  }
+}
