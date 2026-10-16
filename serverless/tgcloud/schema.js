@@ -1,8 +1,9 @@
 import { table, integer, text } from 'sdk/db';
-// schema-rev: 2026-10-16-bootstrap-safe
-// بدون DEFAULT (unixepoch()) تا migrate روی SQLite پلتفرم fail نشود
+// schema-rev: 2026-10-16-v2-tables
+// جدول‌های *_v2 تا migrate روی «already exists» گیر نکند.
+// داده از جدول‌های قدیمی (در صورت وجود) با ensureDbTables کپی می‌شود.
 
-export const users = table('users', {
+export const users = table('users_v2', {
   userId: integer('user_id').primaryKey(),
   username: text('username'),
   firstName: text('first_name'),
@@ -14,14 +15,14 @@ export const users = table('users', {
   lastSeen: integer('last_seen'),
 });
 
-export const channelAdmins = table('channel_admins', {
+export const channelAdmins = table('channel_admins_v2', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   userId: integer('user_id').notNull(),
   channelKey: text('channel_key').notNull(),
 });
 
-export const channels = table('channels', {
-  key: text('key').primaryKey(),
+export const channels = table('channels_v2', {
+  key: text('ch_key').primaryKey(),
   title: text('title').notNull(),
   link: text('link'),
   enabled: integer('enabled').notNull().default(1),
@@ -29,7 +30,7 @@ export const channels = table('channels', {
   workEnd: text('work_end').default('23:59'),
 });
 
-export const shifts = table('shifts', {
+export const shifts = table('shifts_v2', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   channelKey: text('channel_key').notNull(),
   adminId: integer('admin_id').notNull(),
@@ -39,7 +40,7 @@ export const shifts = table('shifts', {
   status: text('status').notNull().default('active'),
 });
 
-export const messages = table('messages', {
+export const messages = table('messages_v2', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   userId: integer('user_id').notNull(),
   content: text('content').notNull(),
@@ -51,7 +52,7 @@ export const messages = table('messages', {
   reviewedAt: integer('reviewed_at'),
 });
 
-export const feedback = table('feedback', {
+export const feedback = table('feedback_v2', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   userId: integer('user_id').notNull(),
   content: text('content').notNull(),
@@ -60,12 +61,12 @@ export const feedback = table('feedback', {
   createdAt: integer('created_at'),
 });
 
-export const settings = table('settings', {
-  key: text('key').primaryKey(),
+export const settings = table('settings_v2', {
+  key: text('setting_key').primaryKey(),
   value: text('value'),
 });
 
-export const subLeaders = table('sub_leaders', {
+export const subLeaders = table('sub_leaders_v2', {
   userId: integer('user_id').primaryKey(),
   channelKey: text('channel_key').notNull(),
   status: text('status').notNull().default('active'),

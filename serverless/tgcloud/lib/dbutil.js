@@ -33,8 +33,8 @@ function memo(key, fn) {
 let _dbTablesReady = false;
 export async function ensureDbTables() {
   if (_dbTablesReady) return true;
-  const stmts = [
-    `CREATE TABLE IF NOT EXISTS users (
+  const creates = [
+    `CREATE TABLE IF NOT EXISTS users_v2 (
       user_id INTEGER PRIMARY KEY,
       username TEXT,
       first_name TEXT,
@@ -45,20 +45,20 @@ export async function ensureDbTables() {
       created_at INTEGER,
       last_seen INTEGER
     )`,
-    `CREATE TABLE IF NOT EXISTS channel_admins (
+    `CREATE TABLE IF NOT EXISTS channel_admins_v2 (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       channel_key TEXT NOT NULL
     )`,
-    `CREATE TABLE IF NOT EXISTS channels (
-      "key" TEXT PRIMARY KEY,
+    `CREATE TABLE IF NOT EXISTS channels_v2 (
+      ch_key TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       link TEXT,
       enabled INTEGER NOT NULL DEFAULT 1,
       work_start TEXT DEFAULT '00:00',
       work_end TEXT DEFAULT '23:59'
     )`,
-    `CREATE TABLE IF NOT EXISTS shifts (
+    `CREATE TABLE IF NOT EXISTS shifts_v2 (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       channel_key TEXT NOT NULL,
       admin_id INTEGER NOT NULL,
@@ -67,7 +67,7 @@ export async function ensureDbTables() {
       end_hm TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active'
     )`,
-    `CREATE TABLE IF NOT EXISTS messages (
+    `CREATE TABLE IF NOT EXISTS messages_v2 (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       content TEXT NOT NULL,
@@ -78,7 +78,7 @@ export async function ensureDbTables() {
       submitted_at INTEGER,
       reviewed_at INTEGER
     )`,
-    `CREATE TABLE IF NOT EXISTS feedback (
+    `CREATE TABLE IF NOT EXISTS feedback_v2 (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       content TEXT NOT NULL,
@@ -86,11 +86,11 @@ export async function ensureDbTables() {
       owner_reply TEXT,
       created_at INTEGER
     )`,
-    `CREATE TABLE IF NOT EXISTS settings (
-      "key" TEXT PRIMARY KEY,
+    `CREATE TABLE IF NOT EXISTS settings_v2 (
+      setting_key TEXT PRIMARY KEY,
       value TEXT
     )`,
-    `CREATE TABLE IF NOT EXISTS sub_leaders (
+    `CREATE TABLE IF NOT EXISTS sub_leaders_v2 (
       user_id INTEGER PRIMARY KEY,
       channel_key TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active',
@@ -98,32 +98,48 @@ export async function ensureDbTables() {
       created_at INTEGER
     )`,
   ];
+  // کپی یک‌باره از جدول‌های قدیمی در صورت وجود (داده حفظ می‌شود)
+  const copies = [
+    `INSERT OR IGNORE INTO users_v2 SELECT * FROM users`,
+    `INSERT OR IGNORE INTO channel_admins_v2 SELECT * FROM channel_admins`,
+    `INSERT OR IGNORE INTO channels_v2 (ch_key, title, link, enabled, work_start, work_end)
+      SELECT "key", title, link, enabled, work_start, work_end FROM channels`,
+    `INSERT OR IGNORE INTO shifts_v2 SELECT * FROM shifts`,
+    `INSERT OR IGNORE INTO messages_v2 SELECT * FROM messages`,
+    `INSERT OR IGNORE INTO feedback_v2 SELECT * FROM feedback`,
+    `INSERT OR IGNORE INTO settings_v2 (setting_key, value) SELECT "key", value FROM settings`,
+    `INSERT OR IGNORE INTO sub_leaders_v2 SELECT * FROM sub_leaders`,
+  ];
+
+  async function rawRun(s) {
+    if (typeof db.run === 'function') return await db.run(s);
+    if (typeof db.execute === 'function') return await db.execute(s);
+    if (typeof db.all === 'function') {
+      // some runtimes accept raw via all
+      try { return await db.all(s); } catch (_e) {}
+    }
+    throw new Error('no raw SQL runner');
+  }
+
   let ok = 0;
-  let lastErr = null;
-  for (const s of stmts) {
+  for (const s of creates) {
     try {
-      if (typeof db.run === 'function') {
-        await db.run(s);
-      } else if (typeof db.execute === 'function') {
-        await db.execute(s);
-      } else if (db && typeof db.prepare === 'function') {
-        await db.prepare(s).run();
-      } else {
-        // fallback: drizzle raw if available
-        await db.run(sql.raw ? sql.raw(s) : s);
-      }
+      await rawRun(s);
       ok += 1;
     } catch (e) {
-      lastErr = e;
-      console.error('ensureDbTables stmt fail', String(e && e.message ? e.message : e).slice(0, 200));
+      console.error('ensureDbTables create', String(e && e.message ? e.message : e).slice(0, 160));
+    }
+  }
+  for (const s of copies) {
+    try {
+      await rawRun(s);
+    } catch (e) {
+      // جدول قدیمی ممکن است نباشد — طبیعی است
+      console.error('ensureDbTables copy skip', String(e && e.message ? e.message : e).slice(0, 120));
     }
   }
   if (ok > 0) _dbTablesReady = true;
-  if (lastErr && ok === 0) {
-    console.error('ensureDbTables all failed', lastErr);
-    return false;
-  }
-  return true;
+  return ok > 0;
 }
 
 export async function dbDiagText() {
