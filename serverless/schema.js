@@ -1,4 +1,5 @@
 import { table, integer, text, sql } from 'sdk/db';
+// schema-rev: 2026-10-16-sqlite-fix
 
 export const users = table('users', {
   userId: integer('user_id').primaryKey(),
