@@ -2,7 +2,7 @@ import { buildAvailableShiftSlots } from 'lib/time';
 
 export const OWNER_IDS = [6666610646, 8302194171, 8434360251];
 
-/** آدرس مینی‌اپ روی tgcloud — بعد از push در خروجی CLI هم چاپ می‌شود */
+/** آدرس مینی‌اپ چت ارسال پیام (tgcloud static) */
 export const MINI_APP_URL = 'https://app8730417878.tgcloud.ai/';
 
 export const CHANNEL_USERNAMES = {
