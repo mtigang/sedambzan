@@ -37,6 +37,7 @@ import {
   reviewInline,
   ownerReviewInline,
   searchMsgActionsInline,
+  userSearchActionsInline,
   feedbackInline,
   userOpenInline,
   shiftSlotsInline,
@@ -2801,7 +2802,7 @@ try {
         if (!list.length) {
           await api.sendMessage({
             chat_id: chatId,
-            text: 'فیدبک بازی نیست.',
+            text: 'فیدبکی در صف نیست.',
             reply_markup: ownerKeyboard(),
           });
           return;
@@ -3215,11 +3216,18 @@ try {
           await api.sendMessage({
             chat_id: chatId,
             text: 'آیدی بعدی را بفرستید یا ◀️ بازگشت',
-            reply_markup: sanitizeMarkup(backKeyboard()),
+            reply_markup: sanitizeMarkup(userSearchActionsInline(id)),
           });
         }
       } catch (eAdm) {
         console.error('admin stats in search_user', eAdm);
+        try {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'آیدی بعدی را بفرستید یا ◀️ بازگشت',
+            reply_markup: sanitizeMarkup(userSearchActionsInline(id)),
+          });
+        } catch (_e) {}
       }
       return;
     }
@@ -3726,15 +3734,6 @@ try {
       return;
     }
 
-    if (owner && text === '🚫 بن کاربر') {
-      await setState(userId, 'ban_user');
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '🚫 آیدی عددی یا @username کاربری که باید مسدود شود را بفرستید:',
-        reply_markup: sanitizeMarkup(backKeyboard()),
-      });
-      return;
-    }
 
     if (owner && state?.kind === 'ban_user' && text) {
       try {
