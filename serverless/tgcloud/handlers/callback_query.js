@@ -358,8 +358,7 @@ export default async function (cq) {
     }
 
 
-    // مالک از جستجو: تأیید و انتشار پیام ردشده
-    i
+    // مالک از جستجو: حذف پیام کانال
     if (data.startsWith('search_delmsg:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
@@ -420,7 +419,8 @@ export default async function (cq) {
       return;
     }
 
-f (data.startsWith('search_approve:')) {
+    // مالک از جستجو: تأیید و انتشار پیام ردشده
+    if (data.startsWith('search_approve:')) {
       const id = Number(data.split(':')[1]);
       try {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳ انتشار…' });
