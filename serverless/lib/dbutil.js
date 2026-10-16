@@ -2100,7 +2100,25 @@ export async function createReviewBatch(adminId) {
     const candidates = (await selectReviewablePending(adminId)).filter(
       (m) => m && String(m.status) === 'pending'
     );
-    const clean = candidates.slice(0, REVIEW_BATCH_SIZE);
+    // پیام‌هایی که در Batch بازِ ادمین دیگری‌اند را جدا کن تا Batchها قاطی نشوند
+    let takenByOthers = {};
+    try {
+      const rawIdx = await settingGet('review_batch_index', '[]');
+      let adminIds = [];
+      try { adminIds = JSON.parse(rawIdx) || []; } catch (_e) { adminIds = []; }
+      for (const aid of adminIds) {
+        if (Number(aid) === Number(adminId)) continue;
+        try {
+          const b = await getReviewBatch(aid);
+          if (!b || !b.ids) continue;
+          for (const id of b.ids) takenByOthers[Number(id)] = true;
+        } catch (_e) {}
+      }
+    } catch (_e) {}
+    const free = candidates.filter(function (m) {
+      return !takenByOthers[Number(m.id)];
+    });
+    const clean = free.slice(0, REVIEW_BATCH_SIZE);
     if (!clean.length) return { status: 'empty' };
 
     const old = await getReviewBatch(adminId);
