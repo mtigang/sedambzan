@@ -176,6 +176,11 @@ async function editReviewResult(cq, text, fin) {
 
 export default async function (cq) {
   try {
+    const { ensureDbTables } = await import('lib/dbutil');
+    await ensureDbTables();
+  } catch (_e) {}
+
+  try {
     const data = cq.data || '';
     const userId = cq.from?.id;
     if (!userId) return;
