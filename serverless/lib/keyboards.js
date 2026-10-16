@@ -1,3 +1,5 @@
+import { MINI_APP_URL } from 'lib/config';
+
 /** تضمین می‌کند همه text دکمه‌ها String و غیرخالی باشند */
 export function btnText(v, fallback) {
   let s = v == null ? '' : String(v);
@@ -87,6 +89,9 @@ export function sanitizeMarkup(markup) {
             const nb = { text: btnText(b.text, '•') };
             if (b.request_contact) nb.request_contact = true;
             if (b.request_location) nb.request_location = true;
+            if (b.web_app && b.web_app.url) {
+              nb.web_app = { url: String(b.web_app.url) };
+            }
             if (b.style != null) {
               const st = String(b.style).toLowerCase();
               if (STYLE_OK[st]) nb.style = st;
@@ -107,9 +112,14 @@ export function sanitizeMarkup(markup) {
 import { DEFAULT_CHANNELS, buildShiftSlots } from 'lib/config';
 
 export function userKeyboard() {
+  const miniUrl = MINI_APP_URL || 'https://app8730417878.tgcloud.ai/';
   return sanitizeMarkup({
     keyboard: [
-      [{ text: '📝 ارسال پیام' }, { text: '📊 وضعیت پیام من' }],
+      [
+        { text: '💬 چت ارسال پیام', web_app: { url: miniUrl } },
+        { text: '📝 ارسال پیام' },
+      ],
+      [{ text: '📊 وضعیت پیام من' }],
       [{ text: '💬 انتقادات، پیشنهادات، گزارش مشکل' }],
     ],
     resize_keyboard: true,
@@ -381,7 +391,6 @@ export function searchKeyboard() {
   return sanitizeMarkup({
     keyboard: [
       [{ text: '🔎 جستجوی پیام' }, { text: '🔎 جستجوی کاربر' }],
-      [{ text: '👮 جستجوی ادمین' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
@@ -633,7 +642,6 @@ export function adminListInline(admins, channelKey) {
   }
   rows.push([
     { text: 'افزودن ادمین', callback_data: 'aadd:' + channelKey, style: 'success' },
-    { text: 'حذف دسته‌جمعی', callback_data: 'abulk:' + channelKey, style: 'danger' },
   ]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }
