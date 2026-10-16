@@ -84,6 +84,8 @@ import {
 } from 'lib/subleader';
 import {
   ensureChannelsSeeded,
+  ensureDbTables,
+  dbDiagText,
   getChannels,
   getChannel,
   isBotOn,
@@ -341,6 +343,7 @@ export default async function (message) {
       }
     }
 
+    try { await ensureDbTables(); } catch (_e) {}
     await ensureChannelsSeeded();
     try {
       await upsertUser(message.from);
@@ -392,6 +395,23 @@ export default async function (message) {
         console.error('forceJoin gate', e);
       }
     }
+
+
+  // تشخیص/تعمیر DB — فقط مالک
+  try {
+    if (text === '/dbinfo' || text === '/dbfix') {
+      const { isOwner: _io } = await import('lib/users');
+      const uid = message.from && message.from.id;
+      if (uid && (OWNER_IDS.includes(Number(uid)) || (typeof _io === 'function' && _io(uid)))) {
+        try { await ensureDbTables(); } catch (_e) {}
+        const report = await dbDiagText();
+        await api.sendMessage({ chat_id: chatId, text: report });
+        return;
+      }
+    }
+  } catch (e) {
+    console.error('dbinfo', e);
+  }
 
     if (text === '/start' || text.startsWith('/start ')) {
       try {

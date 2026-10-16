@@ -1,25 +1,25 @@
-import { table, integer, text, sql } from 'sdk/db';
+import { table, integer, text } from 'sdk/db';
+// schema-rev: 2026-10-16-bootstrap-safe
+// بدون DEFAULT (unixepoch()) تا migrate روی SQLite پلتفرم fail نشود
 
 export const users = table('users', {
   userId: integer('user_id').primaryKey(),
   username: text('username'),
   firstName: text('first_name'),
   lastName: text('last_name'),
-  role: text('role').notNull().default('user'), // user | admin | owner
+  role: text('role').notNull().default('user'),
   blocked: integer('blocked').notNull().default(0),
   started: integer('started').notNull().default(1),
-  createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(unixepoch())`),
-  lastSeen: integer('last_seen', { mode: 'timestamp' }).default(sql`(unixepoch())`),
+  createdAt: integer('created_at'),
+  lastSeen: integer('last_seen'),
 });
 
-/** ادمین هر کانال جدا */
 export const channelAdmins = table('channel_admins', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   userId: integer('user_id').notNull(),
   channelKey: text('channel_key').notNull(),
 });
 
-/** تنظیمات هر کانال */
 export const channels = table('channels', {
   key: text('key').primaryKey(),
   title: text('title').notNull(),
@@ -29,15 +29,14 @@ export const channels = table('channels', {
   workEnd: text('work_end').default('23:59'),
 });
 
-/** شیفت ادمین */
 export const shifts = table('shifts', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   channelKey: text('channel_key').notNull(),
   adminId: integer('admin_id').notNull(),
-  shiftDate: text('shift_date').notNull(), // YYYY-MM-DD (تهران)
-  startHm: text('start_hm').notNull(), // HH:MM
+  shiftDate: text('shift_date').notNull(),
+  startHm: text('start_hm').notNull(),
   endHm: text('end_hm').notNull(),
-  status: text('status').notNull().default('active'), // active | cancelled
+  status: text('status').notNull().default('active'),
 });
 
 export const messages = table('messages', {
@@ -48,8 +47,8 @@ export const messages = table('messages', {
   status: text('status').notNull().default('pending'),
   rejectReason: text('reject_reason'),
   reviewedBy: integer('reviewed_by'),
-  submittedAt: integer('submitted_at', { mode: 'timestamp' }).default(sql`(unixepoch())`),
-  reviewedAt: integer('reviewed_at', { mode: 'timestamp' }),
+  submittedAt: integer('submitted_at'),
+  reviewedAt: integer('reviewed_at'),
 });
 
 export const feedback = table('feedback', {
@@ -58,7 +57,7 @@ export const feedback = table('feedback', {
   content: text('content').notNull(),
   status: text('status').notNull().default('open'),
   ownerReply: text('owner_reply'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(unixepoch())`),
+  createdAt: integer('created_at'),
 });
 
 export const settings = table('settings', {
@@ -66,11 +65,10 @@ export const settings = table('settings', {
   value: text('value'),
 });
 
-/** ساب‌لیدر — یک کانال به ازای هر کاربر (بدون حذف داده قبلی) */
 export const subLeaders = table('sub_leaders', {
   userId: integer('user_id').primaryKey(),
   channelKey: text('channel_key').notNull(),
-  status: text('status').notNull().default('active'), // active | inactive
+  status: text('status').notNull().default('active'),
   createdBy: integer('created_by'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(unixepoch())`),
+  createdAt: integer('created_at'),
 });

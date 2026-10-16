@@ -1,5 +1,5 @@
 import { api, db } from 'sdk';
-import {  channels, channelAdmins, shifts, settings, users, messages, subLeaders } from 'schema';
+import {  channels, channelAdmins, shifts, settings, users, messages, subLeaders, feedback } from 'schema';
 // subLeaders used for role
 import { eq, and, sql, desc } from 'sdk/db';
 import {
@@ -28,6 +28,134 @@ function memo(key, fn) {
   __reqMemoTs[key] = now;
   return p;
 }
+
+/** ساخت امن جدول‌ها اگر migrate شکست خورده باشد — دادهٔ موجود پاک نمی‌شود */
+let _dbTablesReady = false;
+export async function ensureDbTables() {
+  if (_dbTablesReady) return true;
+  const stmts = [
+    `CREATE TABLE IF NOT EXISTS users (
+      user_id INTEGER PRIMARY KEY,
+      username TEXT,
+      first_name TEXT,
+      last_name TEXT,
+      role TEXT NOT NULL DEFAULT 'user',
+      blocked INTEGER NOT NULL DEFAULT 0,
+      started INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER,
+      last_seen INTEGER
+    )`,
+    `CREATE TABLE IF NOT EXISTS channel_admins (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      channel_key TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS channels (
+      "key" TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      link TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      work_start TEXT DEFAULT '00:00',
+      work_end TEXT DEFAULT '23:59'
+    )`,
+    `CREATE TABLE IF NOT EXISTS shifts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel_key TEXT NOT NULL,
+      admin_id INTEGER NOT NULL,
+      shift_date TEXT NOT NULL,
+      start_hm TEXT NOT NULL,
+      end_hm TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'
+    )`,
+    `CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      channel_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      reject_reason TEXT,
+      reviewed_by INTEGER,
+      submitted_at INTEGER,
+      reviewed_at INTEGER
+    )`,
+    `CREATE TABLE IF NOT EXISTS feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      owner_reply TEXT,
+      created_at INTEGER
+    )`,
+    `CREATE TABLE IF NOT EXISTS settings (
+      "key" TEXT PRIMARY KEY,
+      value TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS sub_leaders (
+      user_id INTEGER PRIMARY KEY,
+      channel_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_by INTEGER,
+      created_at INTEGER
+    )`,
+  ];
+  let ok = 0;
+  let lastErr = null;
+  for (const s of stmts) {
+    try {
+      if (typeof db.run === 'function') {
+        await db.run(s);
+      } else if (typeof db.execute === 'function') {
+        await db.execute(s);
+      } else if (db && typeof db.prepare === 'function') {
+        await db.prepare(s).run();
+      } else {
+        // fallback: drizzle raw if available
+        await db.run(sql.raw ? sql.raw(s) : s);
+      }
+      ok += 1;
+    } catch (e) {
+      lastErr = e;
+      console.error('ensureDbTables stmt fail', String(e && e.message ? e.message : e).slice(0, 200));
+    }
+  }
+  if (ok > 0) _dbTablesReady = true;
+  if (lastErr && ok === 0) {
+    console.error('ensureDbTables all failed', lastErr);
+    return false;
+  }
+  return true;
+}
+
+export async function dbDiagText() {
+  const lines = [];
+  try {
+    await ensureDbTables();
+    lines.push('ensureDbTables: ok');
+  } catch (e) {
+    lines.push('ensureDbTables: ' + String(e && e.message ? e.message : e).slice(0, 120));
+  }
+  const pairs = [
+    ['users', users],
+    ['messages', messages],
+    ['shifts', shifts],
+    ['channel_admins', channelAdmins],
+    ['channels', channels],
+    ['settings', settings],
+    ['sub_leaders', subLeaders],
+    ['feedback', feedback],
+  ];
+  for (const [name, tbl] of pairs) {
+    try {
+      const rows = await db.select({ c: sql`count(*)` }).from(tbl).all();
+      const n = rows && rows[0] ? (rows[0].c ?? rows[0].count ?? Object.values(rows[0])[0]) : '?';
+      lines.push(name + ': ' + n);
+    } catch (e) {
+      lines.push(name + ': ERR ' + String(e && e.message ? e.message : e).slice(0, 100));
+    }
+  }
+  return '🛠 DB diag\n' + lines.join('\n');
+}
+
 export function clearMemo(prefix) {
   try {
     if (!prefix) {
@@ -47,6 +175,7 @@ export function clearMemo(prefix) {
 let _channelsSeededAt = 0;
 export async function ensureChannelsSeeded() {
   try {
+    try { await ensureDbTables(); } catch (_e) {}
     // هر ۶ ساعت یک‌بار کافی است
     if (_channelsSeededAt && Date.now() - _channelsSeededAt < 6 * 60 * 60 * 1000) {
       return Object.values(DEFAULT_CHANNELS);
