@@ -269,13 +269,8 @@ export default async function (cq) {
       const prefixName =
         (conf.prefixes && conf.prefixes[0]) || conf.title || channelKey;
       const html =
-        '<b>سلام خانومیای خوشگل و نانازی 🎀</b>\n\n' +
-        'با رعایت قوانین پیام های خودتونو ارسال کنید\n\n' +
-        '<blockquote>1. پیامتون با ' + prefixName + ' شروع بشه</blockquote>\n' +
-        '<blockquote>2. پیام خودتون رو برجسته کنید</blockquote>\n' +
-        '<blockquote>3. با یک فاصله از متن نقطه بذارید.</blockquote>\n' +
-        '<blockquote>4. محتوای پیامتون فحش و هیت و تکراری نباشه !</blockquote>\n\n' +
-        'ایدی ربات :\n\n@Arail_bot';
+        '<b>با رعایت قوانین تکست بدین</b>\n' +
+        '@arail_bot';
       try {
         const sent = await api.sendMessage({
           chat_id: conf.chatId,
@@ -364,7 +359,68 @@ export default async function (cq) {
 
 
     // مالک از جستجو: تأیید و انتشار پیام ردشده
-    if (data.startsWith('search_approve:')) {
+    i
+    if (data.startsWith('search_delmsg:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const mid = Number(data.split(':')[1]);
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        let row = null;
+        try {
+          const rows = (await db.select().from(messages).where(eq(messages.id, mid)).all()) || [];
+          row = rows[0] || null;
+        } catch (_e) {}
+        if (!row) {
+          await api.sendMessage({ chat_id: cq.message.chat.id, text: 'پیام پیدا نشد.' });
+          return;
+        }
+        const ck = String(row.channelKey || '');
+        const conf = DEFAULT_CHANNELS[ck];
+        if (!conf || !conf.chatId) {
+          await api.sendMessage({ chat_id: cq.message.chat.id, text: 'کانال نامعتبر.' });
+          return;
+        }
+        // پیدا کردن message_id کانال از settings chmsg
+        let channelMsgId = null;
+        try {
+          const all = (await db.select().from(settings).all()) || [];
+          const prefix = 'chmsg:' + ck + ':';
+          for (const s of all) {
+            const k = String(s.key || '');
+            if (!k.startsWith(prefix)) continue;
+            if (String(s.value || '') === String(mid) || String(s.value || '').split('|')[0] === String(mid)) {
+              channelMsgId = Number(k.slice(prefix.length));
+              break;
+            }
+          }
+        } catch (e) {
+          console.error('search_delmsg map', e);
+        }
+        if (!channelMsgId) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: 'لینک/آیدی پیام کانال برای #' + mid + ' پیدا نشد. شاید هنوز منتشر نشده.',
+          });
+          return;
+        }
+        await api.deleteMessage({ chat_id: conf.chatId, message_id: channelMsgId });
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '🗑 پیام کانال مربوط به #' + mid + ' حذف شد.',
+        });
+      } catch (e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'خطا در حذف: ' + (e.description || e.message || e),
+        });
+      }
+      return;
+    }
+
+f (data.startsWith('search_approve:')) {
       const id = Number(data.split(':')[1]);
       try {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳ انتشار…' });
@@ -1004,10 +1060,16 @@ if (data.startsWith('reject_menu:')) {
         try {
           if (typeof clearMemo === 'function') clearMemo('ask:' + Number(userId));
         } catch (_e) {}
+        try {
+          await clearReviewBatch(userId);
+        } catch (_e) {}
+        try {
+          await clearReviewBatch(requesterId);
+        } catch (_e) {}
 
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: 'شیفت کمکی ثبت شد',
+          text: 'شیفت کمکی ثبت شد — از «پیام‌های در انتظار» بگیرید',
           show_alert: true,
         });
 
@@ -1341,9 +1403,13 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text:
-          'آیدی عددی یا @username برای افزودن به «' +
+          '➕ افزودن ادمین به «' +
           (DEFAULT_CHANNELS[channelKey]?.title || '') +
-          '»:',
+          '»\n\nهر خط یک آیدی عددی یا @username:\n\nمثال:\n8607359838\n@username\n\n◀️ بازگشت برای انصراف',
+        reply_markup: sanitizeMarkup({
+          keyboard: [[{ text: '◀️ بازگشت' }]],
+          resize_keyboard: true,
+        }),
       });
       return;
     }
@@ -3801,6 +3867,18 @@ if (data.startsWith('sl_setch:')) {
       return;
     }
 
+    if (data === 'ann_fb_reply') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        await setState(userId, 'ann_admin_reply');
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'پاسخ خود را بنویسید.\nمستقیم برای مالک ارسال می‌شود.\nانصراف: /start',
+        });
+      } catch (_e) {}
+      return;
+    }
+
 if (data.startsWith('ann_target:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
@@ -3816,6 +3894,53 @@ if (data.startsWith('ann_target:')) {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text: 'متن اطلاعیه پیدا نشد. دوباره از «📣 اطلاعیه» شروع کنید.',
+        });
+        return;
+      }
+      // انتقادات/پیشنهادات ادمین‌ها: یک‌بار برای همه ادمین‌ها با دکمه پاسخ
+      if (target === 'admin_fb') {
+        let ids = [];
+        const seen = {};
+        try {
+          const ads = (await db.select().from(channelAdmins).all()) || [];
+          for (const a of ads) {
+            const id = Number(a.userId || a.user_id);
+            if (id && !seen[id]) {
+              seen[id] = true;
+              ids.push(id);
+            }
+          }
+        } catch (e) {
+          console.error('ann admin_fb collect', e);
+        }
+        if (!ids.length) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: 'ادمینی برای ارسال پیدا نشد.',
+          });
+          return;
+        }
+        let ok = 0, fail = 0;
+        for (const tid of ids) {
+          try {
+            await api.sendMessage({
+              chat_id: tid,
+              text: '💬 پیام مالک برای ادمین‌ها\n\n' + String(annText).slice(0, 3500),
+              entities: Array.isArray(annEntities) && annEntities.length ? annEntities : undefined,
+              reply_markup: sanitizeMarkup({
+                inline_keyboard: [
+                  [{ text: 'ارسال پاسخ', callback_data: 'ann_fb_reply', style: 'success' }],
+                ],
+              }),
+            });
+            ok++;
+          } catch (_e) {
+            fail++;
+          }
+        }
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '✅ ارسال به ادمین‌ها تمام شد.\nموفق: ' + ok + ' | ناموفق: ' + fail,
         });
         return;
       }
