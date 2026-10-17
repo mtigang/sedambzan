@@ -1306,6 +1306,10 @@ export default async function (message) {
               await settingSet(bodyIndexSettingKey(v.channelKey, bodyKey), String(msgId) + '|pending');
             } catch (_e) {}
           }
+          try {
+            const { pruneOldestMessageIfOverBudget } = await import('lib/dbutil');
+            await pruneOldestMessageIfOverBudget();
+          } catch (_e) {}
         } finally {
           try {
             await settingSet(sendLockKey, '0');

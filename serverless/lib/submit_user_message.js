@@ -22,6 +22,7 @@ import {
   acquireLock,
   releaseLock,
   forceJoinNeedGate,
+  pruneOldestMessageIfOverBudget,
   FRIDAY_MODE_TEXT,
   QUEUE_BUSY_TEXT,
 } from 'lib/dbutil';
@@ -305,6 +306,10 @@ export async function submitUserMessage(userId, text) {
         await settingSet(bIdx, String(msgId) + '|pending');
       } catch (_e) {}
     }
+
+    try {
+      await pruneOldestMessageIfOverBudget();
+    } catch (_e) {}
 
     return {
       ok: true,

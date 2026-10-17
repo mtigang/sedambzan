@@ -1,7 +1,7 @@
 import { api, db } from 'sdk';
 import {  channels, channelAdmins, shifts, settings, users, messages, subLeaders } from 'schema';
 // subLeaders used for role
-import { eq, and, sql, desc } from 'sdk/db';
+import { eq, and, sql, desc, asc } from 'sdk/db';
 import {
   DEFAULT_CHANNELS,
   OWNER_IDS,
@@ -150,6 +150,81 @@ export async function settingSet(key, value) {
     }
   } catch (e) {
     console.error('settingSet', e);
+  }
+}
+
+
+/** سقف تقریبی حجم جدول messages ≈ ۵ مگابایت */
+export const MESSAGES_SIZE_BUDGET_BYTES = 5 * 1024 * 1024;
+const MSG_ROW_OVERHEAD = 200;
+
+/**
+ * اگر برآورد حجم messages از ۵MB بیشتر باشد، قدیمی‌ترین پیام را حذف می‌کند.
+ * با هر پیام جدید یک‌بار صدا زده شود تا حجم به‌مرور پایین بیاید.
+ * @returns {{ pruned: number, id?: number, estimate?: number }}
+ */
+export async function pruneOldestMessageIfOverBudget() {
+  try {
+    let contentBytes = 0;
+    let n = 0;
+    try {
+      const rows =
+        (await db
+          .select({
+            n: sql`count(*)`,
+            bytes: sql`coalesce(sum(length(content)), 0)`,
+          })
+          .from(messages)
+          .all()) || [];
+      n = Number(rows[0] && (rows[0].n != null ? rows[0].n : rows[0].count)) || 0;
+      contentBytes = Number(rows[0] && rows[0].bytes) || 0;
+    } catch (e1) {
+      // fallback: فقط تعداد
+      try {
+        const c = (await db.select({ n: sql`count(*)` }).from(messages).all()) || [];
+        n = Number(c[0] && c[0].n) || 0;
+        contentBytes = n * 400;
+      } catch (_e) {
+        return { pruned: 0 };
+      }
+    }
+    const estimate = contentBytes + n * MSG_ROW_OVERHEAD;
+    if (estimate <= MESSAGES_SIZE_BUDGET_BYTES || n <= 0) {
+      return { pruned: 0, estimate: estimate, n: n };
+    }
+    let oldestId = null;
+    try {
+      const oldest =
+        (await db
+          .select({ id: messages.id })
+          .from(messages)
+          .orderBy(asc(messages.id))
+          .limit(1)
+          .all()) || [];
+      if (oldest[0] && oldest[0].id != null) oldestId = Number(oldest[0].id);
+    } catch (_e) {
+      try {
+        const all = (await db.select({ id: messages.id }).from(messages).limit(500).all()) || [];
+        if (all.length) {
+          oldestId = Math.min.apply(
+            null,
+            all.map(function (r) {
+              return Number(r.id);
+            })
+          );
+        }
+      } catch (_e2) {
+        return { pruned: 0, estimate: estimate };
+      }
+    }
+    if (!oldestId || !Number.isFinite(oldestId)) {
+      return { pruned: 0, estimate: estimate };
+    }
+    await db.delete(messages).where(eq(messages.id, oldestId)).run();
+    return { pruned: 1, id: oldestId, estimate: estimate, n: n };
+  } catch (e) {
+    console.error('pruneOldestMessageIfOverBudget', e);
+    return { pruned: 0 };
   }
 }
 
