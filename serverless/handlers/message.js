@@ -1836,7 +1836,7 @@ export default async function (message) {
           return;
         }
       }
-      // مستقیم لیست ساعت‌ها — بدون پیام میانی
+            // مستقیم لیست ساعت‌ها — بدون پیام میانی
       try {
         try { await cancelInvalidShifts(); } catch (_e) {}
         const now = tehranNow();
@@ -1845,14 +1845,17 @@ export default async function (message) {
         let dayShifts = [];
         try {
           dayShifts = (await db.select().from(shifts).where(eq(shifts.channelKey, channelKey)).all()) || [];
-        } catch (_e) { dayShifts = []; }
+        } catch (_e) {
+          dayShifts = [];
+        }
         const occupied = dayShifts.filter(function (s) {
           if (String(s.status) !== 'active') return false;
           if (String(s.startHm) === String(s.endHm)) return false;
           const sd = String(s.shiftDate || '');
           if (sd === 'perm' || sd === 'permanent') return false;
           if (sd !== date) return false;
-          return true;
+          const sh = Number(String(s.startHm || '0').split(':')[0]) || 0;
+          return sh >= 12;
         });
         const takenMap = {};
         const myStarts = new Set();
@@ -1863,37 +1866,34 @@ export default async function (message) {
           if (Number(s.adminId) === Number(userId)) myStarts.add(key);
         }
         await setState(userId, 'pick_shift_slot', { channelKey: channelKey, mode: 'daily' });
-        const { buildAvailableShiftSlots } = await import('lib/time');
-        let slots = [];
+        let head =
+          '⏰ شیفت‌های «' +
+          entry.title +
+          '»\nدوره: ' +
+          (toJalaliDisplay(date) || date) +
+          ' (یک‌بارمصرف)\n🟢 خالی  ·  🔴 پر\n\n';
+        if (occupied.length) {
+          head += 'اشغال‌شده‌ها:\n';
+          for (const s of occupied) {
+            let who = Number(s.adminId) === Number(userId) ? 'شما' : String(s.adminId);
+            try {
+              if (Number(s.adminId) !== Number(userId)) {
+                who = displayName(await getUser(s.adminId), s.adminId);
+              }
+            } catch (_e) {}
+            head += '• ' + s.startHm + '–' + s.endHm + ' | ' + who + '\n';
+          }
+        } else {
+          head += 'هنوز شیفتی ثبت نشده — همه خالی‌اند.';
+        }
+        let manageMode = isOwner(userId);
         try {
-          slots = buildAvailableShiftSlots(now, takenMap, myStarts) || [];
-        } catch (_e) {
-          // fallback: ساعت‌های ۱۲ تا ۲۳
-          for (let h = 12; h < 24; h++) {
-            const k = String(h).padStart(2, '0') + ':00';
-            const end = String(h === 23 ? 0 : h + 1).padStart(2, '0') + ':00';
-            slots.push({ start: k, end: end, hourKey: k, label: k + '–' + end, taken: !!takenMap[k], mine: myStarts.has(k) });
-          }
-        }
-        // build inline like shiftSlotsKeyboard
-        const rows = [];
-        for (const s of slots) {
-          const key = String(s.hourKey || s.start || '');
-          const isMine = myStarts.has(key) || s.mine;
-          const taken = !!takenMap[key] || s.taken;
-          if (taken && !isMine) {
-            rows.push([{ text: '🔴 ' + (s.label || key), callback_data: 'noop', style: 'danger' }]);
-          } else if (isMine) {
-            rows.push([{ text: '✅ ' + (s.label || key) + ' (شما)', callback_data: 'shift_cancel|' + channelKey + '|' + key, style: 'danger' }]);
-          } else {
-            rows.push([{ text: '🟢 ' + (s.label || key), callback_data: 'shift_pick|' + channelKey + '|' + String(s.start || key) + '|' + String(s.end || ''), style: 'success' }]);
-          }
-        }
-        rows.push([{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }]);
+          manageMode = manageMode || (await canManageOthersShifts(userId, channelKey));
+        } catch (_e) {}
         await api.sendMessage({
           chat_id: chatId,
-          text: '⏰ شیفت‌های «' + entry.title + '»\nساعت را انتخاب کنید (حداکثر ۳):',
-          reply_markup: sanitizeMarkup({ inline_keyboard: rows }),
+          text: head,
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, manageMode)),
         });
       } catch (e) {
         console.error('direct shift slots', e);
