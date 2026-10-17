@@ -42,6 +42,9 @@ import {
   shiftModePickInline,
   adminListInline,
   announceTargetInline,
+  userSearchActionsInline,
+  msgSearchActionsInline,
+  adminFbReplyInline,
   ownerShiftMenuInline,
   reviewNextInline,
   subLeaderKeyboard,
@@ -419,9 +422,42 @@ export default async function (message) {
       } catch (e) {
         console.error('setMyCommands', e);
       }
+      let startText = WELCOME_TEXT;
+      if (owner) {
+        try {
+          const fri = await isFridayMode();
+          const botOn = await isBotOn();
+          const lines = ['📡 وضعیت لحظه‌ای ربات'];
+          if (!botOn) lines.push('🔴 ربات خاموش است');
+          else if (fri) lines.push('🌙 حالت جمعه فعال است');
+          else lines.push('🟢 ربات فعال است');
+          for (const [ck, conf] of Object.entries(DEFAULT_CHANNELS || {})) {
+            let on = true;
+            try { on = await isChannelOpen(ck); } catch (_e) {}
+            lines.push('• ' + (conf.title || ck) + ': ' + (on ? 'روشن' : 'خاموش'));
+          }
+          startText = lines.join('\n') + '\n\n' + WELCOME_TEXT;
+        } catch (_e) {}
+      }
+      // مینی‌اپ در منوی چت (کنار تایپ)
+      try {
+        const { MINI_APP_URL } = await import('lib/config');
+        if (MINI_APP_URL) {
+          await api.setChatMenuButton({
+            chat_id: chatId,
+            menu_button: {
+              type: 'web_app',
+              text: 'ارسال پیام',
+              web_app: { url: MINI_APP_URL },
+            },
+          });
+        }
+      } catch (e) {
+        console.error('setChatMenuButton', e);
+      }
       await api.sendMessage({
         chat_id: chatId,
-        text: WELCOME_TEXT,
+        text: startText,
         reply_markup: await roleKb(userId),
       });
       return;
@@ -1800,15 +1836,73 @@ export default async function (message) {
           return;
         }
       }
-      await clearState(userId);
-      await api.sendMessage({
-        chat_id: chatId,
-        text:
-          '⏰ کانال «' +
-          entry.title +
-          '»\nشیفت فقط برای همین دوره است (یک‌بارمصرف، فردا تکرار نمی‌شود).\nحداکثر ۳ شیفت.\nساعت را انتخاب کنید:',
-        reply_markup: sanitizeMarkup(shiftModePickInline(entry.key)),
-      });
+      // مستقیم لیست ساعت‌ها — بدون پیام میانی
+      try {
+        try { await cancelInvalidShifts(); } catch (_e) {}
+        const now = tehranNow();
+        const date = periodDateStr(now);
+        const channelKey = normalizeChannelKey(entry.key);
+        let dayShifts = [];
+        try {
+          dayShifts = (await db.select().from(shifts).where(eq(shifts.channelKey, channelKey)).all()) || [];
+        } catch (_e) { dayShifts = []; }
+        const occupied = dayShifts.filter(function (s) {
+          if (String(s.status) !== 'active') return false;
+          if (String(s.startHm) === String(s.endHm)) return false;
+          const sd = String(s.shiftDate || '');
+          if (sd === 'perm' || sd === 'permanent') return false;
+          if (sd !== date) return false;
+          return true;
+        });
+        const takenMap = {};
+        const myStarts = new Set();
+        for (const s of occupied) {
+          const parts = String(s.startHm || '0').split(':');
+          const key = String(Number(parts[0]) || 0).padStart(2, '0') + ':00';
+          takenMap[key] = s.adminId;
+          if (Number(s.adminId) === Number(userId)) myStarts.add(key);
+        }
+        await setState(userId, 'pick_shift_slot', { channelKey: channelKey, mode: 'daily' });
+        const { buildAvailableShiftSlots } = await import('lib/time');
+        let slots = [];
+        try {
+          slots = buildAvailableShiftSlots(now, takenMap, myStarts) || [];
+        } catch (_e) {
+          // fallback: ساعت‌های ۱۲ تا ۲۳
+          for (let h = 12; h < 24; h++) {
+            const k = String(h).padStart(2, '0') + ':00';
+            const end = String(h === 23 ? 0 : h + 1).padStart(2, '0') + ':00';
+            slots.push({ start: k, end: end, hourKey: k, label: k + '–' + end, taken: !!takenMap[k], mine: myStarts.has(k) });
+          }
+        }
+        // build inline like shiftSlotsKeyboard
+        const rows = [];
+        for (const s of slots) {
+          const key = String(s.hourKey || s.start || '');
+          const isMine = myStarts.has(key) || s.mine;
+          const taken = !!takenMap[key] || s.taken;
+          if (taken && !isMine) {
+            rows.push([{ text: '🔴 ' + (s.label || key), callback_data: 'noop', style: 'danger' }]);
+          } else if (isMine) {
+            rows.push([{ text: '✅ ' + (s.label || key) + ' (شما)', callback_data: 'shift_cancel|' + channelKey + '|' + key, style: 'danger' }]);
+          } else {
+            rows.push([{ text: '🟢 ' + (s.label || key), callback_data: 'shift_pick|' + channelKey + '|' + String(s.start || key) + '|' + String(s.end || ''), style: 'success' }]);
+          }
+        }
+        rows.push([{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }]);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '⏰ شیفت‌های «' + entry.title + '»\nساعت را انتخاب کنید (حداکثر ۳):',
+          reply_markup: sanitizeMarkup({ inline_keyboard: rows }),
+        });
+      } catch (e) {
+        console.error('direct shift slots', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در لیست شیفت: ' + String(e.message || e).slice(0, 120),
+          reply_markup: await roleKb(userId),
+        });
+      }
       return;
     }
 
@@ -1921,15 +2015,16 @@ try {
       await setState(userId, 'own_assign_admin', { mode: state.mode, channelKey: entry.key });
       await api.sendMessage({
         chat_id: chatId,
-        text: 'آیدی عددی ادمین را بفرستید:',
+        text: 'آیدی عددی یا @username ادمین را بفرستید:',
         reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
     }
     if (owner && state?.kind === 'own_assign_admin' && text) {
-      const adminId = Number(String(text).replace(/\D/g, ''));
+      let adminId = await resolveUserId(text);
+      if (!adminId) adminId = Number(String(text).replace(/\D/g, ''));
       if (!adminId) {
-        await api.sendMessage({ chat_id: chatId, text: 'آیدی نامعتبر', reply_markup: sanitizeMarkup(backKeyboard()) });
+        await api.sendMessage({ chat_id: chatId, text: 'آیدی یا یوزرنیم نامعتبر', reply_markup: sanitizeMarkup(backKeyboard()) });
         return;
       }
       const mode = 'daily';
@@ -2932,10 +3027,7 @@ try {
           '\n\n' +
           row.content +
           '\n\n🔎 آیدی یا لینک بعدی را بفرستید (یا ◀️ بازگشت):',
-        reply_markup:
-          row.status === 'pending' || row.status === 'rejected'
-            ? searchMsgActionsInline(row.id, row.status)
-            : sanitizeMarkup(backKeyboard()),
+        reply_markup: searchMsgActionsInline(row.id, row.status),
       });
       return;
     }
@@ -2997,18 +3089,29 @@ try {
           body += map[row.status] || '•';
           body += ' #' + row.id + ' ' + short + (short.length >= 60 ? '…' : '') + '\n';
         }
-        await api.sendMessage({
-          chat_id: chatId,
-          text: body,
-          reply_markup: sanitizeMarkup(searchKeyboard()),
-        });
+        await api.sendMessage({ chat_id: chatId, text: body });
       } else {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'پیامی ثبت نشده.',
-          reply_markup: sanitizeMarkup(searchKeyboard()),
-        });
+        await api.sendMessage({ chat_id: chatId, text: 'پیامی ثبت نشده.' });
       }
+      // اگر ادمین بود آمار هفته کامل‌تر
+      try {
+        const chans = await adminChannels(id);
+        if (chans && chans.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text:
+              '👮 این کاربر ادمین است.\nکانال‌ها: ' +
+              chans.map(function (k) { return (DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k; }).join('، ') +
+              '\nبرای گزارش کامل ۷ روز: 👮 جستجوی ادمین',
+          });
+        }
+      } catch (_e) {}
+      await setState(userId, 'search_user'); // بماند برای جستجوی بعدی
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'آیدی بعدی را بفرستید یا ◀️ بازگشت',
+        reply_markup: userSearchActionsInline(id),
+      });
       return;
     }
 
@@ -3394,6 +3497,34 @@ try {
     }
 
 
+    
+    // پاسخ ادمین به اطلاعیه انتقادات → مستقیم به مالک
+    if (state?.kind === 'admin_fb_reply_text' && text) {
+      await clearState(userId);
+      const name = (message.from && (message.from.first_name || message.from.username)) || userId;
+      for (const oid of OWNER_IDS) {
+        try {
+          await api.sendMessage({
+            chat_id: oid,
+            text:
+              '💬 پاسخ ادمین\nاز: ' +
+              name +
+              ' (`' +
+              userId +
+              '`)\n\n' +
+              text,
+            parse_mode: 'Markdown',
+          });
+        } catch (_e) {}
+      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '✅ پاسخ برای مالک ارسال شد.',
+        reply_markup: await roleKb(userId),
+      });
+      return;
+    }
+
     if (owner && state?.kind === 'announce_wait_text' && text) {
       // حفظ entities (لینک متنی، بولد، …) برای ارسال یکسان به کاربران
       let annEntities = null;
@@ -3616,6 +3747,27 @@ try {
           chat_id: chatId,
           text: 'خطا در دریافت پیام‌های اخیر',
           reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+        });
+      }
+      return;
+    }
+
+
+    // ——— اطلاعیه مالک ———
+    if (owner && text === '📣 اطلاعیه') {
+      try {
+        await setState(userId, 'announce_wait_text');
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'متن اطلاعیه را بفرستید:\n(بعداً مخاطب را انتخاب می‌کنید)',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('announce start', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در شروع اطلاعیه: ' + String(e.message || e).slice(0, 120),
+          reply_markup: await roleKb(userId),
         });
       }
       return;

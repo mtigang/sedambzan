@@ -175,6 +175,108 @@ async function editReviewResult(cq, text, fin) {
 }
 
 export default async function (cq) {
+    // —— بن کاربر از جستجو ——
+    
+    if (data === 'nav:search') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await setState(userId, 'search_user');
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'آیدی عددی یا @username کاربر را بفرستید:',
+        reply_markup: sanitizeMarkup({ keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true }),
+      });
+      return;
+    }
+if (data.startsWith('ban_user:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const tid = Number(data.split(':')[1]);
+      if (!tid) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
+        return;
+      }
+      try {
+        const { setBlocked } = await import('lib/users');
+        await setBlocked(tid, true);
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'مسدود شد' });
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '🚫 کاربر ' + tid + ' از ربات مسدود شد.',
+        });
+      } catch (e) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'خطا', show_alert: true });
+        console.error('ban_user', e);
+      }
+      return;
+    }
+
+    // —— حذف پیام از جستجو ——
+    if (data.startsWith('smsg_del:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const mid = Number(data.split(':')[1]);
+      try {
+        const rows = await db.select().from(messages).where(eq(messages.id, mid)).all();
+        if (!rows || !rows.length) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'یافت نشد', show_alert: true });
+          return;
+        }
+        await db.delete(messages).where(eq(messages.id, mid)).run();
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'حذف شد' });
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: (cq.message.text || '') + '\n\n🗑 از دیتابیس حذف شد.',
+          });
+        } catch (_e) {}
+      } catch (e) {
+        console.error('smsg_del', e);
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'خطا', show_alert: true });
+      }
+      return;
+    }
+
+    // —— حذف دسته‌جمعی ادمین ——
+    if (data.startsWith('abulkdel:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const ck = data.split(':')[1];
+      await setState(userId, 'bulk_del_admin', { channelKey: ck || null });
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          'حذف دسته‌جمعی ادمین' +
+          (ck ? ' «' + ((DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck) + '»' : '') +
+          '\nهر خط یک آیدی عددی یا @username بفرستید:',
+        reply_markup: sanitizeMarkup({ keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true }),
+      });
+      return;
+    }
+
+    // —— پاسخ ادمین به اطلاعیه انتقادات ——
+    if (data === 'admin_fb_reply') {
+      await setState(userId, 'admin_fb_reply_text', {});
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'پاسخ خود را بنویسید (مستقیم برای مالک ارسال می‌شود):',
+      });
+      return;
+    }
+
+
   try {
     const data = cq.data || '';
     const userId = cq.from?.id;
@@ -269,13 +371,12 @@ export default async function (cq) {
       const prefixName =
         (conf.prefixes && conf.prefixes[0]) || conf.title || channelKey;
       const html =
-        '<b>سلام خانومیای خوشگل و نانازی 🎀</b>\n\n' +
-        'با رعایت قوانین پیام های خودتونو ارسال کنید\n\n' +
+        '<b>با رعایت قوانین تکست بدین</b>\n' +
+        '@arail_bot\n\n' +
         '<blockquote>1. پیامتون با ' + prefixName + ' شروع بشه</blockquote>\n' +
         '<blockquote>2. پیام خودتون رو برجسته کنید</blockquote>\n' +
         '<blockquote>3. با یک فاصله از متن نقطه بذارید.</blockquote>\n' +
-        '<blockquote>4. محتوای پیامتون فحش و هیت و تکراری نباشه !</blockquote>\n\n' +
-        'ایدی ربات :\n\n@Arail_bot';
+        '<blockquote>4. محتوای پیامتون فحش و هیت و تکراری نباشه !</blockquote>';
       try {
         const sent = await api.sendMessage({
           chat_id: conf.chatId,
@@ -3822,7 +3923,7 @@ if (data.startsWith('ann_target:')) {
       let ids = [];
       const seen = {};
       try {
-        if (target === 'admins') {
+        if (target === 'admins' || target === 'admin_fb') {
           const ads = (await db.select().from(channelAdmins).all()) || [];
           for (const a of ads) {
             const id = Number(a.userId || a.user_id);
@@ -3841,6 +3942,8 @@ if (data.startsWith('ann_target:')) {
             ids.push(id);
           }
         }
+        // برای انتقادات ادمین: بعداً دکمه پاسخ زیر پیام می‌چسبد
+        var adminFbMode = target === 'admin_fb';
       } catch (e) {
         console.error('ann collect', e);
         await api.sendMessage({
@@ -3853,6 +3956,29 @@ if (data.startsWith('ann_target:')) {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text: 'هیچ مخاطبی پیدا نشد.',
+        });
+        return;
+      }
+      // انتقادات پیشنهادات ادمین‌ها: ارسال مستقیم با دکمه پاسخ
+      if (target === 'admin_fb') {
+        let ok = 0, fail = 0;
+        const body = '💬 پیام مالک به ادمین‌ها\n\n' + annText;
+        for (const id of ids) {
+          try {
+            const payload = { chat_id: id, text: body };
+            try {
+              const { adminFbReplyInline } = await import('lib/keyboards');
+              payload.reply_markup = adminFbReplyInline();
+            } catch (_e) {}
+            await api.sendMessage(payload);
+            ok++;
+          } catch (_e) {
+            fail++;
+          }
+        }
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '✅ ارسال انتقادات/پیشنهادات به ادمین‌ها\nموفق: ' + ok + ' | ناموفق: ' + fail,
         });
         return;
       }
