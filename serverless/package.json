@@ -9,7 +9,9 @@
     "status": "tgcloud status",
     "diff": "tgcloud diff",
     "migrate": "tgcloud migrate",
-    "login": "tgcloud login"
+    "login": "tgcloud login",
+    "safe-deploy": "bash scripts/safe-deploy.sh",
+    "sync-tgcloud": "mkdir -p tgcloud/lib tgcloud/handlers tgcloud/endpoints && cp -f schema.js tgcloud/schema.js && cp -f lib/*.js tgcloud/lib/ && cp -f handlers/*.js tgcloud/handlers/ && cp -f endpoints/*.js tgcloud/endpoints/ 2>/dev/null || true"
   },
   "devDependencies": {
     "@tgcloud/cli": "latest"

@@ -175,7 +175,13 @@ async function editReviewResult(cq, text, fin) {
 }
 
 export default async function (cq) {
-    // —— بن کاربر از جستجو ——
+  try {
+    const data = cq.data || '';
+    const userId = cq.from?.id;
+    if (!userId) return;
+
+    // —— هندلرهای کمکی (بن / حذف / ناوبری) ——
+// —— بن کاربر از جستجو ——
     
     if (data === 'nav:search') {
       if (!isOwner(userId)) {
@@ -275,12 +281,6 @@ if (data.startsWith('ban_user:')) {
       });
       return;
     }
-
-
-  try {
-    const data = cq.data || '';
-    const userId = cq.from?.id;
-    if (!userId) return;
 
     
     if (data.startsWith('uv:')) {
