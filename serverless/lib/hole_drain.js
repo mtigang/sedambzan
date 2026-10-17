@@ -188,14 +188,24 @@ export async function drainHoleWave(opts) {
           continue;
         }
 
-        // رزرو اتمیک
+        // رزرو اتمیک + reviewedBy مالک سوراخ
+        const ownerId = Number(job.ownerId) || 0;
         await db
           .update(messages)
-          .set({ status: 'publishing' })
+          .set({
+            status: 'publishing',
+            reviewedBy: ownerId || null,
+            reviewedAt: new Date(),
+          })
           .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
           .run();
         const chk = (await db.select().from(messages).where(eq(messages.id, row.id)).all()) || [];
         if (!chk[0] || String(chk[0].status) !== 'publishing') {
+          processed += 1;
+          continue;
+        }
+        const holder = Number(chk[0].reviewedBy ?? chk[0].reviewed_by) || 0;
+        if (ownerId && holder && holder !== ownerId) {
           processed += 1;
           continue;
         }

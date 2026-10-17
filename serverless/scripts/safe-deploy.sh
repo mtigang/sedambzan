@@ -16,6 +16,13 @@ REQUIRED=(
   lib/time.js
   lib/validation.js
   lib/users.js
+  lib/announce_drain.js
+  lib/hole_drain.js
+  lib/subleader.js
+  lib/submit_user_message.js
+  lib/resolve.js
+  endpoints/submitMessage.js
+  endpoints/getMyMessages.js
 )
 
 echo "==> بررسی فایل‌های ضروری"
@@ -47,5 +54,5 @@ echo "==> لیست ماژول‌های آماده push"
 find tgcloud -name '*.js' | sort
 
 echo "==> tgcloud push"
-npx tgcloud push --force "$@"
+npx tgcloud push "$@"
 echo "OK. migrate فقط اگر schema عمداً عوض شده باشد."

@@ -193,25 +193,42 @@ export async function pruneOldestMessageIfOverBudget() {
       return { pruned: 0, estimate: estimate, n: n };
     }
     let oldestId = null;
+    async function pickOldestByStatus(st) {
+      try {
+        const rows =
+          (await db
+            .select({ id: messages.id })
+            .from(messages)
+            .where(eq(messages.status, st))
+            .orderBy(asc(messages.id))
+            .limit(1)
+            .all()) || [];
+        if (rows[0] && rows[0].id != null) return Number(rows[0].id);
+      } catch (_e) {}
+      return null;
+    }
     try {
-      const oldest =
-        (await db
-          .select({ id: messages.id })
-          .from(messages)
-          .orderBy(asc(messages.id))
-          .limit(1)
-          .all()) || [];
-      if (oldest[0] && oldest[0].id != null) oldestId = Number(oldest[0].id);
+      oldestId = await pickOldestByStatus('rejected');
+      if (!oldestId) oldestId = await pickOldestByStatus('approved');
+      // فقط اگر هیچ rejected/approved نبود، از pending قدیمی حذف کن
+      if (!oldestId) {
+        const oldest =
+          (await db
+            .select({ id: messages.id })
+            .from(messages)
+            .orderBy(asc(messages.id))
+            .limit(1)
+            .all()) || [];
+        if (oldest[0] && oldest[0].id != null) oldestId = Number(oldest[0].id);
+      }
     } catch (_e) {
       try {
-        const all = (await db.select({ id: messages.id }).from(messages).limit(500).all()) || [];
-        if (all.length) {
-          oldestId = Math.min.apply(
-            null,
-            all.map(function (r) {
-              return Number(r.id);
-            })
-          );
+        const all = (await db.select({ id: messages.id, status: messages.status }).from(messages).limit(800).all()) || [];
+        const rej = all.filter(function (r) { return String(r.status) === 'rejected'; });
+        const ap = all.filter(function (r) { return String(r.status) === 'approved'; });
+        const pool = rej.length ? rej : ap.length ? ap : all;
+        if (pool.length) {
+          oldestId = Math.min.apply(null, pool.map(function (r) { return Number(r.id); }));
         }
       } catch (_e2) {
         return { pruned: 0, estimate: estimate };
@@ -877,6 +894,24 @@ export async function removeChannelAdmin(userId, channelKey) {
     try {
       await settingSet('admin_removed:' + ck + ':' + uid, '1');
     } catch (_e) {}
+    // لغو شیفت‌های فعال این ادمین در همین کانال
+    try {
+      const allSh = (await db.select().from(shifts).all()) || [];
+      for (const s of allSh) {
+        const sid = Number(s.adminId ?? s.admin_id);
+        const sck = String((s.channelKey ?? s.channel_key) || '');
+        const sst = String(s.status || 'active');
+        if (sid === uid && sck === ck && sst === 'active') {
+          try {
+            if (s.id != null) {
+              await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, s.id)).run();
+            }
+          } catch (_e) {}
+        }
+      }
+    } catch (eSh) {
+      console.error('removeChannelAdmin cancel shifts', eSh);
+    }
     const left = await adminChannels(uid);
     if (!left.length) {
       try {
@@ -2034,20 +2069,40 @@ export async function adminShiftCard(adminId) {
     console.error('adminShiftCard pending', e);
   }
   try {
-    const allm = (await db.select().from(messages).all()) || [];
     const day = String(now.date);
-    for (const m of allm) {
-      if (Number(m.reviewedBy ?? m.reviewed_by) !== Number(adminId)) continue;
-      const ts = String(m.reviewedAt ?? m.reviewed_at ?? m.createdAt ?? m.created_at ?? '');
-      if (ts.indexOf(day) < 0 && !String(ts).startsWith(day)) {
-        // تلاش برای تاریخ شمسی/ISO
+    let mine = [];
+    try {
+      mine =
+        (await db
+          .select({
+            id: messages.id,
+            status: messages.status,
+            reviewedAt: messages.reviewedAt,
+          })
+          .from(messages)
+          .where(eq(messages.reviewedBy, Number(adminId)))
+          .all()) || [];
+    } catch (_e) {
+      mine = [];
+    }
+    for (const m of mine) {
+      const ts = String(m.reviewedAt ?? m.reviewed_at ?? '');
+      if (!ts) continue;
+      // مقایسه روز تقویمی تهران از رشته ISO یا Date
+      let dayOk = ts.indexOf(day) >= 0 || ts.startsWith(day);
+      if (!dayOk) {
         try {
-          if (ts && ts.length >= 10 && ts.slice(0, 10) !== day) continue;
-          if (!ts) continue;
-        } catch (_e) {
-          continue;
-        }
+          const d = new Date(ts);
+          if (!isNaN(d.getTime())) {
+            const tehran = new Date(d.getTime() + 3.5 * 3600 * 1000);
+            const y = tehran.getUTCFullYear();
+            const mo = String(tehran.getUTCMonth() + 1).padStart(2, '0');
+            const da = String(tehran.getUTCDate()).padStart(2, '0');
+            dayOk = y + '-' + mo + '-' + da === day;
+          }
+        } catch (_e2) {}
       }
+      if (!dayOk) continue;
       const st = String(m.status || '');
       if (st === 'approved') out.todayApproved += 1;
       else if (st === 'rejected') out.todayRejected += 1;
@@ -2270,7 +2325,11 @@ export async function checkReviewAccess(adminId, row) {
   if (isOwner(adminId)) return { ok: true };
   if (!row) return { ok: false, code: 'missing', text: 'پیام یافت نشد.' };
   const st = String(row.status || '');
-  if (st === 'publishing') return { ok: true }; // رزرو خود ادمین
+  if (st === 'publishing') {
+    const holder = Number(row.reviewedBy ?? row.reviewed_by) || 0;
+    if (isOwner(adminId) || (holder && holder === Number(adminId))) return { ok: true };
+    return { ok: false, code: 'busy', text: 'این پیام در حال انتشار توسط فرد دیگری است.' };
+  }
   if (st !== 'pending') {
     return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
   }
@@ -2318,6 +2377,69 @@ export async function checkReviewAccess(adminId, row) {
  * decision: 'approve' | 'reject'
  * فقط یک فراخوانی ok:true می‌گیرد؛ بقیه code='done' یا 'busy'.
  */
+
+/**
+ * رزرو اتمیک پیام برای انتشار.
+ * فقط اگر status=pending باشد به publishing می‌رود و reviewedBy ست می‌شود.
+ * برنده: ok=true. بازنده رقابت: ok=false.
+ */
+export async function reserveMessageForPublish(msgId, reviewerId) {
+  const id = Number(msgId);
+  const rid = Number(reviewerId) || 0;
+  if (!id) return { ok: false, code: 'bad_id' };
+  try {
+    await db
+      .update(messages)
+      .set({
+        status: 'publishing',
+        reviewedBy: rid || null,
+        reviewedAt: new Date(),
+      })
+      .where(and(eq(messages.id, id), eq(messages.status, 'pending')))
+      .run();
+    const rows = (await db.select().from(messages).where(eq(messages.id, id)).all()) || [];
+    const row = rows[0];
+    if (!row) return { ok: false, code: 'missing' };
+    if (String(row.status) !== 'publishing') {
+      return { ok: false, code: 'not_pending', row: row };
+    }
+    const holder = Number(row.reviewedBy ?? row.reviewed_by) || 0;
+    if (rid && holder && holder !== rid) {
+      return { ok: false, code: 'other_holder', row: row, holder: holder };
+    }
+    return { ok: true, row: row };
+  } catch (e) {
+    console.error('reserveMessageForPublish', e);
+    return { ok: false, code: 'error' };
+  }
+}
+
+/**
+ * تکمیل انتشار برای رزروی که گیر کرده (همان reviewer یا مالک).
+ * اگر holder دیگری باشد و owner نباشد → رد.
+ */
+export async function canCompletePublishing(msgId, reviewerId) {
+  const id = Number(msgId);
+  const rid = Number(reviewerId) || 0;
+  try {
+    const rows = (await db.select().from(messages).where(eq(messages.id, id)).all()) || [];
+    const row = rows[0];
+    if (!row) return { ok: false, code: 'missing' };
+    if (String(row.status) !== 'publishing') {
+      return { ok: false, code: 'not_publishing', row: row };
+    }
+    const holder = Number(row.reviewedBy ?? row.reviewed_by) || 0;
+    if (isOwner(rid)) return { ok: true, row: row, holder: holder };
+    if (holder && holder === rid) return { ok: true, row: row, holder: holder };
+    // بدون holder — اجازه به کسی که شیفت دارد نمی‌دهیم مگر مالک؛ برای ایمنی فقط holder یا owner
+    if (!holder) return { ok: true, row: row, holder: 0 };
+    return { ok: false, code: 'other_holder', row: row, holder: holder };
+  } catch (e) {
+    console.error('canCompletePublishing', e);
+    return { ok: false, code: 'error' };
+  }
+}
+
 export async function decideMessage(adminId, id, decision, reason) {
   id = Number(id);
   const row = await getMessageById(id);

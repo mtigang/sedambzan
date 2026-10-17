@@ -5,8 +5,8 @@ import { api } from 'sdk';
 import { settingGet, settingSet } from 'lib/dbutil';
 import { announceProgressInline, sanitizeMarkup } from 'lib/keyboards';
 
-const CHUNK = 55;
-const LOCK_MS = 5500;
+const CHUNK = 25;
+const LOCK_MS = 12000;
 
 export async function loadAnnounceJob() {
   const raw = await settingGet('announce_job', '');
@@ -175,19 +175,32 @@ export async function drainAnnouncePiggyback(maxN) {
           text: text,
           disable_notification: true,
         };
-        // حفظ لینک متنی / بولد / … همان‌طور که مالک فرستاده
         if (ents) payload.entities = ents;
         await api.sendMessage(payload);
         ok++;
       } catch (e) {
         const msg = String((e && (e.description || e.message)) || e);
         if (msg.includes('429') || msg.toLowerCase().includes('too many') || msg.toLowerCase().includes('retry')) {
-          // cursor روی همین نفر بماند تا بعداً دوباره تلاش شود
           hit429 = true;
           break;
         }
-        // بلاک / حذف‌شده / چت نامعتبر → رد شو برو بعدی
+        // خطای موقت سرور — همین نفر را بعداً دوباره امتحان کن
+        if (/\b5\d\d\b/.test(msg) || /timeout/i.test(msg) || /ECONN/i.test(msg)) {
+          hit429 = true;
+          break;
+        }
         fail++;
+      }
+      // هر ۵ نفر cursor را ذخیره کن تا در صورت kill از دست نرود
+      if ((pos + 1) % 5 === 0) {
+        try {
+          const jmid = (await loadAnnounceJob()) || job;
+          jmid.ok = ok;
+          jmid.fail = fail;
+          jmid.cursor = pos + 1;
+          jmid.status = 'running';
+          await saveAnnounceJob(jmid);
+        } catch (_e) {}
       }
     }
 

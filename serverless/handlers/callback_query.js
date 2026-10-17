@@ -31,6 +31,8 @@ import {
   addChannelAdmin,
   getRole,
   decideMessage,
+  reserveMessageForPublish,
+  canCompletePublishing,
   dropMessageFromAllReviewBatches,
   dropMessageFromReviewBatch,
   pruneReviewBatchToPending,
@@ -180,6 +182,23 @@ export default async function (cq) {
     const userId = cq.from?.id;
     if (!userId) return;
 
+    // H1: کاربر بن‌شده هیچ callbackای را اجرا نکند
+    try {
+      if (!isOwner(userId)) {
+        const _bu = await getUser(userId);
+        if (_bu && Number(_bu.blocked) === 1) {
+          try {
+            await api.answerCallbackQuery({
+              callback_query_id: cq.id,
+              text: 'شما از ربات مسدود شده‌اید.',
+              show_alert: true,
+            });
+          } catch (_e) {}
+          return;
+        }
+      }
+    } catch (_eBan) {}
+
     // —— هندلرهای کمکی (بن / حذف / ناوبری) ——
 // —— بن کاربر از جستجو ——
     
@@ -273,6 +292,18 @@ if (data.startsWith('ban_user:')) {
 
     // —— پاسخ ادمین به اطلاعیه انتقادات ——
     if (data === 'admin_fb_reply') {
+      try {
+        const rfb = await getRole(userId);
+        if (!isOwner(userId) && rfb !== 'admin' && rfb !== 'subleader' && rfb !== 'sub_leader') {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+          return;
+        }
+      } catch (_e) {
+        if (!isOwner(userId)) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+          return;
+        }
+      }
       await setState(userId, 'admin_fb_reply_text', {});
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       await api.sendMessage({
@@ -284,6 +315,19 @@ if (data.startsWith('ban_user:')) {
 
     
     if (data.startsWith('uv:')) {
+      // فقط مالک یا ادمین/ساب‌لیدر
+      try {
+        const roleUv = await getRole(userId);
+        if (!isOwner(userId) && roleUv !== 'admin' && roleUv !== 'subleader' && roleUv !== 'sub_leader') {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+          return;
+        }
+      } catch (_e) {
+        if (!isOwner(userId)) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+          return;
+        }
+      }
       const uid = Number(data.slice(3));
       let u = null;
       try { u = await getUser(uid); } catch (_) {}
@@ -533,6 +577,31 @@ if (data.startsWith('ban_user:')) {
           return;
         }
       } catch (_e) {}
+      // رزرو اتمیک قبل از ارسال (برای pending؛ rejected را اول به pending برگردان)
+      const st0 = String(row.status || '');
+      if (st0 === 'rejected') {
+        try {
+          await db
+            .update(messages)
+            .set({ status: 'pending', rejectReason: null, reviewedBy: null })
+            .where(and(eq(messages.id, id), eq(messages.status, 'rejected')))
+            .run();
+        } catch (_e) {}
+      }
+      const reserved = await reserveMessageForPublish(id, userId);
+      if (!reserved.ok && st0 !== 'publishing') {
+        // اگر publishing خود مالک است ادامه بده
+        const can = await canCompletePublishing(id, userId);
+        if (!can.ok) {
+          try {
+            await api.sendMessage({
+              chat_id: userId,
+              text: 'این پیام هم‌اکنون توسط دیگری در حال انتشار است.',
+            });
+          } catch (_e) {}
+          return;
+        }
+      }
       const conf = DEFAULT_CHANNELS[row.channelKey || row.channel_key];
       if (!conf || !conf.chatId) {
         try {
@@ -642,7 +711,7 @@ if (data.startsWith('ban_user:')) {
         } catch (_e) {}
       }
       const rows0 = await db.select().from(messages).where(eq(messages.id, id)).all();
-      const pendingRow = rows0 && rows0[0];
+      let pendingRow = rows0 && rows0[0];
       if (!pendingRow || (String(pendingRow.status) !== 'pending' && String(pendingRow.status) !== 'publishing')) {
         await ans('قبلاً بررسی شده', true);
         try {
@@ -674,13 +743,31 @@ if (data.startsWith('ban_user:')) {
         }
       } catch (_e) {}
 
-      const wasPublishing = String(pendingRow.status) === 'publishing';
-      if (!wasPublishing) {
+      // C3/H2: رزرو اتمیک — فقط یک نفر برنده می‌شود
+      let wasPublishing = String(pendingRow.status) === 'publishing';
+      if (wasPublishing) {
+        const can = await canCompletePublishing(id, userId);
+        if (!can.ok) {
+          await ans(can.code === 'other_holder' ? 'شخص دیگری در حال انتشار است' : 'دسترسی ندارید', true);
+          return;
+        }
+      } else {
         const acc = await checkReviewAccess(userId, pendingRow);
         if (!acc.ok) {
           await ans(acc.text || 'دسترسی ندارید', true);
           return;
         }
+        const reserved = await reserveMessageForPublish(id, userId);
+        if (!reserved.ok) {
+          await ans(
+            reserved.code === 'other_holder'
+              ? 'شخص دیگری در حال انتشار است'
+              : 'این پیام توسط شخص دیگری گرفته شد؛ دوباره تلاش کنید',
+            true
+          );
+          return;
+        }
+        if (reserved.row) pendingRow = reserved.row;
       }
       await ans('⏳ در حال انتشار…', false);
 
@@ -696,38 +783,12 @@ if (data.startsWith('ban_user:')) {
         } catch (_e2) {}
         return;
       }
-      pendingRow.channelKey = conf.key || ckNorm;
-
-      let link = null;
+      pendingRow.channelKey = conf.key || ckNorm || pendingRow.channelKey;
       let mid = null;
+      let link = null;
 
-      // اگر قبلاً publishing مانده و پست شده ممکن است — دوباره در کانال نفرست
+      // فقط برندهٔ رزرو برای اولین بار در کانال ارسال می‌کند
       if (!wasPublishing) {
-        try {
-          await db
-            .update(messages)
-            .set({ status: 'publishing' })
-            .where(and(eq(messages.id, id), eq(messages.status, 'pending')))
-            .run();
-        } catch (e) {
-          console.error('reserve', e);
-        }
-        const check =
-          (await db
-            .select({ status: messages.status })
-            .from(messages)
-            .where(eq(messages.id, id))
-            .all()) || [];
-        if (!check[0] || String(check[0].status) !== 'publishing') {
-          try {
-            await api.sendMessage({
-              chat_id: userId,
-              text: 'این پیام توسط شخص دیگری در حال بررسی است یا دوباره امتحان کنید.',
-            });
-          } catch (_e) {}
-          return;
-        }
-        pendingRow.status = 'publishing';
         try {
           const sent = await api.sendMessage({
             chat_id: conf.chatId,
@@ -741,7 +802,7 @@ if (data.startsWith('ban_user:')) {
         } catch (e) {
           console.error('publish first', e);
           try {
-            await db.update(messages).set({ status: 'pending' }).where(eq(messages.id, id)).run();
+            await db.update(messages).set({ status: 'pending', reviewedBy: null }).where(eq(messages.id, id)).run();
           } catch (_e) {}
           try {
             await api.sendMessage({
@@ -985,6 +1046,18 @@ if (data.startsWith('reject_menu:')) {
       return;
     }
     if (data === 'admin_bug') {
+      try {
+        const rb = await getRole(userId);
+        if (!isOwner(userId) && rb !== 'admin' && rb !== 'subleader' && rb !== 'sub_leader') {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+          return;
+        }
+      } catch (_e) {
+        if (!isOwner(userId)) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+          return;
+        }
+      }
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       try {
         await setState(userId, 'admin_bug');

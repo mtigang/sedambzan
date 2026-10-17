@@ -25,6 +25,7 @@ import {
   pruneOldestMessageIfOverBudget,
   FRIDAY_MODE_TEXT,
   QUEUE_BUSY_TEXT,
+  getUser,
 } from 'lib/dbutil';
 
 function isOwner(uid) {
@@ -60,6 +61,16 @@ export async function submitUserMessage(userId, text) {
   const owner = isOwner(uid);
   const rawText = String(text || '').trim();
   if (!rawText) return { ok: false, error: 'متن خالی است.' };
+
+  // بن
+  if (!owner) {
+    try {
+      const uBan = await getUser(uid);
+      if (uBan && Number(uBan.blocked) === 1) {
+        return { ok: false, error: 'شما از ربات مسدود شده‌اید.', code: 'blocked' };
+      }
+    } catch (_e) {}
+  }
 
   // عضویت اجباری
   if (!owner) {
