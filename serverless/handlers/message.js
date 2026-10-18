@@ -1954,13 +1954,14 @@ try {
           console.error('shifts all', e);
         }
         const today = all.filter(function (s) {
-          if (String(s.status) !== 'active') return false;
+          const st = String(s.status || 'active');
+          if (st !== 'active' && st !== 'cancelled') return false;
           if (String(s.startHm) === String(s.endHm)) return false;
           const sd = String(s.shiftDate || '');
           if (sd === 'perm' || sd === 'permanent') return false;
           return sd === pdate || sd === now.date;
         });
-        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۲۴ ساعته — نمایش همه شیفت‌های فعال امروز)\n';
+        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۲۴ ساعته — فعال و لغوشده)\n';
         if (!today.length) {
           t += '\nهنوز شیفتی ثبت نشده.\n';
         } else {
@@ -1980,8 +1981,10 @@ try {
               try {
                 name = displayName(await getUser(s.adminId), s.adminId);
               } catch (_e) {}
+              const st = String(s.status || 'active');
+              const mark = st === 'cancelled' ? '🔴لغو ' : '▫️ ';
               t +=
-                '▫️ ' +
+                mark +
                 String(s.startHm).slice(0, 5) +
                 '–' +
                 String(s.endHm).slice(0, 5) +
@@ -2247,7 +2250,9 @@ try {
 
         const forChannel = allSh.filter(function (s) {
           const ck = String((s.channelKey != null ? s.channelKey : s.channel_key) || '');
-          return ck === String(myCh) && String(s.status) === 'active';
+          const st = String(s.status || 'active');
+          // نمایش active و cancelled برای ساب‌لیدر/مالک
+          return ck === String(myCh) && (st === 'active' || st === 'cancelled');
         });
 
         // ۷ روز گذشته تا امروز — تاریخ شمسی
@@ -2298,10 +2303,11 @@ try {
               const uid = Number(s.adminId != null ? s.adminId : s.admin_id);
               who = displayName(await getUser(uid), uid);
             } catch (_e) {}
-            const tag =
+                        const tag =
               String(s.shiftDate || '') === 'perm' || String(s.shiftDate || '') === 'permanent'
                 ? ' · دائم'
                 : '';
+            const stMark = String(s.status || '') === 'cancelled' ? ' · 🔴لغو' : '';
             body +=
               '  ' +
               String(s.startHm || '').slice(0, 5) +
@@ -2310,12 +2316,14 @@ try {
               ' | ' +
               who +
               tag +
+              stMark +
               '\n';
           }
         }
 
-        // دکمه‌های لغو فقط برای دوره فعلی
+        // دکمه‌های لغو فقط برای دوره فعلی و فقط شیفت‌های هنوز active
         const cancelSrc = forChannel.filter(function (s) {
+          if (String(s.status || 'active') !== 'active') return false;
           if (String(s.startHm) === String(s.endHm)) return false;
           const sd = String((s.shiftDate != null ? s.shiftDate : s.shift_date) || '');
           return sd === pdate || sd === 'perm' || sd === 'permanent' || sd === now.date;

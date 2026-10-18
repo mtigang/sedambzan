@@ -2494,7 +2494,8 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
           return;
         }
         let group = all.filter(function (s) {
-          if (String(s.status) !== 'active') return false;
+          const st = String(s.status || 'active');
+          if (st !== 'active' && st !== 'cancelled') return false;
           if (String(s.channelKey || s.channel_key || '') !== channelKey) return false;
           const sd = String(s.shiftDate ?? s.shift_date ?? '');
           return (
@@ -2533,8 +2534,10 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
               .trim()
               .slice(0, 40);
             if (!name) name = String(s.adminId ?? '');
+            const st = String(s.status || 'active');
+            const mark = st === 'cancelled' ? '🔴لغو #' : '▫️ #';
             const line =
-              '▫️ #' +
+              mark +
               s.id +
               '  ' +
               String(s.startHm || '').slice(0, 5) +
@@ -2544,14 +2547,16 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
               name +
               '\n';
             if ((t + line).length < 3800) t += line;
-            rows.push({
-              id: Number(s.id),
-              channelKey: channelKey,
-              startHm: String(s.startHm || '').slice(0, 5),
-              endHm: String(s.endHm || '').slice(0, 5),
-              adminId: Number(s.adminId ?? s.admin_id),
-              name: name,
-            });
+            if (st === 'active') {
+              rows.push({
+                id: Number(s.id),
+                channelKey: channelKey,
+                startHm: String(s.startHm || '').slice(0, 5),
+                endHm: String(s.endHm || '').slice(0, 5),
+                adminId: Number(s.adminId ?? s.admin_id),
+                name: name,
+              });
+            }
           }
         }
         const payload = {
