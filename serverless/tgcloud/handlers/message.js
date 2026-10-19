@@ -378,7 +378,9 @@ export default async function (message) {
     const ownerFjSetup =
       owner &&
       state &&
-      (state.kind === 'force_join_link' || state.kind === 'force_join_count');
+      (state.kind === 'force_join_link' ||
+        state.kind === 'force_join_count' ||
+        state.kind === 'force_join_need_id');
     if (!ownerFjSetup) {
       try {
         const campGate = await forceJoinNeedGate(userId);
@@ -3859,11 +3861,13 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
       return;
     }
 
-    // ساخت کمپین: لینک‌های متعدد، بعد عدد هدف
+    // ساخت کمپین: لینک‌های متعدد / لینک خصوصی+آیدی / عدد هدف
     if (
       owner &&
-      (state?.kind === 'force_join_link' || state?.kind === 'force_join_count') &&
-      text
+      (state?.kind === 'force_join_link' ||
+        state?.kind === 'force_join_count' ||
+        state?.kind === 'force_join_need_id') &&
+      (text || message.forward_from_chat || (message.forward_origin && message.forward_origin.chat))
     ) {
       try {
         let channels = Array.isArray(state.channels) ? state.channels.slice() : [];
@@ -3878,8 +3882,95 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
           });
         }
 
-        const trimmed = String(text).trim();
+        const trimmed = String(text || '').trim();
         const pureNum = /^\d+$/.test(trimmed);
+
+        // تکمیل لینک خصوصی: آیدی عددی یا فوروارد از کانال
+        if (state.kind === 'force_join_need_id') {
+          let resolvedId = null;
+          if (/^-?\d{6,}$/.test(trimmed)) {
+            resolvedId = Number(trimmed);
+          }
+          try {
+            const fwdChat =
+              (message.forward_from_chat && message.forward_from_chat.id) ||
+              (message.forward_origin &&
+                message.forward_origin.chat &&
+                message.forward_origin.chat.id) ||
+              null;
+            if (fwdChat) resolvedId = Number(fwdChat);
+          } catch (_e) {}
+          if (!resolvedId || !Number.isFinite(resolvedId)) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text:
+                'آیدی عددی کانال را بفرستید (مثل -1001234567890)\n' +
+                'یا یک پیام از همان کانال را فوروارد کنید.\n\n' +
+                'ربات باید از قبل ادمین کانال باشد.',
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          }
+          const info = await inspectChannelForForceJoin({
+            chatId: resolvedId,
+            username: null,
+            inviteLink: state.pendingInviteLink || null,
+          });
+          if (!info.ok) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '❌ ' + (info.error || 'بررسی کانال ناموفق'),
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          }
+          if (
+            channels.some(function (c) {
+              return Number(c.chatId) === Number(info.chatId);
+            })
+          ) {
+            await setState(userId, 'force_join_link', { channels: channels });
+            await api.sendMessage({
+              chat_id: chatId,
+              text: 'این کانال قبلاً اضافه شده. لینک دیگر یا عدد هدف بفرستید.',
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          }
+          let invite = state.pendingInviteLink || info.inviteLink || null;
+          if (!invite && info.username) {
+            invite = 'https://t.me/' + String(info.username).replace(/^@/, '');
+          }
+          channels.push({
+            chatId: info.chatId,
+            title: info.title,
+            username: info.username,
+            inviteLink: invite,
+            startMembers: info.memberCount,
+          });
+          await setState(userId, 'force_join_link', { channels: channels });
+          let listTxt = '';
+          for (let i = 0; i < channels.length; i++) {
+            const c = channels[i];
+            listTxt +=
+              i +
+              1 +
+              ') «' +
+              (c.title || c.username || c.chatId) +
+              '» — ' +
+              (c.startMembers || 0) +
+              ' عضو\n';
+          }
+          await api.sendMessage({
+            chat_id: chatId,
+            text:
+              '✅ کانال خصوصی تأیید شد (ربات ادمین است).\n\n' +
+              listTxt +
+              '\nلینک بعدی یا عدد هدف (مثلاً 100) را بفرستید.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
 
         // عدد هدف وقتی حداقل یک کانال ثبت شده
         if (pureNum && channels.length) {
@@ -3954,6 +4045,12 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
         }
         const info = await inspectChannelForForceJoin(parsed);
         if (!info.ok) {
+          if (info.needChatId && info.inviteLink) {
+            await setState(userId, 'force_join_need_id', {
+              channels: channels,
+              pendingInviteLink: info.inviteLink,
+            });
+          }
           await api.sendMessage({
             chat_id: chatId,
             text: '❌ ' + info.error,

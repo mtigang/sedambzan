@@ -386,10 +386,13 @@ export function parseChannelLinkInput(input) {
 
 /** بررسی عضویت و ادمین بودن ربات در کانال + تعداد اعضا */
 export async function inspectChannelForForceJoin(parsed) {
-  let chatId = parsed.chatId;
+  let chatId = parsed.chatId != null ? Number(parsed.chatId) : null;
+  if (chatId != null && !Number.isFinite(chatId)) chatId = null;
   let title = '';
   let username = parsed.username || null;
   let inviteLink = parsed.inviteLink || null;
+  const invStr = String(inviteLink || '');
+  const hadPrivateInvite = !!(invStr && (/t\.me\/\+/i.test(invStr) || /joinchat\//i.test(invStr)));
   try {
     let chat = null;
     if (chatId) {
@@ -402,8 +405,14 @@ export async function inspectChannelForForceJoin(parsed) {
       } catch (_e) {
         return {
           ok: false,
+          needChatId: true,
+          inviteLink: inviteLink,
           error:
-            'لینک خصوصی است یا ربات داخل کانال نیست.\nربات را به کانال اضافه و ادمین کنید (دسترسی مشاهدهٔ اعضا)، سپس دوباره لینک یا @یوزرنیم کانال را بفرستید.',
+            'لینک خصوصی به‌تنهایی توسط تلگرام برای ربات قابل شناسایی نیست.\n\n' +
+            'اگر ربات از قبل ادمین کانال است، یکی از این‌ها را بفرستید:\n' +
+            '• آیدی عددی کانال (مثل -1001234567890)\n' +
+            '• یا یک پیام از همان کانال را برای ربات فوروارد کنید\n\n' +
+            'لینک دعوت برای دکمهٔ «عضویت» کاربران ذخیره می‌شود.',
         };
       }
     }
@@ -411,25 +420,27 @@ export async function inspectChannelForForceJoin(parsed) {
       return {
         ok: false,
         error:
-          'کانال پیدا نشد.\nربات را به کانال اضافه و ادمین کنید، بعد لینک یا @یوزرنیم را بفرستید.',
+          'کانال پیدا نشد.\nربات را به کانال اضافه و ادمین کنید، بعد لینک / @یوزرنیم / آیدی عددی را بفرستید.',
       };
     }
     chatId = chat.id;
     title = chat.title || chat.username || String(chatId);
     if (chat.username) {
       username = chat.username;
-      inviteLink = 'https://t.me/' + chat.username;
+      if (!hadPrivateInvite) {
+        inviteLink = 'https://t.me/' + chat.username;
+      }
     }
   } catch (e) {
     return {
       ok: false,
       error:
-        'ربات به این کانال دسترسی ندارد.\nربات را اضافه کنید، ادمین کنید و فقط دسترسی «مشاهده اعضا» بدهید.\n\n' +
+        'ربات به این کانال دسترسی ندارد.\nربات را اضافه کنید، ادمین کنید و دسترسی «مشاهده اعضا» بدهید.\n\n' +
         ((e && (e.message || e.description)) || ''),
     };
   }
 
-  try {
+    try {
     const me = await api.getMe();
     const mem = await api.getChatMember({ chat_id: chatId, user_id: me.id });
     const st = String(mem && mem.status ? mem.status : '');
