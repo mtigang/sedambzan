@@ -4030,18 +4030,43 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
           return;
         }
 
-        // لینک کانال/گروه بعدی
-        const parsed = parseChannelLinkInput(trimmed);
-        if (!parsed || (pureNum && !channels.length)) {
+        // فوروارد مستقیم از کانال (شناسایی بدون لینک)
+        let fwdOnlyId = null;
+        try {
+          const fc =
+            (message.forward_from_chat && message.forward_from_chat.id) ||
+            (message.forward_origin &&
+              message.forward_origin.chat &&
+              message.forward_origin.chat.id) ||
+            null;
+          if (fc) fwdOnlyId = Number(fc);
+        } catch (_e) {}
+
+        // لینک کانال/گروه بعدی — یا فوروارد
+        let parsed = null;
+        if (fwdOnlyId && Number.isFinite(fwdOnlyId) && !trimmed) {
+          parsed = { chatId: fwdOnlyId, username: null, inviteLink: null };
+        } else {
+          parsed = parseChannelLinkInput(trimmed);
+        }
+        if (!parsed || (pureNum && !channels.length && !fwdOnlyId)) {
           await api.sendMessage({
             chat_id: chatId,
             text:
               channels.length
-                ? 'لینک کانال/گروه بعدی را بفرستید، یا عدد هدف (مثلاً 100).'
-                : 'لینک نامعتبر است.\nمثال: https://t.me/name یا @name یا -100…',
+                ? 'لینک کانال/گروه بعدی را بفرستید، یا عدد هدف (مثلاً 100).\nبرای کانال خصوصی می‌توانید یک پیام از کانال را فوروارد کنید.'
+                : 'لینک نامعتبر است.\nمثال: https://t.me/name یا @name یا -100…\nیا یک پیام از کانال را فوروارد کنید.',
             reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
+        }
+        // اگر لینک خصوصی + فوروارد هم‌زمان بود
+        if (parsed.inviteLink && !parsed.chatId && fwdOnlyId && Number.isFinite(fwdOnlyId)) {
+          parsed = {
+            chatId: fwdOnlyId,
+            username: null,
+            inviteLink: parsed.inviteLink,
+          };
         }
         const info = await inspectChannelForForceJoin(parsed);
         if (!info.ok) {

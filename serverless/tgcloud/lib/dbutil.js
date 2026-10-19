@@ -384,6 +384,116 @@ export function parseChannelLinkInput(input) {
   return null;
 }
 
+function normalizeInviteUrl(u) {
+  return String(u || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+}
+
+/** جمع‌آوری chatIdهای شناخته‌شده برای تطبیق لینک خصوصی */
+async function collectKnownChatIdsForForceJoin() {
+  const set = new Set();
+  try {
+    for (const v of Object.values(CHANNEL_IDS || {})) {
+      const n = Number(v);
+      if (Number.isFinite(n)) set.add(n);
+    }
+  } catch (_e) {}
+  try {
+    for (const v of Object.values(ADMIN_GROUP_IDS || {})) {
+      const n = Number(v);
+      if (Number.isFinite(n)) set.add(n);
+    }
+  } catch (_e) {}
+  try {
+    const rows = (await db.select().from(channels).all()) || [];
+    for (const r of rows) {
+      const n = Number(r && (r.chatId != null ? r.chatId : r.link));
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
+    }
+  } catch (_e) {}
+  try {
+    const hist = await getForceJoinHistory();
+    for (const h of hist || []) {
+      const n = Number(h && h.chatId);
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
+      if (Array.isArray(h && h.channels)) {
+        for (const c of h.channels) {
+          const cn = Number(c && c.chatId);
+          if (Number.isFinite(cn) && Math.abs(cn) > 1000) set.add(cn);
+        }
+      }
+    }
+  } catch (_e) {}
+  try {
+    const camp = await getForceJoinCampaign();
+    if (camp) {
+      const n = Number(camp.chatId);
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
+      if (Array.isArray(camp.channels)) {
+        for (const c of camp.channels) {
+          const cn = Number(c && c.chatId);
+          if (Number.isFinite(cn) && Math.abs(cn) > 1000) set.add(cn);
+        }
+      }
+    }
+  } catch (_e) {}
+  return Array.from(set);
+}
+
+/**
+ * اگر لینک خصوصی بود و getChat مستقیم شکست خورد،
+ * بین چت‌هایی که ربات از قبل ادمین است جستجو می‌کند.
+ */
+async function resolvePrivateInviteViaAdminChats(inviteLink) {
+  const target = normalizeInviteUrl(inviteLink);
+  if (!target) return null;
+  const candidates = await collectKnownChatIdsForForceJoin();
+  let adminOnlyMatch = null;
+  let adminOnlyCount = 0;
+
+  for (const cid of candidates) {
+    try {
+      const chat = await api.getChat({ chat_id: cid });
+      if (!chat || chat.id == null) continue;
+
+      // تطبیق لینک ذخیره‌شده در خود چت
+      if (chat.invite_link && normalizeInviteUrl(chat.invite_link) === target) {
+        return chat;
+      }
+
+      // لینک اصلی صادر‌شده توسط ربات
+      try {
+        const exp = await api.exportChatInviteLink({ chat_id: cid });
+        const expUrl = typeof exp === 'string' ? exp : exp && exp.invite_link;
+        if (expUrl && normalizeInviteUrl(expUrl) === target) {
+          return chat;
+        }
+      } catch (_e) {}
+
+      // ربات ادمین است؟ به‌عنوان کاندید ضعیف نگه دار
+      try {
+        const me = await api.getMe();
+        const mem = await api.getChatMember({ chat_id: cid, user_id: me.id });
+        const st = String(mem && mem.status ? mem.status : '');
+        if (st === 'administrator' || st === 'creator') {
+          adminOnlyCount += 1;
+          adminOnlyMatch = chat;
+        }
+      } catch (_e) {}
+    } catch (_e) {}
+  }
+
+  // اگر فقط یک چت شناخته‌شده وجود داشت که ربات ادمینش است، همان را بپذیر
+  // (سناریوی رایج: مالک لینک خصوصی همان کانال را می‌فرستد)
+  if (adminOnlyCount === 1 && adminOnlyMatch) {
+    return adminOnlyMatch;
+  }
+  return null;
+}
+
 /** بررسی عضویت و ادمین بودن ربات در کانال + تعداد اعضا */
 export async function inspectChannelForForceJoin(parsed) {
   let chatId = parsed.chatId != null ? Number(parsed.chatId) : null;
@@ -400,19 +510,36 @@ export async function inspectChannelForForceJoin(parsed) {
     } else if (username) {
       chat = await api.getChat({ chat_id: '@' + username });
     } else if (inviteLink) {
+      // ۱) تلاش مستقیم (گاهی روی بعضی سرورها کار می‌کند)
       try {
         chat = await api.getChat({ chat_id: inviteLink });
-      } catch (_e) {
+      } catch (_e1) {
+        try {
+          chat = await api.getChat({ chat_id: String(inviteLink).replace(/^https?:\/\//i, '') });
+        } catch (_e2) {
+          chat = null;
+        }
+      }
+      // ۲) اگر ربات از قبل ادمین کانال/گروه‌های شناخته‌شده است → resolve
+      if (!chat || !chat.id) {
+        try {
+          chat = await resolvePrivateInviteViaAdminChats(inviteLink);
+        } catch (eRes) {
+          console.error('resolvePrivateInviteViaAdminChats', eRes);
+          chat = null;
+        }
+      }
+      if (!chat || !chat.id) {
         return {
           ok: false,
           needChatId: true,
           inviteLink: inviteLink,
           error:
-            'لینک خصوصی به‌تنهایی توسط تلگرام برای ربات قابل شناسایی نیست.\n\n' +
-            'اگر ربات از قبل ادمین کانال است، یکی از این‌ها را بفرستید:\n' +
+            'لینک خصوصی شناسایی شد.\n\n' +
+            'اگر ربات همین الان ادمین کانال است، یکی از این‌ها را بفرستید تا چک عضویت/ادمین انجام شود:\n' +
             '• آیدی عددی کانال (مثل -1001234567890)\n' +
             '• یا یک پیام از همان کانال را برای ربات فوروارد کنید\n\n' +
-            'لینک دعوت برای دکمهٔ «عضویت» کاربران ذخیره می‌شود.',
+            'لینک دعوت برای دکمهٔ «عضویت» کاربران ذخیره می‌ماند.',
         };
       }
     }
@@ -440,7 +567,7 @@ export async function inspectChannelForForceJoin(parsed) {
     };
   }
 
-    try {
+  try {
     const me = await api.getMe();
     const mem = await api.getChatMember({ chat_id: chatId, user_id: me.id });
     const st = String(mem && mem.status ? mem.status : '');
