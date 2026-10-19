@@ -2423,20 +2423,38 @@ try {
       const myCh = await getActiveSubLeaderChannel(userId);
       // state نگه داشته می‌شود برای جستجوی بعدی
       let id = null;
-      const linkM = text.match(/t\.me\/[^/]+\/(\d+)/) || text.match(/t\.me\/c\/\d+\/(\d+)/);
-      if (linkM) {
-        // map channel message id via settings
-        try {
-          const mapped = await settingGet('chmsg:' + myCh + ':' + linkM[1], '');
-          if (mapped) id = Number(mapped);
-        } catch (_e) {}
-      }
-      if (id == null) {
-        const only = String(text).replace(/\D/g, '');
-        if (only) id = Number(only);
+      const raw = String(text || '').trim();
+      const pubLink = raw.match(/(?:https?:\/\/)?t\.me\/([A-Za-z0-9_]+)\/(\d+)/i);
+      const privLink = raw.match(/(?:https?:\/\/)?t\.me\/c\/(\d+)\/(\d+)/i);
+      const isLink = !!(pubLink || privLink);
+      if (isLink) {
+        let channelMsgId = null;
+        if (pubLink && String(pubLink[1]).toLowerCase() !== 'c') {
+          channelMsgId = Number(pubLink[2]);
+        } else if (privLink) {
+          channelMsgId = Number(privLink[2]);
+        }
+        if (myCh && channelMsgId) {
+          try {
+            const mapped = await settingGet('chmsg:' + myCh + ':' + channelMsgId, '');
+            if (mapped) {
+              const n = Number(String(mapped).split('|')[0]);
+              if (Number.isFinite(n) && n > 0) id = n;
+            }
+          } catch (_e) {}
+        }
+        // لینک بود → عدد انتهای لینک هرگز آیدی داخلی نیست
+      } else if (/^\d+$/.test(raw)) {
+        id = Number(raw);
       }
       if (!id) {
-        await api.sendMessage({ chat_id: chatId, text: 'آیدی نامعتبر', reply_markup: await roleKb(userId) });
+        await api.sendMessage({
+          chat_id: chatId,
+          text: isLink
+            ? 'این لینک به پیام داخلی کانال شما map نشده. آیدی داخلی را بفرستید.'
+            : 'آیدی نامعتبر',
+          reply_markup: await roleKb(userId),
+        });
         return;
       }
       const rows = await db.select().from(messages).where(eq(messages.id, id)).all();
@@ -2824,7 +2842,10 @@ try {
         await setState(userId, 'search_msg');
         await api.sendMessage({
           chat_id: chatId,
-          text: 'عدد آیدی پیام را بفرستید:',
+          text:
+            'آیدی داخلی پیام یا لینک کانال را بفرستید:\n' +
+            '• آیدی: 123\n' +
+            '• لینک: https://t.me/callMeAraIl/108010',
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
       } catch (e) {
@@ -2966,37 +2987,83 @@ try {
     if (owner && state?.kind === 'search_msg' && text) {
       let id = null;
       let linkHint = '';
-      const linkMatch = String(text).match(/t\.me\/([A-Za-z0-9_]+)\/(\d+)/i);
-      if (linkMatch) {
-        const uname = linkMatch[1];
-        const mid = Number(linkMatch[2]);
-        const nameMap = { callmearail: 'sadambazan', inkarbariral: 'inkarbar', arialcuple: 'zendegi' };
-        const key = nameMap[String(uname).toLowerCase()] || null;
-        if (key && mid) {
+      const raw = String(text || '').trim();
+      // لینک عمومی: t.me/username/123   یا خصوصی: t.me/c/3877061735/123
+      const pubLink = raw.match(/(?:https?:\/\/)?t\.me\/([A-Za-z0-9_]+)\/(\d+)/i);
+      const privLink = raw.match(/(?:https?:\/\/)?t\.me\/c\/(\d+)\/(\d+)/i);
+      const isLink = !!(pubLink || privLink);
+      if (isLink) {
+        let channelKey = null;
+        let channelMsgId = null;
+        if (pubLink && String(pubLink[1]).toLowerCase() !== 'c') {
+          const uname = String(pubLink[1]).toLowerCase();
+          channelMsgId = Number(pubLink[2]);
+          for (const [k, u] of Object.entries(CHANNEL_USERNAMES || {})) {
+            if (String(u).toLowerCase() === uname) {
+              channelKey = k;
+              break;
+            }
+          }
+          // fallback نام‌های رایج
+          if (!channelKey) {
+            const nameMap = {
+              callmearail: 'sadambazan',
+              inkarbariral: 'inkarbar',
+              arialcuple: 'zendegi',
+            };
+            channelKey = nameMap[uname] || null;
+          }
+        } else if (privLink) {
+          const bare = String(privLink[1]);
+          channelMsgId = Number(privLink[2]);
+          for (const [k, cid] of Object.entries(CHANNEL_IDS || {})) {
+            const s = String(cid);
+            if (s === bare || s === '-100' + bare || s.replace(/^-100/, '') === bare) {
+              channelKey = k;
+              break;
+            }
+          }
+        }
+        if (channelKey && channelMsgId) {
           try {
-            const mapped = await settingGet('chmsg:' + key + ':' + mid, '');
-            if (mapped) id = Number(mapped);
+            const mapped = await settingGet('chmsg:' + channelKey + ':' + channelMsgId, '');
+            if (mapped) {
+              const n = Number(String(mapped).split('|')[0]);
+              if (Number.isFinite(n) && n > 0) id = n;
+            }
           } catch (_e) {}
           if (!id) {
             linkHint =
-              'لینک کانال شناسایی شد (' +
-              uname +
-              '/' +
-              mid +
-              ') ولی در دیتابیس map نشده. آیدی داخلی را بفرستید یا بعد از انتشارهای جدید امتحان کنید.';
+              'لینک کانال تشخیص داده شد («' +
+              ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
+              '» / #' +
+              channelMsgId +
+              ') ولی به پیام داخلی map نشده.\n' +
+              'آیدی داخلی ربات را بفرستید (عدد alone)، نه شمارهٔ پیام کانال.';
           }
+        } else {
+          linkHint =
+            'لینک کانال شناخته نشد.\nاز لینک عمومی یکی از سه کانال استفاده کنید یا آیدی داخلی پیام را بفرستید.';
         }
-      }
-      if (id == null) {
-        const onlyNum = String(text).replace(/\D/g, '');
-        if (onlyNum) id = Number(onlyNum);
+        // مهم: اگر ورودی لینک بود، هرگز عدد انتهای لینک را به‌عنوان آیدی داخلی نگیر
+      } else {
+        // فقط عدد خالص = آیدی داخلی ربات
+        if (/^\d+$/.test(raw)) {
+          id = Number(raw);
+        } else {
+          const onlyNum = raw.replace(/\D/g, '');
+          // فقط اگر کل متن عملاً همان عدد باشد (نه لینک ناقص)
+          if (onlyNum && onlyNum === raw.replace(/\s/g, '')) id = Number(onlyNum);
+        }
       }
       if (!id) {
         await api.sendMessage({
           chat_id: chatId,
           text:
             (linkHint ? linkHint + '\n\n' : '') +
-            'آیدی یا لینک معتبر بفرستید.\nمثال: 123 یا https://t.me/callMeAraIl/108010',
+            'آیدی داخلی یا لینک معتبر بفرستید.\n' +
+            'مثال آیدی: 123\n' +
+            'مثال لینک: https://t.me/callMeAraIl/108010',
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
@@ -3007,9 +3074,9 @@ try {
           chat_id: chatId,
           text:
             (linkHint ? linkHint + '\n\n' : '') +
-            'پیام #' +
-            id +
-            ' پیدا نشد.\nآیدی یا لینک بعدی را بفرستید:',
+            (isLink
+              ? 'با این لینک پیام داخلی پیدا نشد.\nآیدی داخلی را بفرستید یا لینک پیام منتشرشده توسط ربات را امتحان کنید:'
+              : 'پیام #' + id + ' پیدا نشد.\nآیدی یا لینک بعدی را بفرستید:'),
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
         return;
