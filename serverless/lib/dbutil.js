@@ -154,6 +154,66 @@ export async function settingSet(key, value) {
 }
 
 
+/** ذخیره نگاشت دوطرفه message_id کانال ↔ آیدی داخلی */
+export async function rememberChannelMessage(channelKey, channelMsgId, internalId) {
+  const ck = String(channelKey || '');
+  const mid = Number(channelMsgId);
+  const id = Number(internalId);
+  if (!ck || !Number.isFinite(mid) || !Number.isFinite(id)) return;
+  try {
+    await settingSet('chmsg:' + ck + ':' + mid, String(id));
+  } catch (_e) {}
+  try {
+    await settingSet('msgch:' + id, ck + ':' + mid);
+  } catch (_e) {}
+}
+
+/**
+ * پیدا کردن message_id کانال از روی آیدی داخلی پیام
+ * @returns {{ channelKey: string, channelMsgId: number, chatId: number|null } | null}
+ */
+export async function findChannelMessageByInternalId(internalId) {
+  const id = Number(internalId);
+  if (!Number.isFinite(id)) return null;
+  try {
+    const rev = await settingGet('msgch:' + id, '');
+    if (rev && String(rev).includes(':')) {
+      const parts = String(rev).split(':');
+      const ck = parts[0];
+      const mid = Number(parts[1]);
+      if (ck && Number.isFinite(mid)) {
+        const chatId = (CHANNEL_IDS && CHANNEL_IDS[ck]) != null ? Number(CHANNEL_IDS[ck]) : null;
+        return { channelKey: ck, channelMsgId: mid, chatId: chatId };
+      }
+    }
+  } catch (_e) {}
+  // fallback: اسکن settings برای chmsg:* که مقدارش همین id است
+  try {
+    const rows = (await db.select().from(settings).all()) || [];
+    const want = String(id);
+    for (const r of rows) {
+      const key = String((r && r.key) || '');
+      if (!key.startsWith('chmsg:')) continue;
+      const val = String((r && r.value) || '').split('|')[0];
+      if (val !== want) continue;
+      const m = key.match(/^chmsg:([^:]+):(\d+)$/);
+      if (!m) continue;
+      const ck = m[1];
+      const mid = Number(m[2]);
+      const chatId = (CHANNEL_IDS && CHANNEL_IDS[ck]) != null ? Number(CHANNEL_IDS[ck]) : null;
+      try {
+        await settingSet('msgch:' + id, ck + ':' + mid);
+      } catch (_e) {}
+      return { channelKey: ck, channelMsgId: mid, chatId: chatId };
+    }
+  } catch (e) {
+    console.error('findChannelMessageByInternalId scan', e);
+  }
+  return null;
+}
+
+
+
 /** سقف تقریبی حجم جدول messages ≈ ۵ مگابایت */
 export const MESSAGES_SIZE_BUDGET_BYTES = 5 * 1024 * 1024;
 const MSG_ROW_OVERHEAD = 200;
@@ -535,10 +595,10 @@ export async function inspectChannelForForceJoin(parsed) {
           needChatId: true,
           inviteLink: inviteLink,
           error:
-            'لینک خصوصی شناسایی شد.\n\n' +
-            'اگر ربات همین الان ادمین کانال است، یکی از این‌ها را بفرستید تا چک عضویت/ادمین انجام شود:\n' +
-            '• آیدی عددی کانال (مثل -1001234567890)\n' +
-            '• یا یک پیام از همان کانال را برای ربات فوروارد کنید\n\n' +
+            'لینک خصوصی کانال/گروه شناسایی شد.\n\n' +
+            'اگر ربات همین الان ادمین همان کانال یا گروه است، یکی از این‌ها را بفرستید:\n' +
+            '• آیدی عددی (مثل -1001234567890)\n' +
+            '• یا یک پیام از همان کانال/گروه را فوروارد کنید\n\n' +
             'لینک دعوت برای دکمهٔ «عضویت» کاربران ذخیره می‌ماند.',
         };
       }
@@ -547,11 +607,13 @@ export async function inspectChannelForForceJoin(parsed) {
       return {
         ok: false,
         error:
-          'کانال پیدا نشد.\nربات را به کانال اضافه و ادمین کنید، بعد لینک / @یوزرنیم / آیدی عددی را بفرستید.',
+          'کانال/گروه پیدا نشد.\nربات را عضو و ادمین کنید (دسترسی مشاهده اعضا)، بعد لینک / @یوزرنیم / آیدی عددی یا فوروارد پیام بفرستید.',
       };
     }
     chatId = chat.id;
     title = chat.title || chat.username || String(chatId);
+    const chatType = String(chat.type || '');
+    // channel | group | supergroup — همه برای عضویت اجباری مجازند
     if (chat.username) {
       username = chat.username;
       if (!hadPrivateInvite) {
@@ -562,7 +624,7 @@ export async function inspectChannelForForceJoin(parsed) {
     return {
       ok: false,
       error:
-        'ربات به این کانال دسترسی ندارد.\nربات را اضافه کنید، ادمین کنید و دسترسی «مشاهده اعضا» بدهید.\n\n' +
+        'ربات به این کانال/گروه دسترسی ندارد.\nربات را اضافه کنید، ادمین کنید و دسترسی «مشاهده اعضا» بدهید.\n\n' +
         ((e && (e.message || e.description)) || ''),
     };
   }
@@ -575,14 +637,14 @@ export async function inspectChannelForForceJoin(parsed) {
       return {
         ok: false,
         error:
-          'ربات داخل کانال عضو است ولی ادمین نیست.\nربات را ادمین کنید و دسترسی مشاهدهٔ اعضا را بدهید.',
+          'ربات داخل کانال/گروه عضو است ولی ادمین نیست.\nربات را ادمین کنید و دسترسی مشاهدهٔ اعضا را بدهید.',
       };
     }
   } catch (e) {
     return {
       ok: false,
       error:
-        'ربات داخل کانال عضو نیست یا دسترسی ندارد.\nربات را به کانال اضافه و ادمین کنید (مشاهده اعضا).\n\n' +
+        'ربات داخل کانال/گروه عضو نیست یا دسترسی ندارد.\nربات را عضو و ادمین کنید (مشاهده اعضا).\n\n' +
         ((e && (e.message || e.description)) || ''),
     };
   }

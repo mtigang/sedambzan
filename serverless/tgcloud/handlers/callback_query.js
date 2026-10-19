@@ -27,6 +27,8 @@ import {
   getUser,
   settingGet,
   settingSet,
+  rememberChannelMessage,
+  findChannelMessageByInternalId,
   activeShiftAdmins,
   addChannelAdmin,
   getRole,
@@ -80,7 +82,7 @@ import {
   listActiveSubLeaders,
 } from 'lib/subleader';
 import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod, toJalaliDisplay, periodOrd, isWorkHours, normHm } from 'lib/time';
-import { DEFAULT_CHANNELS, OWNER_IDS } from 'lib/config';
+import { DEFAULT_CHANNELS, OWNER_IDS, CHANNEL_IDS } from 'lib/config';
 import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
 import { DB_EXPORT_OWNER_ID, processDbExportBatch, clearDbExportJob, getDbExportJob } from 'lib/db_export';
 import {
@@ -241,7 +243,7 @@ if (data.startsWith('ban_user:')) {
       return;
     }
 
-    // —— حذف پیام از جستجو ——
+    // —— حذف پیام از کانال (نه از دیتابیس) ——
     if (data.startsWith('smsg_del:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
@@ -254,18 +256,39 @@ if (data.startsWith('ban_user:')) {
           await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'یافت نشد', show_alert: true });
           return;
         }
-        await db.delete(messages).where(eq(messages.id, mid)).run();
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'حذف شد' });
+        const row = rows[0];
+        const ref = await findChannelMessageByInternalId(mid);
+        let chatIdCh = ref && ref.chatId != null ? Number(ref.chatId) : null;
+        let channelMsgId = ref && ref.channelMsgId != null ? Number(ref.channelMsgId) : null;
+        const ck = (ref && ref.channelKey) || row.channelKey || row.channel_key || null;
+        if ((!chatIdCh || !channelMsgId) && ck) {
+          if (CHANNEL_IDS && CHANNEL_IDS[ck] != null) chatIdCh = Number(CHANNEL_IDS[ck]);
+        }
+        if (!chatIdCh || !channelMsgId) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: 'پیام کانال پیدا نشد (هنوز منتشر نشده یا نگاشت موجود نیست)',
+            show_alert: true,
+          });
+          return;
+        }
+        await api.deleteMessage({ chat_id: chatIdCh, message_id: channelMsgId });
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'از کانال حذف شد' });
         try {
           await api.editMessageText({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
-            text: (cq.message.text || '') + '\n\n🗑 از دیتابیس حذف شد.',
+            text: (cq.message.text || '') + '\n\n🗑 از کانال حذف شد (در دیتابیس باقی ماند).',
           });
         } catch (_e) {}
       } catch (e) {
         console.error('smsg_del', e);
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'خطا', show_alert: true });
+        const em = (e && (e.description || e.message)) || String(e);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'خطا حذف کانال: ' + String(em).slice(0, 120),
+          show_alert: true,
+        });
       }
       return;
     }
@@ -624,9 +647,7 @@ if (data.startsWith('ban_user:')) {
         mid = sent && sent.message_id;
         if (!mid) throw new Error('message_id خالی');
         link = channelMessageLink(conf.chatId, mid, row.channelKey || row.channel_key);
-        settingSet('chmsg:' + (row.channelKey || row.channel_key) + ':' + mid, String(id)).catch(
-          function () {}
-        );
+        rememberChannelMessage(row.channelKey || row.channel_key, mid, id).catch(function () {});
       } catch (e) {
         console.error('search_approve publish', e);
         try {
@@ -798,7 +819,7 @@ if (data.startsWith('ban_user:')) {
           mid = sent && sent.message_id;
           if (!mid) throw new Error('message_id خالی');
           link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
-          settingSet('chmsg:' + pendingRow.channelKey + ':' + mid, String(id)).catch(function () {});
+          rememberChannelMessage(pendingRow.channelKey, mid, id).catch(function () {});
         } catch (e) {
           console.error('publish first', e);
           try {
@@ -2888,7 +2909,7 @@ if (data.startsWith('own_shift:')) {
           const mid = sent && sent.message_id;
           if (!mid) throw new Error('no message_id');
           try {
-            await settingSet('chmsg:' + channelKey + ':' + mid, String(row.id));
+            await rememberChannelMessage(channelKey, mid, row.id);
           } catch (_e) {}
           await db
             .update(messages)

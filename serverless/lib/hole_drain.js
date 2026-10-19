@@ -6,7 +6,8 @@ import { api, db } from 'sdk';
 import { eq, and } from 'sdk/db';
 import { messages } from 'schema';
 import { DEFAULT_CHANNELS } from 'lib/config';
-import { settingGet, settingSet, acquireLock, releaseLock, toBoldHtml, dropMessageFromAllReviewBatches } from 'lib/dbutil';
+import { settingGet, settingSet,
+  rememberChannelMessage, acquireLock, releaseLock, toBoldHtml, dropMessageFromAllReviewBatches } from 'lib/dbutil';
 import { exactBodyKey } from 'lib/validation';
 import { channelMessageLink } from 'lib/resolve';
 import { flushProgressInline, sanitizeMarkup } from 'lib/keyboards';
@@ -244,7 +245,7 @@ export async function drainHoleWave(opts) {
         }
 
         try {
-          await settingSet('chmsg:' + channelKey + ':' + mid, String(row.id));
+          await rememberChannelMessage(channelKey, mid, row.id);
         } catch (_e) {}
 
         await db

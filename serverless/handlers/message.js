@@ -879,7 +879,12 @@ export default async function (message) {
       await setState(userId, 'user_send');
       await api.sendMessage({
         chat_id: chatId,
-        text: RULES_TEXT + '\n\nمی‌توانید چند پیام پشت‌سرهم بفرستید.\nحداکثر ۶ پیام در ۱۰ دقیقه.',
+        text:
+          '📝 پیام خودت را بفرست.\n\n' +
+          'پیامتون با «صدام بزن / این کاربر / تو زندگی بعدی» شروع بشه.\n' +
+          'سیاسی و بی‌احترامی نباشه.\n\n' +
+          'می‌توانید چند پیام پشت‌سرهم بفرستید.\n' +
+          'حداکثر ۶ پیام در ۱۰ دقیقه.',
         reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
