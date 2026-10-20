@@ -2069,7 +2069,6 @@ export async function dropMessageFromReviewBatch(adminId, msgId) {
 export async function dropMessageFromAllReviewBatches(msgId) {
   msgId = Number(msgId);
   try {
-    // ایندکس سبک به‌جای اسکن کل settings (شامل exportهای چندمگابایتی)
     let adminIds = [];
     try {
       const raw = await settingGet('review_batch_index', '[]');
@@ -2078,22 +2077,8 @@ export async function dropMessageFromAllReviewBatches(msgId) {
     } catch (_e) {
       adminIds = [];
     }
-    // اگر ایندکس خالی بود، فقط کلیدهای review_batch را از لیست فیلتر کن ولی value بزرگ را نخوان
-    if (!adminIds.length) {
-      try {
-        const all = (await db.select().from(settings).all()) || [];
-        for (const row of all) {
-          const key = row && row.key != null ? String(row.key) : '';
-          if (!key.startsWith('review_batch:')) continue;
-          const aid = Number(key.slice('review_batch:'.length));
-          if (Number.isFinite(aid)) adminIds.push(aid);
-        }
-        adminIds = Array.from(new Set(adminIds));
-        try {
-          await settingSet('review_batch_index', JSON.stringify(adminIds.slice(0, 500)));
-        } catch (_e) {}
-      } catch (_e) {}
-    }
+    // هرگز کل جدول settings را لود نکن (timeout / کندی شدید)
+    // اگر ایندکس خالی است فقط همین را رد شو؛ Batch خود ادمین جداگانه drop می‌شود
     for (const aid of adminIds) {
       try {
         await dropMessageFromReviewBatch(aid, msgId);
