@@ -292,7 +292,7 @@ export function disableModesInline(opts) {
       ],
       [
         {
-          text: queue ? '⏳ صف شلوغ: روشن' : '⏳ صف شلوغ: خاموش',
+          text: queue ? '⏳ صف شلوغ: روشن (انتخاب کانال)' : '⏳ صف شلوغ (انتخاب کانال)',
           callback_data: 'dis:queue',
           style: queue ? 'danger' : 'success',
         },
@@ -356,7 +356,7 @@ export function recentUserMsgsInline(offset) {
 
 /** انتخاب کانال برای خاموش/تب — رنگی */
 export function channelPickFlagsInline(prefix) {
-  // prefix: choff | chon | chad | chad_off
+  // prefix: choff | chon | chad | chad_off | chq
   const style = { sadambazan: 'success', inkarbar: 'primary', zendegi: 'primary', all: 'danger' };
   return sanitizeMarkup({
     inline_keyboard: [

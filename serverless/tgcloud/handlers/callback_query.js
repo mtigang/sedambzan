@@ -12,6 +12,8 @@ import {
   isBotOn,
   isQueueBusyMode,
   setQueueBusyMode,
+  setChannelQueueBusy,
+  isChannelQueueBusy,
   getForceJoinCampaign,
   getForceJoinHistory,
   saveForceJoinCampaign,
@@ -228,17 +230,40 @@ if (data.startsWith('ban_user:')) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
         return;
       }
+      if (isOwner(tid)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نمی‌توان مالک را بن کرد', show_alert: true });
+        return;
+      }
       try {
-        const { setBlocked } = await import('lib/users');
-        await setBlocked(tid, true);
+        const existing = await db.select().from(users).where(eq(users.userId, tid)).all();
+        if (existing && existing.length) {
+          await db.update(users).set({ blocked: 1 }).where(eq(users.userId, tid)).run();
+        } else {
+          await db
+            .insert(users)
+            .values({
+              userId: tid,
+              role: 'user',
+              started: 0,
+              blocked: 1,
+            })
+            .run();
+        }
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'مسدود شد' });
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: '🚫 کاربر ' + tid + ' از ربات مسدود شد.',
+          text:
+            '🚫 کاربر ' +
+            tid +
+            ' از ربات مسدود شد.\nدیگر نمی‌تواند پیام بفرستد یا از منوها استفاده کند.',
         });
       } catch (e) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'خطا', show_alert: true });
         console.error('ban_user', e);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'خطا: ' + String((e && e.message) || e).slice(0, 100),
+          show_alert: true,
+        });
       }
       return;
     }
@@ -2161,13 +2186,40 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
           const on = await isChannelAdMode(k);
           lines.push(((DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k) + ': ' + (on ? '📢 تب روشن' : '✅ تب خاموش'));
         }
-        // برای تب بعد از انتخاب یک کانال، همان پنل کانال بماند تا سریع چند کانال عوض شود
         try {
           await api.editMessageText({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
             text: '📢 حالت تب\n' + lines.join('\n') + '\n\nکانال دیگر را بزنید یا انصراف.',
             reply_markup: sanitizeMarkup(channelPickFlagsInline('chad')),
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (mode === 'chq') {
+        for (const k of keys) {
+          const cur = await isChannelQueueBusy(k);
+          await setChannelQueueBusy(k, !cur);
+        }
+        // همگام‌سازی فلگ سراسری قدیمی
+        try {
+          let any = false;
+          for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
+            if (await isChannelQueueBusy(ck)) any = true;
+          }
+          await settingSet('queue_busy_mode', any ? '1' : '0');
+        } catch (_e) {}
+        let lines = [];
+        for (const k of keys) {
+          const on = await isChannelQueueBusy(k);
+          lines.push(((DEFAULT_CHANNELS[k] && DEFAULT_CHANNELS[k].title) || k) + ': ' + (on ? '⏳ شلوغ' : '✅ آزاد'));
+        }
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: '⏳ صف شلوغ\n' + lines.join('\n') + '\n\nکانال دیگر را بزنید یا انصراف.',
+            reply_markup: sanitizeMarkup(channelPickFlagsInline('chq')),
           });
         } catch (_e) {}
         return;

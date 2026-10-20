@@ -89,23 +89,45 @@ export async function submitUserMessage(userId, text) {
   if (!owner && (await isFridayMode())) {
     return { ok: false, error: FRIDAY_MODE_TEXT || 'امروز جمعه است؛ ارسال پیام ممکن نیست.' };
   }
-  if (!owner && (await isQueueBusyMode())) {
+  if (!(await isBotOn()) && !owner) {
     return {
       ok: false,
-      error: QUEUE_BUSY_TEXT || 'حجم صف زیاد است. کمی بعد دوباره تلاش کنید.',
+      error:
+        '🔴 ربات موقتاً خاموش است.\n\n' +
+        'پیام شما ثبت نشد — ربات خراب نیست.\n' +
+        'لطفاً بعداً دوباره تلاش کنید.',
     };
-  }
-  if (!(await isBotOn()) && !owner) {
-    return { ok: false, error: '🔴 ربات در حال حاضر غیرفعال است.' };
   }
 
   // اعتبارسنجی (بدون entity بولد — مینی‌اپ متن ساده می‌فرستد؛ ربات خودش بولد می‌کند)
   const v = validateAndFix({ text: rawText, entities: [] });
   if (!v.ok) return { ok: false, error: v.error || 'پیام نامعتبر است.' };
 
+  const chTitle =
+    (DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey;
+
+  // صف شلوغ به‌ازای کانال
+  if (!owner && (await isQueueBusyMode(v.channelKey))) {
+    return {
+      ok: false,
+      error:
+        '⏳ صف «' +
+        chTitle +
+        '» شلوغ است.\n\n' +
+        'پیام شما ثبت نشد — ربات سالم است و فقط ورودی این کانال موقتاً بسته شده.\n' +
+        'کمی بعد دوباره بفرستید.',
+    };
+  }
+
   const ch = await getChannel(v.channelKey);
   if (!ch || Number(ch.enabled) === 0) {
-    return { ok: false, error: '🔴 این کانال غیرفعال است.' };
+    return {
+      ok: false,
+      error:
+        '🔴 کانال «' +
+        chTitle +
+        '» غیرفعال است.\n\nپیام ثبت نشد (عمدی است، نه خرابی ربات).',
+    };
   }
 
   try {
@@ -114,8 +136,9 @@ export async function submitUserMessage(userId, text) {
         ok: false,
         error:
           '🔴 دریافت پیام برای «' +
-          ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
-          '» فعلاً غیرفعال است.',
+          chTitle +
+          '» فعلاً خاموش است.\n\n' +
+          'پیام شما ثبت نشد.\nمالک این کانال را موقتاً بسته است — بعداً تلاش کنید.',
       };
     }
     if (await isChannelAdMode(v.channelKey)) {
@@ -123,8 +146,10 @@ export async function submitUserMessage(userId, text) {
         ok: false,
         error:
           '📢 «' +
-          ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
-          '» الان درگیر تبلیغات است. کمی بعد دوباره بفرستید.',
+          chTitle +
+          '» الان درگیر تبلیغات / تبادل است.\n\n' +
+          'پیام شما ثبت نشد — ربات سالم است.\n' +
+          'کمی بعد دوباره بفرستید.',
       };
     }
   } catch (_e) {}

@@ -319,23 +319,54 @@ export async function setFridayMode(on) {
 }
 
 export const FRIDAY_MODE_TEXT =
-  '🌙 امروز جمعه‌ست…\n\n' +
-  'همه خوابیم 😴\n' +
-  'تکست و این حرفا کنسله.\n\n' +
-  'شنبه برگرد، با انرژی بیشتر منتظرتیم 🌸';
+  '🌙 امروز جمعه است — ربات عمداً خاموشِ ارسال است.\n\n' +
+  'پیام شما ثبت نشد (ربات خراب نیست).\n' +
+  'شنبه دوباره می‌توانید پیام بفرستید.';
 
-/** صف شلوغ — کاربر پیام نمی‌فرستد؛ ادمین تأیید/رد می‌کند */
-export async function isQueueBusyMode() {
-  return (await settingGet('queue_busy_mode', '0')) === '1';
+/** صف شلوغ — کاربر پیام نمی‌فرستد؛ ادمین تأیید/رد می‌کند
+ * بدون آرگومان: آیا حداقل یک کانال (یا فلگ سراسری قدیمی) شلوغ است؟
+ * با channelKey: فقط همان کانال
+ */
+export async function isQueueBusyMode(channelKey) {
+  try {
+    if (channelKey) {
+      const ck = String(channelKey);
+      const v = await settingGet('ch_queue:' + ck, '');
+      if (v === '1') return true;
+      if (v === '0') return false;
+      // سازگاری با فلگ سراسری قدیمی
+      return (await settingGet('queue_busy_mode', '0')) === '1';
+    }
+    // خلاصه برای پنل
+    for (const ck of ['sadambazan', 'inkarbar', 'zendegi']) {
+      if ((await settingGet('ch_queue:' + ck, '0')) === '1') return true;
+    }
+    return (await settingGet('queue_busy_mode', '0')) === '1';
+  } catch (_e) {
+    return false;
+  }
 }
 
 export async function setQueueBusyMode(on) {
+  // سراسری (همه کانال‌ها)
   await settingSet('queue_busy_mode', on ? '1' : '0');
+  for (const ck of ['sadambazan', 'inkarbar', 'zendegi']) {
+    await settingSet('ch_queue:' + ck, on ? '1' : '0');
+  }
+}
+
+export async function setChannelQueueBusy(channelKey, on) {
+  await settingSet('ch_queue:' + String(channelKey), on ? '1' : '0');
+}
+
+export async function isChannelQueueBusy(channelKey) {
+  return (await settingGet('ch_queue:' + String(channelKey), '0')) === '1';
 }
 
 export const QUEUE_BUSY_TEXT =
-  '⏳ حجم پیام‌های در انتظار زیاد است.\n\n' +
-  'لطفاً کمی صبر کنید و بعداً دوباره امتحان کنید.';
+  '⏳ صف پیام‌های این کانال شلوغ است.\n\n' +
+  'پیام شما ثبت نشد — ربات سالم است.\n' +
+  'کمی بعد دوباره ارسال کنید تا ادمین‌ها به صف برسند.';
 
 // ——— عضویت اجباری ———
 const FJ_ACTIVE_KEY = 'force_join_active';

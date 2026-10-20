@@ -442,21 +442,14 @@ export default async function (message) {
           startText = lines.join('\n') + '\n\n' + WELCOME_TEXT;
         } catch (_e) {}
       }
-      // مینی‌اپ در منوی چت (کنار تایپ)
+      // منوی کامندها (سه خط کنار کادر تایپ). web_app و commands همزمان نمی‌شوند — مینی‌اپ حذف شد.
       try {
-        const { MINI_APP_URL } = await import('lib/config');
-        if (MINI_APP_URL) {
-          await api.setChatMenuButton({
-            chat_id: chatId,
-            menu_button: {
-              type: 'web_app',
-              text: 'ارسال پیام',
-              web_app: { url: MINI_APP_URL },
-            },
-          });
-        }
+        await api.setChatMenuButton({
+          chat_id: chatId,
+          menu_button: { type: 'commands' },
+        });
       } catch (e) {
-        console.error('setChatMenuButton', e);
+        console.error('setChatMenuButton commands', e);
       }
       await api.sendMessage({
         chat_id: chatId,
@@ -4558,18 +4551,33 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
       } catch (_e) {}
     }
     try {
-      // کاربران عادی نباید منتظر صف اطلاعیه بمانند (کندی ثبت پیام)
+      // کاربران عادی منتظر نمانند؛ برای حذف کانال / بن هم صف اطلاعیه را block نکن
       const uid = message && message.from && message.from.id;
-      const staff =
-        uid &&
-        (isOwner(uid) ||
-          (await getUser(uid).then(function (u) {
-            return u && (u.role === 'admin' || u.role === 'subleader' || u.role === 'owner');
-          }).catch(function () {
-            return false;
-          })));
-      if (staff) {
-        await drainAnnouncePiggyback(55);
+      let stKind = '';
+      try {
+        const st = await getState(uid);
+        stKind = st && st.kind ? String(st.kind) : '';
+      } catch (_e) {}
+      if (
+        stKind === 'admin_del_ch' ||
+        stKind === 'del_ch_msg' ||
+        stKind === 'ban_user'
+      ) {
+        // skip
+      } else {
+        const staff =
+          uid &&
+          (isOwner(uid) ||
+            (await getUser(uid)
+              .then(function (u) {
+                return u && (u.role === 'admin' || u.role === 'subleader' || u.role === 'owner');
+              })
+              .catch(function () {
+                return false;
+              })));
+        if (staff) {
+          drainAnnouncePiggyback(20).catch(function () {});
+        }
       }
     } catch (_d) {}
   }

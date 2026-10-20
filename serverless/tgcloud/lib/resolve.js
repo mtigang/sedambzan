@@ -11,24 +11,24 @@ export async function resolveUserId(input) {
   if (!uname) return null;
   const unameLower = uname.toLowerCase();
 
-  // ۱) جستجو در دیتابیس محلی (کاربرانی که ربات را استارت کرده‌اند)
-  try {
-    const all = (await db.select().from(users).all()) || [];
-    for (const u of all) {
-      if (u.username && String(u.username).toLowerCase() === unameLower) {
-        return Number(u.userId);
-      }
-    }
-  } catch (e) {
-    console.error('resolveUserId db', e);
-  }
-
-  // ۲) تلاش با Telegram getChat
+  // ۱) getChat سریع‌تر از اسکن کل users
   try {
     const chat = await api.getChat({ chat_id: '@' + uname });
-    if (chat && chat.id) return chat.id;
+    if (chat && chat.id) return Number(chat.id);
   } catch (e) {
     console.error('resolveUserId getChat', e);
+  }
+  // ۲) فقط با where روی username — بدون select().all()
+  try {
+    const rows =
+      (await db.select().from(users).where(eq(users.username, uname)).all()) || [];
+    if (rows[0] && rows[0].userId) return Number(rows[0].userId);
+    // case-insensitive fallback محدود
+    const rows2 =
+      (await db.select().from(users).where(eq(users.username, unameLower)).all()) || [];
+    if (rows2[0] && rows2[0].userId) return Number(rows2[0].userId);
+  } catch (e) {
+    console.error('resolveUserId db', e);
   }
   return null;
 }
