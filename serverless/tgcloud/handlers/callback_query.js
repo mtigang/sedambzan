@@ -744,33 +744,29 @@ if (data.startsWith('ban_user:')) {
 
     if (data.startsWith('approve:')) {
       const id = Number(data.split(':')[1]);
-      // فوری جواب تلگرام — وگرنه دکمه «کار نمی‌کند» دیده می‌شود
-      try {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳…' });
-      } catch (_e) {}
+      async function ans(text, alert) {
+        try {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: String(text || '…').slice(0, 180),
+            show_alert: !!alert,
+          });
+        } catch (_e) {}
+      }
 
       try {
         const rows0 = await db.select().from(messages).where(eq(messages.id, id)).all();
         let pendingRow = rows0 && rows0[0];
         if (!pendingRow) {
-          try {
-            await api.answerCallbackQuery({
-              callback_query_id: cq.id,
-              text: 'پیام یافت نشد',
-              show_alert: true,
-            });
-          } catch (_e) {}
+          await ans('پیام یافت نشد', true);
           return;
         }
         const st0 = String(pendingRow.status || '');
         if (st0 !== 'pending' && st0 !== 'publishing') {
-          try {
-            await dropMessageFromReviewBatch(userId, id);
-          } catch (_e) {}
+          try { await dropMessageFromReviewBatch(userId, id); } catch (_e) {}
+          await ans('قبلاً بررسی شده', false);
           await editReviewResult(cq, 'ℹ️ این پیام قبلاً بررسی شده #' + id, {
-            inBatch: true,
-            complete: true,
-            hasMore: true,
+            inBatch: true, complete: true, hasMore: true,
           });
           return;
         }
@@ -779,62 +775,43 @@ if (data.startsWith('ban_user:')) {
         try {
           const ckAd = String((pendingRow.channelKey ?? pendingRow.channel_key) || '');
           if (ckAd && (await isChannelAdMode(ckAd))) {
-            try {
-              await api.answerCallbackQuery({
-                callback_query_id: cq.id,
-                text: '📢 کانال در حالت تب است؛ تأیید ممکن نیست.',
-                show_alert: true,
-              });
-            } catch (_e) {}
+            await ans('📢 کانال در حالت تب است؛ تأیید ممکن نیست.', true);
             return;
           }
         } catch (_e) {}
 
-        // دسترسی
+        // دسترسی + رزرو قبل از answer نهایی
         if (st0 === 'pending') {
           const acc = await checkReviewAccess(userId, pendingRow);
           if (!acc.ok) {
-            try {
-              await api.answerCallbackQuery({
-                callback_query_id: cq.id,
-                text: acc.text || 'دسترسی ندارید',
-                show_alert: true,
-              });
-            } catch (_e) {}
+            await ans(acc.text || 'دسترسی ندارید', true);
             return;
           }
           const reserved = await reserveMessageForPublish(id, userId);
           if (!reserved.ok) {
-            try {
-              await api.answerCallbackQuery({
-                callback_query_id: cq.id,
-                text:
-                  reserved.code === 'other_holder'
-                    ? 'شخص دیگری در حال انتشار است'
-                    : 'این پیام توسط دیگری گرفته شد؛ دوباره بزنید',
-                show_alert: true,
-              });
-            } catch (_e) {}
+            await ans(
+              reserved.code === 'other_holder'
+                ? 'شخص دیگری در حال انتشار است'
+                : 'گرفته شد؛ دوباره بزنید',
+              true
+            );
             return;
           }
           if (reserved.row) pendingRow = reserved.row;
         } else {
-          // publishing گیرکرده
           const can = await canCompletePublishing(id, userId);
           if (!can.ok) {
-            try {
-              await api.answerCallbackQuery({
-                callback_query_id: cq.id,
-                text:
-                  can.code === 'other_holder'
-                    ? 'شخص دیگری در حال انتشار است'
-                    : 'دسترسی ندارید',
-                show_alert: true,
-              });
-            } catch (_e) {}
+            await ans(
+              can.code === 'other_holder'
+                ? 'شخص دیگری در حال انتشار است'
+                : 'دسترسی ندارید',
+              true
+            );
             return;
           }
         }
+
+        await ans('⏳ در حال انتشار…', false);
 
         const ckRaw = String((pendingRow.channelKey ?? pendingRow.channel_key) || '');
         const ckNorm = normalizeChannelKey(ckRaw) || ckRaw;
@@ -854,20 +831,21 @@ if (data.startsWith('ban_user:')) {
         }
         pendingRow.channelKey = conf.key || ckNorm || pendingRow.channelKey;
 
-        // آیا قبلاً در کانال پست شده؟
+        // فقط lookup سبک msgch: — بدون اسکن settings
         let mid = null;
         let link = null;
         let alreadyPosted = false;
-        try {
-          const ref = await findChannelMessageByInternalId(id);
-          if (ref && ref.channelMsgId) {
-            alreadyPosted = true;
-            mid = Number(ref.channelMsgId);
-            link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
-          }
-        } catch (_e) {}
+        if (st0 === 'publishing') {
+          try {
+            const ref = await findChannelMessageByInternalId(id);
+            if (ref && ref.channelMsgId) {
+              alreadyPosted = true;
+              mid = Number(ref.channelMsgId);
+              link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
+            }
+          } catch (_e) {}
+        }
 
-        // اگر پست نشده (حتی اگر status=publishing گیر کرده) → حتماً بفرست
         if (!alreadyPosted) {
           try {
             const sent = await api.sendMessage({
@@ -886,7 +864,7 @@ if (data.startsWith('ban_user:')) {
             try {
               await db
                 .update(messages)
-                .set({ status: 'pending', reviewedBy: null, reviewedAt: null })
+                .set({ status: 'pending', reviewedBy: null })
                 .where(eq(messages.id, id))
                 .run();
             } catch (_e) {}
@@ -894,10 +872,10 @@ if (data.startsWith('ban_user:')) {
               await api.sendMessage({
                 chat_id: userId,
                 text:
-                  '⚠️ پیام #' +
+                  '⚠️ #' +
                   id +
                   ' در کانال منتشر نشد.\n' +
-                  (e && (e.description || e.message) ? e.description || e.message : String(e)) +
+                  String((e && (e.description || e.message)) || e).slice(0, 200) +
                   '\nدوباره تأیید را بزنید.',
               });
             } catch (_e) {}
@@ -905,55 +883,47 @@ if (data.startsWith('ban_user:')) {
           }
         }
 
-        // ثبت approved
-        const dec = await decideMessage(userId, id, 'approve');
-        if (!dec.ok) {
-          // اگر کانال رفته ولی DB نه — حداقل به کاربر بگو
+        // approved
+        try {
+          await db
+            .update(messages)
+            .set({
+              status: 'approved',
+              reviewedBy: Number(userId),
+              reviewedAt: new Date(),
+              rejectReason: null,
+            })
+            .where(eq(messages.id, id))
+            .run();
+        } catch (e) {
+          console.error('approve status', e);
           try {
             await api.sendMessage({
               chat_id: userId,
-              text:
-                'پیام در کانال ارسال شد' +
-                (mid ? ' (#' + mid + ')' : '') +
-                ' ولی ثبت وضعیت: ' +
-                (dec.text || 'خطا') +
-                ' — #' +
-                id,
+              text: 'در کانال رفت ولی ثبت وضعیت خطا داد #' + id,
             });
           } catch (_e) {}
         }
 
-        // فقط Batch خود ادمین — سریع
-        try {
-          await dropMessageFromReviewBatch(userId, id);
-        } catch (_e) {}
-        // بقیه Batchها در پس‌زمینه (بدون await)
-        try {
-          dropMessageFromAllReviewBatches(id).catch(function () {});
-        } catch (_e) {}
+        try { await dropMessageFromReviewBatch(userId, id); } catch (_e) {}
+        try { dropMessageFromAllReviewBatches(id).catch(function () {}); } catch (_e) {}
 
         const fin = await finishReviewBatchIfComplete(userId, id);
         await editReviewResult(cq, '🟢 تأیید و منتشر شد #' + id, fin);
 
-        // نوتیف کاربر — fire-and-forget
         const uidNotify = Number(pendingRow.userId ?? pendingRow.user_id);
         if (uidNotify) {
-          (async function () {
-            try {
-              const title = conf.title || pendingRow.channelKey;
-              let txt = '✅ پیام شما تأیید و منتشر شد.';
-              if (link) {
-                txt += '\n\nمشاهده در کانال «' + title + '»:\n' + link;
-              }
-              await api.sendMessage({
-                chat_id: uidNotify,
-                text: txt,
-                link_preview_options: link ? { is_disabled: false, url: link } : undefined,
-              });
-            } catch (_e) {}
-          })().catch(function () {});
+          const title = conf.title || pendingRow.channelKey;
+          let txt = '✅ پیام شما تأیید و منتشر شد.';
+          if (link) txt += '\n\nمشاهده در کانال «' + title + '»:\n' + link;
+          api
+            .sendMessage({
+              chat_id: uidNotify,
+              text: txt,
+              link_preview_options: link ? { is_disabled: false, url: link } : undefined,
+            })
+            .catch(function () {});
         }
-        // هیچ piggyback سنگینی اینجا await نشود
       } catch (e) {
         console.error('approve', e);
         try {
@@ -4867,8 +4837,14 @@ if (data === 'ann_continue') {
       });
     } catch (_) {}
   } finally {
+    // piggyback سبک و غیرمسدودکننده — روی approve/reject سنگین نکن
     try {
-      await drainAnnouncePiggyback(35);
+      const d = (cq && cq.data) || '';
+      if (d.startsWith('approve:') || d.startsWith('reject') || d.startsWith('search_approve:')) {
+        // skip heavy drain
+      } else {
+        drainAnnouncePiggyback(15).catch(function () {});
+      }
     } catch (_d) {}
   }
 }

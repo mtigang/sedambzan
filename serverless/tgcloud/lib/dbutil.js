@@ -187,28 +187,7 @@ export async function findChannelMessageByInternalId(internalId) {
       }
     }
   } catch (_e) {}
-  // fallback: اسکن settings برای chmsg:* که مقدارش همین id است
-  try {
-    const rows = (await db.select().from(settings).all()) || [];
-    const want = String(id);
-    for (const r of rows) {
-      const key = String((r && r.key) || '');
-      if (!key.startsWith('chmsg:')) continue;
-      const val = String((r && r.value) || '').split('|')[0];
-      if (val !== want) continue;
-      const m = key.match(/^chmsg:([^:]+):(\d+)$/);
-      if (!m) continue;
-      const ck = m[1];
-      const mid = Number(m[2]);
-      const chatId = (CHANNEL_IDS && CHANNEL_IDS[ck]) != null ? Number(CHANNEL_IDS[ck]) : null;
-      try {
-        await settingSet('msgch:' + id, ck + ':' + mid);
-      } catch (_e) {}
-      return { channelKey: ck, channelMsgId: mid, chatId: chatId };
-    }
-  } catch (e) {
-    console.error('findChannelMessageByInternalId scan', e);
-  }
+  // بدون اسکن کل settings (timeout روی approve)
   return null;
 }
 
