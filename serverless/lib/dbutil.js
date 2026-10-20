@@ -1006,11 +1006,10 @@ export async function adminChannels(userId) {
 
 export async function addChannelAdmin(userId, channelKey) {
   const uid = Number(userId);
-  const ck = String(channelKey || '');
+  let ck = normalizeChannelKey(channelKey) || String(channelKey || '');
   if (!uid || !ck) return { ok: false, reason: 'bad_args' };
   if (isOwner(uid)) return { ok: true, reason: 'owner' };
 
-  // همیشه فلگ حذف را بردار تا دوباره قابل‌افزودن باشد
   try {
     await settingSet('admin_removed:' + ck + ':' + uid, '0');
   } catch (_e) {}
@@ -1022,15 +1021,23 @@ export async function addChannelAdmin(userId, channelKey) {
 
   let exists = false;
   try {
-    const all = (await db.select().from(channelAdmins).all()) || [];
-    exists = all.some(function (r) {
-      return (
-        Number(r.userId ?? r.user_id) === uid &&
-        String(r.channelKey ?? r.channel_key) === ck
-      );
-    });
+    const rows =
+      (await db
+        .select()
+        .from(channelAdmins)
+        .where(and(eq(channelAdmins.userId, uid), eq(channelAdmins.channelKey, ck)))
+        .all()) || [];
+    exists = rows.length > 0;
   } catch (e) {
-    console.error('addChannelAdmin list', e);
+    console.error('addChannelAdmin exists', e);
+    try {
+      const all = (await db.select().from(channelAdmins).all()) || [];
+      exists = all.some(function (r) {
+        return Number(r.userId ?? r.user_id) === uid && String(r.channelKey ?? r.channel_key) === ck;
+      });
+    } catch (e2) {
+      console.error('addChannelAdmin list fallback', e2);
+    }
   }
 
   if (!exists) {
@@ -1038,14 +1045,20 @@ export async function addChannelAdmin(userId, channelKey) {
       await db.insert(channelAdmins).values({ userId: uid, channelKey: ck }).run();
     } catch (e) {
       console.error('addChannelAdmin insert', e);
+      // ممکن است رکورد از قبل باشد
       try {
-        await db.insert(channelAdmins).values({ userId: uid, channelKey: ck }).run();
-      } catch (e2) {
-        console.error('addChannelAdmin retry', e2);
+        const again =
+          (await db
+            .select()
+            .from(channelAdmins)
+            .where(and(eq(channelAdmins.userId, uid), eq(channelAdmins.channelKey, ck)))
+            .all()) || [];
+        if (!again.length) return { ok: false, reason: 'insert_fail' };
+        exists = true;
+      } catch (_e3) {
         return { ok: false, reason: 'insert_fail' };
       }
     }
-    // زمان ادمین‌شدن برای گزارش‌ها
     try {
       await settingSet('admin_since:' + ck + ':' + uid, String(Date.now()));
     } catch (_e) {}
@@ -1058,12 +1071,21 @@ export async function addChannelAdmin(userId, channelKey) {
         await db.update(users).set({ role: 'admin' }).where(eq(users.userId, uid)).run();
       }
     } else {
-      await db.insert(users).values({ userId: uid, role: 'admin', started: 0 }).run();
+      try {
+        await db
+          .insert(users)
+          .values({ userId: uid, role: 'admin', started: 0, blocked: 0 })
+          .run();
+      } catch (_ins) {
+        try {
+          await db.update(users).set({ role: 'admin' }).where(eq(users.userId, uid)).run();
+        } catch (_e) {}
+      }
     }
   } catch (e) {
     console.error('addChannelAdmin role', e);
   }
-  return { ok: true, reason: exists ? 'already' : 'added' };
+  return { ok: true, reason: exists ? 'already' : 'added', channelKey: ck, userId: uid };
 }
 
 export async function removeChannelAdmin(userId, channelKey) {
@@ -1223,54 +1245,94 @@ export async function activeShiftAdmins(channelKey) {
 
 /** داشبورد آماری سبک — بدون خواندن content پیام‌ها */
 export async function getStatsDashboardText() {
-  let rows = [];
   let msgErr = null;
-  try {
-    rows =
-      (await db
-        .select({
-          id: messages.id,
-          status: messages.status,
-          channelKey: messages.channelKey,
-        })
-        .from(messages)
-        .all()) || [];
-  } catch (e1) {
-    console.error('stats light select', e1);
-    msgErr = e1;
-    rows = [];
+  let total = 0, pe = 0, ap = 0, rj = 0;
+  const byCh = {};
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    byCh[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
+  }
+
+  async function countAll() {
     try {
-      const cAll = await db.select({ n: sql`count(*)` }).from(messages).all();
-      const totalGuess = Number(
-        (cAll && cAll[0] && (cAll[0].n != null ? cAll[0].n : Object.values(cAll[0])[0])) || 0
-      );
-      if (totalGuess) {
-        msgErr = new Error('select سبک timeout؛ count≈' + totalGuess);
+      const rows = (await db.select({ n: sql`count(*)` }).from(messages).all()) || [];
+      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+    } catch (_e) {
+      return null;
+    }
+  }
+  async function countWhere(extraSql) {
+    try {
+      const rows = (await db.select({ n: sql`count(*)` }).from(messages).where(extraSql).all()) || [];
+      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  try {
+    // کل
+    const t = await countAll();
+    if (t == null) throw new Error('count total failed');
+    total = t;
+    pe = (await countWhere(eq(messages.status, 'pending'))) || 0;
+    ap = (await countWhere(eq(messages.status, 'approved'))) || 0;
+    rj = (await countWhere(eq(messages.status, 'rejected'))) || 0;
+    for (const key of Object.keys(byCh)) {
+      const base = eq(messages.channelKey, key);
+      byCh[key].total = (await countWhere(base)) || 0;
+      byCh[key].pe = (await countWhere(and(base, eq(messages.status, 'pending')))) || 0;
+      byCh[key].ap = (await countWhere(and(base, eq(messages.status, 'approved')))) || 0;
+      byCh[key].rj = (await countWhere(and(base, eq(messages.status, 'rejected')))) || 0;
+    }
+  } catch (e1) {
+    console.error('stats count', e1);
+    msgErr = e1;
+    // fallback سبک: یک select محدود
+    try {
+      const rows =
+        (await db
+          .select({ status: messages.status, channelKey: messages.channelKey })
+          .from(messages)
+          .all()) || [];
+      total = rows.length;
+      for (const x of rows) {
+        const st = String(x.status || '');
+        const ck = String((x.channelKey ?? x.channel_key) || '');
+        if (st === 'pending') pe++;
+        else if (st === 'approved') ap++;
+        else if (st === 'rejected') rj++;
+        if (byCh[ck]) {
+          byCh[ck].total++;
+          if (st === 'pending') byCh[ck].pe++;
+          else if (st === 'approved') byCh[ck].ap++;
+          else if (st === 'rejected') byCh[ck].rj++;
+        }
       }
+      msgErr = null;
+    } catch (e2) {
+      msgErr = e2;
+    }
+  }
+
+  let userCount = 0;
+  try {
+    const ur = (await db.select({ n: sql`count(*)` }).from(users).all()) || [];
+    userCount = Number((ur[0] && (ur[0].n != null ? ur[0].n : Object.values(ur[0])[0])) || 0);
+  } catch (_e) {
+    try {
+      const us = (await db.select().from(users).all()) || [];
+      userCount = us.length;
     } catch (_e2) {}
   }
-  function stOf(x) {
-    return String((x && x.status) || '');
-  }
-  function chOf(x) {
-    return String((x && (x.channelKey ?? x.channel_key)) || '');
-  }
-  const pe = rows.filter(function (x) { return stOf(x) === 'pending'; }).length;
-  const ap = rows.filter(function (x) { return stOf(x) === 'approved'; }).length;
-  const rj = rows.filter(function (x) { return stOf(x) === 'rejected'; }).length;
-  let us = [];
+
+  let adminUnique = 0;
   try {
-    us = (await db.select().from(users).all()) || [];
+    const ads = (await db.select().from(channelAdmins).all()) || [];
+    const set = new Set();
+    for (const a of ads) set.add(Number(a.userId ?? a.user_id));
+    adminUnique = set.size;
   } catch (_e) {}
-  let ads = [];
-  try {
-    ads = (await db.select().from(channelAdmins).all()) || [];
-  } catch (_e) {}
-  const adminIds = new Set(
-    ads.map(function (a) {
-      return a.userId || a.user_id;
-    })
-  );
+
   let shToday = 0;
   try {
     const now = tehranNow();
@@ -1282,34 +1344,28 @@ export async function getStatsDashboardText() {
       return sd === String(now.date) || sd === String(pdate) || sd === 'perm' || sd === 'permanent';
     }).length;
   } catch (_e) {}
+
   let by = '';
-  for (const c of Object.values(DEFAULT_CHANNELS)) {
-    const cm = rows.filter(function (x) {
-      return chOf(x) === c.key;
-    });
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    const b = byCh[c.key] || { total: 0, pe: 0, ap: 0, rj: 0 };
     by +=
       '• ' +
       c.title +
       ': ' +
-      cm.length +
+      b.total +
       ' (🟡' +
-      cm.filter(function (x) {
-        return stOf(x) === 'pending';
-      }).length +
+      b.pe +
       ' 🟢' +
-      cm.filter(function (x) {
-        return stOf(x) === 'approved';
-      }).length +
+      b.ap +
       ' 🔴' +
-      cm.filter(function (x) {
-        return stOf(x) === 'rejected';
-      }).length +
+      b.rj +
       ')\n';
   }
+
   let text =
     '📊 داشبورد آماری\n\n' +
     '📨 کل پیام‌ها: ' +
-    rows.length +
+    total +
     '\n' +
     '🟡 در انتظار: ' +
     pe +
@@ -1321,10 +1377,10 @@ export async function getStatsDashboardText() {
     rj +
     '\n\n' +
     '👥 کاربران: ' +
-    us.length +
+    userCount +
     '\n' +
     '👮 ادمین‌ها (یکتا): ' +
-    adminIds.size +
+    adminUnique +
     '\n' +
     '⏰ شیفت فعال امروز: ' +
     shToday +

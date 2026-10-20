@@ -244,12 +244,16 @@ if (data.startsWith('ban_user:')) {
     }
 
     // —— حذف پیام از کانال (نه از دیتابیس) ——
+    // callback: smsg_del:<internalId>  یا  smsg_del:<internalId>:<channelKey>:<channelMsgId>
     if (data.startsWith('smsg_del:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
-      const mid = Number(data.split(':')[1]);
+      const parts = data.split(':');
+      const mid = Number(parts[1]);
+      let ckFromCb = parts[2] || null;
+      let channelMsgIdFromCb = parts[3] != null ? Number(parts[3]) : null;
       try {
         const rows = await db.select().from(messages).where(eq(messages.id, mid)).all();
         if (!rows || !rows.length) {
@@ -257,17 +261,38 @@ if (data.startsWith('ban_user:')) {
           return;
         }
         const row = rows[0];
-        const ref = await findChannelMessageByInternalId(mid);
-        let chatIdCh = ref && ref.chatId != null ? Number(ref.chatId) : null;
-        let channelMsgId = ref && ref.channelMsgId != null ? Number(ref.channelMsgId) : null;
-        const ck = (ref && ref.channelKey) || row.channelKey || row.channel_key || null;
-        if ((!chatIdCh || !channelMsgId) && ck) {
-          if (CHANNEL_IDS && CHANNEL_IDS[ck] != null) chatIdCh = Number(CHANNEL_IDS[ck]);
+        let chatIdCh = null;
+        let channelMsgId = channelMsgIdFromCb;
+        let ck = ckFromCb || row.channelKey || row.channel_key || null;
+
+        if (channelMsgId && ck && CHANNEL_IDS && CHANNEL_IDS[ck] != null) {
+          chatIdCh = Number(CHANNEL_IDS[ck]);
         }
+
+        if (!chatIdCh || !channelMsgId) {
+          try {
+            const ref = await findChannelMessageByInternalId(mid);
+            if (ref) {
+              if (ref.chatId != null) chatIdCh = Number(ref.chatId);
+              if (ref.channelMsgId != null) channelMsgId = Number(ref.channelMsgId);
+              if (ref.channelKey) ck = ref.channelKey;
+            }
+          } catch (_e) {}
+        }
+
+        if ((!chatIdCh || !channelMsgId) && ck && CHANNEL_IDS && CHANNEL_IDS[ck] != null) {
+          chatIdCh = Number(CHANNEL_IDS[ck]);
+        }
+
+        // آخرین تلاش: اگر فقط channelMsgId از callback داریم
+        if (!chatIdCh && ck && CHANNEL_IDS && CHANNEL_IDS[ck] != null) {
+          chatIdCh = Number(CHANNEL_IDS[ck]);
+        }
+
         if (!chatIdCh || !channelMsgId) {
           await api.answerCallbackQuery({
             callback_query_id: cq.id,
-            text: 'پیام کانال پیدا نشد (هنوز منتشر نشده یا نگاشت موجود نیست)',
+            text: 'پیام کانال پیدا نشد. لینک عمومی کانال را در حذف پیام کانال بفرستید.',
             show_alert: true,
           });
           return;
@@ -1531,14 +1556,22 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
         return;
       }
       const channelKey = data.split(':')[1];
-      await setState(userId, 'add_admin_id', { channelKey });
+      if (!channelKey) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
+        return;
+      }
+      await setState(userId, 'add_admin_id', { channelKey: String(channelKey) });
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text:
           'آیدی عددی یا @username برای افزودن به «' +
-          (DEFAULT_CHANNELS[channelKey]?.title || '') +
-          '»:',
+          ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
+          '»\n\nچند نفر را با خط جدید می‌توانید بفرستید.',
+        reply_markup: sanitizeMarkup({
+          keyboard: [[{ text: '◀️ بازگشت' }]],
+          resize_keyboard: true,
+        }),
       });
       return;
     }

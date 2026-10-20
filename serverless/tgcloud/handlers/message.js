@@ -116,6 +116,7 @@ import {
   getRole,
   adminChannels,
   addChannelAdmin,
+  findChannelMessageByInternalId,
   shiftPickChannels,
   normalizeChannelKey,
   isUserChannelAdmin,
@@ -650,41 +651,38 @@ export default async function (message) {
             const mapVal = await settingGet('chmsg:' + channelKey + ':' + msgId, '');
             if (mapVal) internalId = Number(String(mapVal).split('|')[0]) || Number(mapVal);
           } catch (_e) {}
-          if (!internalId) {
-            results.push('❌ این پیام در سیستم ثبت نشده یا توسط ربات منتشر نشده: #' + msgId);
-            continue;
-          }
-          let row = null;
-          try {
-            const rows =
-              (await db
-                .select()
-                .from(messages)
-                .where(eq(messages.id, internalId))
-                .all()) || [];
-            row = rows[0] || null;
-          } catch (_e) {}
-          if (!row) {
-            results.push('❌ پیام داخلی #' + internalId + ' پیدا نشد');
-            continue;
-          }
-          if (String(row.status) !== 'approved') {
-            results.push('❌ #' + internalId + ' تأییدشده نیست');
-            continue;
-          }
-          if (Number(row.reviewedBy) !== Number(userId)) {
-            results.push('❌ #' + internalId + ' را شما تأیید نکرده‌اید (فقط تأییدکننده می‌تواند حذف کند)');
-            continue;
+          if (internalId) {
+            let row = null;
+            try {
+              const rows =
+                (await db
+                  .select()
+                  .from(messages)
+                  .where(eq(messages.id, internalId))
+                  .all()) || [];
+              row = rows[0] || null;
+            } catch (_e) {}
+            if (row) {
+              if (String(row.status) !== 'approved') {
+                results.push('❌ #' + internalId + ' تأییدشده نیست');
+                continue;
+              }
+              if (Number(row.reviewedBy) !== Number(userId)) {
+                results.push(
+                  '❌ #' + internalId + ' را شما تأیید نکرده‌اید (فقط تأییدکننده می‌تواند حذف کند)'
+                );
+                continue;
+              }
+            }
           }
           try {
             await api.deleteMessage({ chat_id: chatIdCh, message_id: msgId });
             results.push(
-              '✅ حذف شد · «' +
+              '✅ از کانال حذف شد · «' +
                 ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
-                '» · داخلی #' +
-                internalId +
-                ' · کانال #' +
-                msgId
+                '» · #' +
+                msgId +
+                (internalId ? ' (داخلی #' + internalId + ')' : '')
             );
           } catch (e) {
             const em = (e && (e.description || e.message)) || String(e);
@@ -2141,24 +2139,56 @@ try {
     }
 
     if (owner && state?.kind === 'add_admin_id' && text) {
-      const chKey = state.channelKey;
-      await clearState(userId);
+      const chKey = normalizeChannelKey(state.channelKey) || state.channelKey;
+      if (!chKey) {
+        await clearState(userId);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'کانال مشخص نیست. دوباره از لیست ادمین‌ها «افزودن ادمین» را بزنید.',
+          reply_markup: ownerKeyboard(),
+        });
+        return;
+      }
       const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
       let ok = 0, fail = 0;
+      const details = [];
       for (const line of lines) {
         let id = null;
         try { id = await resolveUserId(line); } catch (_) {}
-        if (!id && /^\d+$/.test(line.replace(/\s/g,''))) id = Number(line.replace(/\D/g,''));
-        if (!id) { fail++; continue; }
+        if (!id) {
+          const digits = String(line).replace(/\D/g, '');
+          if (/^\d{5,}$/.test(digits)) id = Number(digits);
+        }
+        if (!id) {
+          fail++;
+          details.push('❌ ' + line.slice(0, 40) + ' — آیدی نامعتبر');
+          continue;
+        }
         try {
-          await settingSet('admin_removed:' + chKey + ':' + Number(id), '0');
-          await addChannelAdmin(id, chKey);
-          ok++;
-        } catch (_) { fail++; }
+          const res = await addChannelAdmin(id, chKey);
+          if (res && res.ok) {
+            ok++;
+            details.push('✅ ' + id + (res.reason === 'already' ? ' (از قبل بود)' : ''));
+          } else {
+            fail++;
+            details.push('❌ ' + id + ' — ' + ((res && res.reason) || 'خطا'));
+          }
+        } catch (e) {
+          fail++;
+          details.push('❌ ' + id + ' — ' + String((e && e.message) || e).slice(0, 60));
+        }
       }
+      await clearState(userId);
       await api.sendMessage({
         chat_id: chatId,
-        text: 'نتیجه افزودن ادمین\n✅ ' + ok + ' | ❌ ' + fail,
+        text:
+          'نتیجه افزودن ادمین «' +
+          ((DEFAULT_CHANNELS[chKey] && DEFAULT_CHANNELS[chKey].title) || chKey) +
+          '»\n✅ ' +
+          ok +
+          ' | ❌ ' +
+          fail +
+          (details.length ? '\n\n' + details.slice(0, 15).join('\n') : ''),
         reply_markup: ownerKeyboard(),
       });
       return;
@@ -2196,26 +2226,50 @@ try {
     }
 
     if (role === 'subleader' && state?.kind === 'sl_add_admin' && text) {
-      const chKey = state.channelKey;
-      await clearState(userId);
+      const chKey = normalizeChannelKey(state.channelKey) || state.channelKey;
       let id = null;
-      if (/^\d+$/.test(text.replace(/\s/g, ''))) id = Number(text.replace(/\D/g, ''));
-      else {
-        try { id = await resolveUserId(text); } catch (_e) {}
-      }
+      try { id = await resolveUserId(text); } catch (_e) {}
       if (!id) {
-        await api.sendMessage({ chat_id: chatId, text: 'آیدی نامعتبر', reply_markup: await roleKb(userId) });
+        const digits = String(text).replace(/\D/g, '');
+        if (/^\d{5,}$/.test(digits)) id = Number(digits);
+      }
+      if (!id || !chKey) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'آیدی نامعتبر یا کانال مشخص نیست.',
+          reply_markup: await roleKb(userId),
+        });
         return;
       }
       try {
-        await settingSet('admin_removed:' + chKey + ':' + Number(id), '0');
-      } catch (_e) {}
-      await addChannelAdmin(id, chKey);
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '✅ ادمین ' + id + ' به «' + (DEFAULT_CHANNELS[chKey]?.title || chKey) + '» اضافه شد.',
-        reply_markup: await roleKb(userId),
-      });
+        const res = await addChannelAdmin(id, chKey);
+        await clearState(userId);
+        if (res && res.ok) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text:
+              '✅ ادمین ' +
+              id +
+              ' به «' +
+              ((DEFAULT_CHANNELS[chKey] && DEFAULT_CHANNELS[chKey].title) || chKey) +
+              '» ' +
+              (res.reason === 'already' ? 'از قبل بود.' : 'اضافه شد.'),
+            reply_markup: await roleKb(userId),
+          });
+        } else {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '❌ افزودن ناموفق: ' + ((res && res.reason) || 'خطا'),
+            reply_markup: await roleKb(userId),
+          });
+        }
+      } catch (e) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '❌ خطا: ' + String((e && e.message) || e).slice(0, 120),
+          reply_markup: await roleKb(userId),
+        });
+      }
       return;
     }
 
@@ -2987,12 +3041,17 @@ try {
     if (owner && state?.kind === 'search_msg' && text) {
       let id = null;
       let linkHint = '';
+      let linkChannelKey = null;
+      let linkChannelMsgId = null;
       const raw = String(text || '').trim();
-      // لینک عمومی: t.me/username/123   یا خصوصی: t.me/c/3877061735/123
-      const pubLink = raw.match(/(?:https?:\/\/)?t\.me\/([A-Za-z0-9_]+)\/(\d+)/i);
+      // اول خصوصی: t.me/c/ID/MSG — تا با public اشتباه نشود
       const privLink = raw.match(/(?:https?:\/\/)?t\.me\/c\/(\d+)\/(\d+)/i);
-      const isLink = !!(pubLink || privLink);
-      if (isLink) {
+      const pubLink = !privLink
+        ? raw.match(/(?:https?:\/\/)?t\.me\/([A-Za-z0-9_]+)\/(\d+)/i)
+        : null;
+      const looksLikeLink = /t\.me\//i.test(raw) || /^https?:\/\//i.test(raw);
+      const isLink = !!(pubLink || privLink || looksLikeLink);
+      if (pubLink || privLink) {
         let channelKey = null;
         let channelMsgId = null;
         if (pubLink && String(pubLink[1]).toLowerCase() !== 'c') {
@@ -3004,7 +3063,6 @@ try {
               break;
             }
           }
-          // fallback نام‌های رایج
           if (!channelKey) {
             const nameMap = {
               callmearail: 'sadambazan',
@@ -3025,6 +3083,8 @@ try {
           }
         }
         if (channelKey && channelMsgId) {
+          linkChannelKey = channelKey;
+          linkChannelMsgId = channelMsgId;
           try {
             const mapped = await settingGet('chmsg:' + channelKey + ':' + channelMsgId, '');
             if (mapped) {
@@ -3039,22 +3099,17 @@ try {
               '» / #' +
               channelMsgId +
               ') ولی به پیام داخلی map نشده.\n' +
-              'آیدی داخلی ربات را بفرستید (عدد alone)، نه شمارهٔ پیام کانال.';
+              'آیدی داخلی ربات را بفرستید (فقط عدد)، نه شمارهٔ پیام کانال.';
           }
         } else {
           linkHint =
             'لینک کانال شناخته نشد.\nاز لینک عمومی یکی از سه کانال استفاده کنید یا آیدی داخلی پیام را بفرستید.';
         }
-        // مهم: اگر ورودی لینک بود، هرگز عدد انتهای لینک را به‌عنوان آیدی داخلی نگیر
-      } else {
-        // فقط عدد خالص = آیدی داخلی ربات
-        if (/^\d+$/.test(raw)) {
-          id = Number(raw);
-        } else {
-          const onlyNum = raw.replace(/\D/g, '');
-          // فقط اگر کل متن عملاً همان عدد باشد (نه لینک ناقص)
-          if (onlyNum && onlyNum === raw.replace(/\s/g, '')) id = Number(onlyNum);
-        }
+        // لینک بود → هرگز عدد انتهای لینک = آیدی داخلی
+      } else if (looksLikeLink) {
+        linkHint = 'فرمت لینک نامعتبر است.\nمثال: https://t.me/callMeAraIl/108010';
+      } else if (/^\d+$/.test(raw)) {
+        id = Number(raw);
       }
       if (!id) {
         await api.sendMessage({
@@ -3092,6 +3147,17 @@ try {
           reviewerLabel = String(row.reviewedBy);
         }
       }
+      let delCk = linkChannelKey || row.channelKey || row.channel_key || null;
+      let delMid = linkChannelMsgId || null;
+      if (!delMid) {
+        try {
+          const ref = await findChannelMessageByInternalId(row.id);
+          if (ref) {
+            if (ref.channelKey) delCk = ref.channelKey;
+            if (ref.channelMsgId) delMid = ref.channelMsgId;
+          }
+        } catch (_e) {}
+      }
       await api.sendMessage({
         chat_id: chatId,
         text:
@@ -3107,13 +3173,14 @@ try {
           (uu ? ' (' + displayName(uu, row.userId) + ')' : '') +
           (reviewerLabel ? '\nبررسی‌کننده (کسی که دکمه را زد): ' + reviewerLabel : '') +
           (row.rejectReason ? '\nدلیل رد: ' + row.rejectReason : '') +
+          (delMid ? '\n📌 پیام کانال: #' + delMid : '') +
           '\n🕐 ارسال: ' +
           formatTsJalali(row.submittedAt) +
           (row.reviewedAt ? '\n🕐 بررسی: ' + formatTsJalali(row.reviewedAt) : '') +
           '\n\n' +
           row.content +
           '\n\n🔎 آیدی یا لینک بعدی را بفرستید (یا ◀️ بازگشت):',
-        reply_markup: searchMsgActionsInline(row.id, row.status),
+        reply_markup: searchMsgActionsInline(row.id, row.status, delCk, delMid),
       });
       return;
     }
@@ -3644,30 +3711,7 @@ try {
     }
 
 
-    if (owner && state?.kind === 'add_admin_id' && text) {
-      const chKey = state.channelKey;
-      await clearState(userId);
-      const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      let ok = 0, fail = 0;
-      for (const line of lines) {
-        let id = null;
-        if (/^\d+$/.test(line.replace(/\s/g, ''))) id = Number(line.replace(/\D/g, ''));
-        else id = await resolveUserId(line);
-        if (!id) { fail++; continue; }
-        try {
-          await settingSet('admin_removed:' + chKey + ':' + Number(id), '0');
-          await addChannelAdmin(id, chKey);
-          ok++;
-        } catch (_) { fail++; }
-      }
-      await api.sendMessage({
-        chat_id: chatId,
-        text: 'نتیجه افزودن ادمین\n✅ ' + ok + ' | ❌ ' + fail,
-        reply_markup: ownerKeyboard(),
-      });
-      return;
-    }
-
+    
     
     // ========== DB EXPORT — فقط 6666610646 ==========
     if (text === '📦 ارسال دیتا بیس') {

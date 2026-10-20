@@ -438,7 +438,7 @@ export function ownerReviewInline(id) {
 }
 
 /** نتیجه جستجوی مالک: pending = تأیید/رد | rejected = فقط تأیید و انتشار */
-export function searchMsgActionsInline(id, status) {
+export function searchMsgActionsInline(id, status, channelKey, channelMsgId) {
   const st = String(status || '');
   const rows = [];
   if (st === 'pending') {
@@ -455,7 +455,11 @@ export function searchMsgActionsInline(id, status) {
       { text: '❌ رد', callback_data: 'reject_direct:' + id, style: 'danger' },
     ]);
   }
-  rows.push([{ text: '🗑 حذف پیام', callback_data: 'smsg_del:' + id, style: 'danger' }]);
+  let delData = 'smsg_del:' + id;
+  if (channelKey && channelMsgId) {
+    delData = 'smsg_del:' + id + ':' + channelKey + ':' + channelMsgId;
+  }
+  rows.push([{ text: '🗑 حذف پیام', callback_data: delData, style: 'danger' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
@@ -960,7 +964,7 @@ export function userSearchActionsInline(targetId) {
 }
 
 /** دکمه‌های زیر نتیجه جستجوی پیام */
-export function msgSearchActionsInline(msgId, status) {
+export function msgSearchActionsInline(msgId, status, channelKey, channelMsgId) {
   const st = String(status || '');
   const rows = [];
   if (st === 'pending') {
@@ -977,7 +981,11 @@ export function msgSearchActionsInline(msgId, status) {
       { text: '❌ رد', callback_data: 'smsg_no:' + msgId, style: 'danger' },
     ]);
   }
-  rows.push([{ text: '🗑 حذف پیام', callback_data: 'smsg_del:' + msgId, style: 'danger' }]);
+  let delData = 'smsg_del:' + msgId;
+  if (channelKey && channelMsgId) {
+    delData = 'smsg_del:' + msgId + ':' + channelKey + ':' + channelMsgId;
+  }
+  rows.push([{ text: '🗑 حذف پیام', callback_data: delData, style: 'danger' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
