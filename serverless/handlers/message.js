@@ -67,7 +67,8 @@ import {
 // sanitize imported below
 import { validateAndFix, normalizeBody, exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm, sortShiftsByPeriod, periodOrd } from 'lib/time';
+import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm, sortShiftsByPeriod, periodOrd, setWorkHoursConfig, getWorkHoursConfig } from 'lib/time';
+// work hours: setWorkHoursConfig/getWorkHoursConfig exported from same module
 // normHm via time
 import { resolveUserId, channelMessageLink, channelPublicBase } from 'lib/resolve';
 import { setBlocked } from 'lib/users';
@@ -130,6 +131,8 @@ import {
   checkInactiveShiftAndCancel,
   restoreMistakenlyCancelledShifts,
   getStatsDashboardText,
+  loadWorkHoursFromSettings,
+  saveWorkHours,
   dedupeActiveShifts,
   cancelAllPermanentShifts,
   cancelInvalidShifts,
@@ -346,6 +349,7 @@ export default async function (message) {
     }
 
     await ensureChannelsSeeded();
+    try { await loadWorkHoursFromSettings(); } catch (_e) {}
     try {
       await upsertUser(message.from);
     } catch (e) {
@@ -834,7 +838,132 @@ export default async function (message) {
     }
 
 
-    if (text === '📝 ارسال پیام') {
+    if (text === '🗑 حذف پیام‌های خودم') {
+      await setState(userId, 'user_del_own');
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '🗑 حذف پیام منتشرشدهٔ خودتان\n\n' +
+          'آیدی پیام (#123) یا لینک عمومی کانال را بفرستید.\n' +
+          'درخواست برای مالک ارسال می‌شود و پس از تأیید، از کانال حذف می‌گردد.\n' +
+          'حداکثر ۵ درخواست موفق.',
+        reply_markup: sanitizeMarkup(backKeyboard()),
+      });
+      return;
+    }
+
+    if (state?.kind === 'user_del_own' && text && !owner) {
+      try {
+        let mid = null;
+        let channelKey = null;
+        let channelMsgId = null;
+        const num = String(text).replace(/^#/, '').trim();
+        if (/^\d+$/.test(num)) {
+          mid = Number(num);
+        } else if (text.includes('t.me/')) {
+          const pub = text.match(/t\.me\/([A-Za-z0-9_]+)\/(\d+)/i);
+          const priv = text.match(/t\.me\/c\/(\d+)\/(\d+)/i);
+          if (pub) {
+            const uname = String(pub[1]).toLowerCase();
+            for (const [k, u] of Object.entries(CHANNEL_USERNAMES || {})) {
+              if (String(u).toLowerCase() === uname) channelKey = k;
+            }
+            channelMsgId = Number(pub[2]);
+          } else if (priv) {
+            channelMsgId = Number(priv[2]);
+            const bare = String(priv[1]);
+            for (const [k, cid] of Object.entries(CHANNEL_IDS || {})) {
+              if (String(cid).replace(/^-100/, '') === bare || String(cid) === '-100' + bare) channelKey = k;
+            }
+          }
+          if (channelKey && channelMsgId) {
+            try {
+              const mapVal = await settingGet('chmsg:' + channelKey + ':' + channelMsgId, '');
+              if (mapVal) mid = Number(String(mapVal).split('|')[0]) || Number(mapVal);
+            } catch (_e) {}
+          }
+        }
+        if (!mid) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'پیام پیدا نشد. آیدی عددی یا لینک معتبر بفرستید.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        const rows = (await db.select().from(messages).where(eq(messages.id, mid)).all()) || [];
+        const row = rows[0];
+        if (!row || Number(row.userId) !== Number(userId)) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'این پیام متعلق به شما نیست یا یافت نشد.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        if (String(row.status) !== 'approved') {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'فقط پیام‌های تأیید و منتشرشده را می‌توان درخواست حذف کرد.\nبرای پیام در انتظار از «وضعیت پیام من» لغو کنید.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        // سقف ۵ درخواست موفق
+        let delCount = 0;
+        try {
+          delCount = Number(await settingGet('user_del_ok:' + userId, '0')) || 0;
+        } catch (_e) {}
+        if (delCount >= 5) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'سقف ۵ حذف موفق پر شده است.',
+            reply_markup: await roleKb(userId),
+          });
+          await clearState(userId);
+          return;
+        }
+        await clearState(userId);
+        const preview = String(row.content || '').slice(0, 200);
+        const owners = OWNER_IDS || [];
+        for (const oid of owners) {
+          try {
+            await api.sendMessage({
+              chat_id: oid,
+              text:
+                '🗑 درخواست حذف پیام کاربر\n' +
+                'کاربر: ' +
+                userId +
+                '\nپیام #' +
+                mid +
+                ' | ' +
+                (row.channelKey || '') +
+                '\n\n' +
+                preview,
+              reply_markup: sanitizeMarkup({
+                inline_keyboard: [
+                  [
+                    { text: '✅ تأیید حذف از کانال', callback_data: 'udel_ok:' + mid + ':' + userId, style: 'success' },
+                    { text: '❌ رد', callback_data: 'udel_no:' + mid + ':' + userId, style: 'danger' },
+                  ],
+                ],
+              }),
+            });
+          } catch (_e) {}
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '✅ درخواست حذف #' + mid + ' برای مالک ارسال شد.\nنتیجه به شما اعلام می‌شود.',
+          reply_markup: await roleKb(userId),
+        });
+      } catch (e) {
+        console.error('user_del_own', e);
+        await api.sendMessage({ chat_id: chatId, text: 'خطا', reply_markup: await roleKb(userId) });
+      }
+      return;
+    }
+
+if (text === '📝 ارسال پیام') {
       if (!(await isBotOn()) && !owner) {
         await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
         return;
@@ -847,14 +976,7 @@ export default async function (message) {
         });
         return;
       }
-      if (!owner && (await isQueueBusyMode())) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: QUEUE_BUSY_TEXT,
-          reply_markup: await roleKb(userId),
-        });
-        return;
-      }
+      // صف شلوغ بعد از تشخیص کانال پیام چک می‌شود (نه سراسری)
       if (!owner && !isWorkHours()) {
         // اگر مالک شیفت خارج از ساعت کاری داده و الان فعال است → اجازه بده
         const anyShift = await hasAnyActiveShiftNow();
@@ -871,11 +993,12 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text:
-          '📝 پیام خودت را بفرست.\n\n' +
-          'پیامتون با «صدام بزن / این کاربر / تو زندگی بعدی» شروع بشه.\n' +
-          'سیاسی و بی‌احترامی نباشه.\n\n' +
-          'می‌توانید چند پیام پشت‌سرهم بفرستید.\n' +
-          'حداکثر ۶ پیام در ۱۰ دقیقه.',
+          'پیام خودتو بفرست.\n\n' +
+          'پیامتون با «صدام بزن / این کاربر / تو زندگی بعدی» شروع بشه.\n\n' +
+          'سیاسی و بی‌احترامی و حاوی کلمات ناسزا نباشه.\n\n' +
+          'می‌تونید چند پیام پشت‌سرهم بفرستید.\n' +
+          'حداکثر ۶ پیام در ۱۰ دقیقه.\n\n' +
+          'با تشکر مدیریت مجموعه آرال',
         reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
@@ -897,27 +1020,44 @@ export default async function (message) {
         });
         return;
       }
-      const map = { pending: '🟡 در انتظار', approved: '🟢 تأیید', rejected: '🔴 رد شده' };
+      const map = { pending: '🟡 در انتظار', approved: '🟢 تأیید', rejected: '🔴 رد شده', publishing: '⏳ در حال انتشار' };
       let body = '📊 پیام‌های شما (' + list.length + ' مورد اخیر)\n\n';
+      const cancelRows = [];
       for (const row of list) {
+        const st = String(row.status || '');
         const short = (row.content || '').replace(/\n/g, ' ').slice(0, 70);
         const when = formatTsJalali(row.submittedAt);
         body +=
           '#' +
           row.id +
           ' | ' +
-          (map[row.status] || row.status) +
+          (map[st] || st) +
           '\n' +
           short +
           (short.length >= 70 ? '…' : '') +
           '\n🕐 ' +
           when +
           '\n────────────\n';
+        if (st === 'pending') {
+          cancelRows.push([
+            {
+              text: 'لغو #' + row.id,
+              callback_data: 'ucancel:' + row.id,
+              style: 'danger',
+            },
+          ]);
+        }
       }
+      if (cancelRows.length) {
+        body += '\nبرای لغو پیام در انتظار، روی شماره آن بزنید:';
+      }
+      const markup = cancelRows.length
+        ? sanitizeMarkup({ inline_keyboard: cancelRows.concat([[{ text: 'بستن', callback_data: 'ucancel_close', style: 'primary' }]]) })
+        : await roleKb(userId);
       await api.sendMessage({
         chat_id: chatId,
         text: body,
-        reply_markup: await roleKb(userId),
+        reply_markup: markup,
       });
       return;
     }
@@ -959,25 +1099,12 @@ export default async function (message) {
     if (state?.kind === 'user_send' && text) {
       try {
         // درِ ساعت کاری اینجا برداشته شد؛ بعد از تشخیص کانال، شیفت فعال چک می‌شود
-        const [_fri, _botOn, _qBusy] = await Promise.all([
-          isFridayMode(),
-          isBotOn(),
-          isQueueBusyMode(),
-        ]);
+        const [_fri, _botOn] = await Promise.all([isFridayMode(), isBotOn()]);
         if (!owner && _fri) {
           await clearState(userId);
           await api.sendMessage({
             chat_id: chatId,
             text: FRIDAY_MODE_TEXT,
-            reply_markup: await roleKb(userId),
-          });
-          return;
-        }
-        if (!owner && _qBusy) {
-          await clearState(userId);
-          await api.sendMessage({
-            chat_id: chatId,
-            text: QUEUE_BUSY_TEXT,
             reply_markup: await roleKb(userId),
           });
           return;
@@ -1000,16 +1127,35 @@ export default async function (message) {
           });
           return;
         }
-        const ch = await getChannel(v.channelKey);
-        if (!ch || Number(ch.enabled) === 0) {
+        const chTitle =
+          (DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey;
+        // صف شلوغ فقط برای همان کانال
+        if (!owner && (await isQueueBusyMode(v.channelKey))) {
           await api.sendMessage({
             chat_id: chatId,
-            text: '🔴 این کانال غیرفعال است.',
+            text:
+              '⏳ صف «' +
+              chTitle +
+              '» شلوغ است.\n\n' +
+              'مدیریت موقتاً دریافت پیام جدید این کانال را بسته.\n' +
+              'پیام شما ثبت نشد — ربات سالم است.\n' +
+              'کمی بعد دوباره تلاش کنید.',
             reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
         }
-        // —— کانال خاموش / حالت تب
+        const ch = await getChannel(v.channelKey);
+        if (!ch || Number(ch.enabled) === 0) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text:
+              '🔴 کانال «' +
+              chTitle +
+              '» غیرفعال است.\nپیام ثبت نشد (عمدی است، نه خرابی ربات).',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
         try {
           const [_chOpen, _adMode] = await Promise.all([
             isChannelOpen(v.channelKey),
@@ -1018,7 +1164,10 @@ export default async function (message) {
           if (!_chOpen) {
             await api.sendMessage({
               chat_id: chatId,
-              text: '🔴 دریافت پیام برای «' + ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) + '» فعلاً غیرفعال است.\nبعداً دوباره تلاش کنید.',
+              text:
+                '🔴 دریافت پیام برای «' +
+                chTitle +
+                '» فعلاً خاموش است.\n\nپیام شما ثبت نشد.\nمالک این کانال را موقتاً بسته — بعداً تلاش کنید.',
               reply_markup: sanitizeMarkup(backKeyboard()),
             });
             return;
@@ -1028,9 +1177,10 @@ export default async function (message) {
               chat_id: chatId,
               text:
                 '📢 «' +
-                ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
-                '» الان درگیر تبلیغات یا تبادل است.\n' +
-                'پیام‌های جدید موقتاً پذیرفته نمی‌شوند.\nکمی بعد دوباره سر بزن 🌸',
+                chTitle +
+                '» الان درگیر تبلیغات یا تبادل است.\n\n' +
+                'پیام شما ثبت نشد — ربات سالم است.\n' +
+                'کمی بعد دوباره بفرستید.',
               reply_markup: sanitizeMarkup(backKeyboard()),
             });
             return;
@@ -2651,10 +2801,10 @@ try {
             nm +
             '\n   🆔 ' +
             (uid != null ? String(uid) : 'نامشخص') +
-            '\n';
+            '\n\n';
         }
         listText +=
-          '\nدکمه‌ها فقط با آیدی عددی‌اند.\nروی آیدی بزنید برای جزئیات، روی «حذف» برای برداشتن از کانال.';
+          '────────────\nدکمه‌های زیر فقط آیدی عددی دارند.\nروی آیدی → جزئیات\nروی حذف → برداشتن از کانال';
 
         try {
           const built = subLeaderAdminsInline(admins, chKey);
@@ -4242,6 +4392,59 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
           text: 'خطا: ' + ((e && (e.message || e.description)) || e),
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
+      }
+      return;
+    }
+
+    if (owner && text === '⏰ ساعت کاری') {
+      try {
+        const wh = await loadWorkHoursFromSettings();
+        await setState(userId, 'set_work_hours');
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '⏰ ساعت کاری فعلی: ' +
+            wh.start +
+            ' تا ' +
+            wh.end +
+            '\n\n' +
+            'ساعت شروع و پایان را به این شکل بفرستید:\n' +
+            '12:00 00:00\n' +
+            'یا\n' +
+            '14:00-02:00\n\n' +
+            'شیفت ادمین‌ها بر اساس همین بازه نمایش داده می‌شود.',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('work hours btn', e);
+        await api.sendMessage({ chat_id: chatId, text: 'خطا', reply_markup: await roleKb(userId) });
+      }
+      return;
+    }
+
+    if (owner && state?.kind === 'set_work_hours' && text) {
+      try {
+        const m = String(text).trim().match(/(\d{1,2}:\d{2})\s*[-–\s]+\s*(\d{1,2}:\d{2})/);
+        if (!m) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'فرمت نامعتبر. مثال: 12:00 00:00',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        const a = m[1];
+        const b = m[2];
+        await saveWorkHours(a, b);
+        await clearState(userId);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '✅ ساعت کاری تنظیم شد: ' + a + ' تا ' + b + '\nلیست شیفت ادمین‌ها با این بازه هم‌خوان می‌شود.',
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+        });
+      } catch (e) {
+        console.error('set_work_hours', e);
+        await api.sendMessage({ chat_id: chatId, text: 'خطا در ذخیره', reply_markup: await roleKb(userId) });
       }
       return;
     }

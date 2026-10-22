@@ -182,15 +182,32 @@ export async function notifySubLeaderRemoved(userId) {
 }
 
 export async function channelStatsFor(channelKey) {
+  const ck = String(channelKey || '');
+  const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
   try {
-    const all = (await db.select().from(messages).where(eq(messages.channelKey, channelKey)).all()) || [];
-    const pe = all.filter((x) => x.status === 'pending').length;
-    const ap = all.filter((x) => x.status === 'approved').length;
-    const rj = all.filter((x) => x.status === 'rejected').length;
-    const title = (DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey;
-    return { title, total: all.length, pe, ap, rj };
+    // همه وضعیت‌ها با where روی channelKey
+    const all = (await db.select().from(messages).where(eq(messages.channelKey, ck)).all()) || [];
+    // اگر خالی بود، کلیدهای مشابه (نرمال‌نشده) را هم چک کن
+    let rows = all;
+    if (!rows.length) {
+      try {
+        const any = (await db.select().from(messages).limit(500).all()) || [];
+        rows = any.filter(function (x) {
+          const k = String((x.channelKey ?? x.channel_key) || '');
+          return k === ck || k.toLowerCase() === ck.toLowerCase();
+        });
+      } catch (_e) {}
+    }
+    let pe = 0, ap = 0, rj = 0;
+    for (const x of rows) {
+      const st = String(x.status || '');
+      if (st === 'pending' || st === 'publishing') pe++;
+      else if (st === 'approved') ap++;
+      else if (st === 'rejected') rj++;
+    }
+    return { title, total: rows.length, pe, ap, rj };
   } catch (e) {
     console.error('channelStatsFor', e);
-    return { title: channelKey, total: 0, pe: 0, ap: 0, rj: 0 };
+    return { title, total: 0, pe: 0, ap: 0, rj: 0 };
   }
 }

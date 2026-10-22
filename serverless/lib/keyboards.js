@@ -116,7 +116,7 @@ export function userKeyboard() {
   return sanitizeMarkup({
     keyboard: [
       [{ text: '📝 ارسال پیام' }],
-      [{ text: '📊 وضعیت پیام من' }],
+      [{ text: '📊 وضعیت پیام من' }, { text: '🗑 حذف پیام‌های خودم' }],
       [{ text: '💬 انتقادات، پیشنهادات، گزارش مشکل' }],
     ],
     resize_keyboard: true,
@@ -231,7 +231,7 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
   const rows = [
       [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '🔐 عضویت اجباری' }],
       [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
-      [{ text: '🧪 تست کانال‌ها' }],
+      [{ text: '⏰ ساعت کاری' }, { text: '🧪 تست کانال‌ها' }],
       [{ text: '📈 تحلیل داده' }],
   ];
   // فقط برای این کاربر

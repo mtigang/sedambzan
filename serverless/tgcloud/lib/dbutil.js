@@ -284,6 +284,28 @@ export async function pruneOldestMessageIfOverBudget() {
   }
 }
 
+export async function loadWorkHoursFromSettings() {
+  try {
+    const { setWorkHoursConfig } = await import('lib/time');
+    const s = (await settingGet('work_start_hm', '12:00')) || '12:00';
+    const e = (await settingGet('work_end_hm', '00:00')) || '00:00';
+    setWorkHoursConfig(s, e);
+    return { start: s, end: e };
+  } catch (e) {
+    console.error('loadWorkHoursFromSettings', e);
+    return { start: '12:00', end: '00:00' };
+  }
+}
+
+export async function saveWorkHours(startHm, endHm) {
+  await settingSet('work_start_hm', String(startHm));
+  await settingSet('work_end_hm', String(endHm));
+  try {
+    const { setWorkHoursConfig } = await import('lib/time');
+    setWorkHoursConfig(startHm, endHm);
+  } catch (_e) {}
+}
+
 export async function isBotOn() {
   return (await settingGet('bot_enabled', '1')) !== '0';
 }
@@ -319,9 +341,10 @@ export async function setFridayMode(on) {
 }
 
 export const FRIDAY_MODE_TEXT =
-  '🌙 امروز جمعه است — ربات عمداً خاموشِ ارسال است.\n\n' +
-  'پیام شما ثبت نشد (ربات خراب نیست).\n' +
-  'شنبه دوباره می‌توانید پیام بفرستید.';
+  '🌙 امروز جمعه است.\n\n' +
+  'ارسال پیام به کانال‌ها امروز متوقف شده (تنظیم مدیریت).\n' +
+  'پیام شما ثبت نشد — ربات خراب نیست.\n' +
+  'شنبه از ساعت کاری دوباره می‌توانید بفرستید.';
 
 /** صف شلوغ — کاربر پیام نمی‌فرستد؛ ادمین تأیید/رد می‌کند
  * بدون آرگومان: آیا حداقل یک کانال (یا فلگ سراسری قدیمی) شلوغ است؟
@@ -364,9 +387,10 @@ export async function isChannelQueueBusy(channelKey) {
 }
 
 export const QUEUE_BUSY_TEXT =
-  '⏳ صف پیام‌های این کانال شلوغ است.\n\n' +
+  '⏳ صف پیام این کانال شلوغ است.\n\n' +
+  'مدیریت موقتاً دریافت پیام جدید را برای این کانال بسته تا ادمین‌ها به صف برسند.\n' +
   'پیام شما ثبت نشد — ربات سالم است.\n' +
-  'کمی بعد دوباره ارسال کنید تا ادمین‌ها به صف برسند.';
+  'لطفاً کمی بعد دوباره تلاش کنید.';
 
 // ——— عضویت اجباری ———
 const FJ_ACTIVE_KEY = 'force_join_active';
