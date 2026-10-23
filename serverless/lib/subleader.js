@@ -1,7 +1,7 @@
 import { api, db } from 'sdk';
-import { eq } from 'sdk/db';
+import { eq, and, sql } from 'sdk/db';
 import { subLeaders, channelAdmins, users, messages, shifts } from 'schema';
-import { isOwner, getUser, displayName, listAdminsByChannel } from 'lib/dbutil';
+import { isOwner, getUser, displayName, listAdminsByChannel, normalizeChannelKey } from 'lib/dbutil';
 import { DEFAULT_CHANNELS } from 'lib/config';
 
 /** @returns {Promise<{userId:number,channelKey:string,status:string}|null>} */
@@ -182,30 +182,49 @@ export async function notifySubLeaderRemoved(userId) {
 }
 
 export async function channelStatsFor(channelKey) {
-  const ck = String(channelKey || '');
-  const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+  let ck = '';
   try {
-    // همه وضعیت‌ها با where روی channelKey
-    const all = (await db.select().from(messages).where(eq(messages.channelKey, ck)).all()) || [];
-    // اگر خالی بود، کلیدهای مشابه (نرمال‌نشده) را هم چک کن
-    let rows = all;
-    if (!rows.length) {
-      try {
-        const any = (await db.select().from(messages).limit(500).all()) || [];
-        rows = any.filter(function (x) {
-          const k = String((x.channelKey ?? x.channel_key) || '');
-          return k === ck || k.toLowerCase() === ck.toLowerCase();
-        });
-      } catch (_e) {}
+    ck = normalizeChannelKey(channelKey) || String(channelKey || '');
+  } catch (_e) {
+    ck = String(channelKey || '');
+  }
+  const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+  async function countWhere(extra) {
+    try {
+      const rows = (await db.select({ n: sql`count(*)` }).from(messages).where(extra).all()) || [];
+      const row = rows[0] || {};
+      return Number(row.n != null ? row.n : Object.values(row)[0] || 0) || 0;
+    } catch (e) {
+      console.error('channelStatsFor count', e);
+      return null;
     }
-    let pe = 0, ap = 0, rj = 0;
-    for (const x of rows) {
-      const st = String(x.status || '');
-      if (st === 'pending' || st === 'publishing') pe++;
-      else if (st === 'approved') ap++;
-      else if (st === 'rejected') rj++;
+  }
+  try {
+    const base = eq(messages.channelKey, ck);
+    let total = await countWhere(base);
+    let pe = await countWhere(and(base, eq(messages.status, 'pending')));
+    let ap = await countWhere(and(base, eq(messages.status, 'approved')));
+    let rj = await countWhere(and(base, eq(messages.status, 'rejected')));
+    // publishing را به در انتظار اضافه کن
+    const pub = await countWhere(and(base, eq(messages.status, 'publishing')));
+    if (pe != null && pub != null) pe += pub;
+    // اگر count شکست خورد، نمونهٔ محدود
+    if (total == null) {
+      const sample = (await db.select({ status: messages.status, channelKey: messages.channelKey }).from(messages).limit(5000).all()) || [];
+      const rows = sample.filter(function (x) {
+        const k = String((x.channelKey ?? x.channel_key) || '');
+        return k === ck || k.toLowerCase() === ck.toLowerCase();
+      });
+      total = rows.length;
+      pe = ap = rj = 0;
+      for (const x of rows) {
+        const st = String(x.status || '');
+        if (st === 'pending' || st === 'publishing') pe++;
+        else if (st === 'approved') ap++;
+        else if (st === 'rejected') rj++;
+      }
     }
-    return { title, total: rows.length, pe, ap, rj };
+    return { title, total: total || 0, pe: pe || 0, ap: ap || 0, rj: rj || 0 };
   } catch (e) {
     console.error('channelStatsFor', e);
     return { title, total: 0, pe: 0, ap: 0, rj: 0 };

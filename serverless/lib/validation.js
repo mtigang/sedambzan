@@ -201,6 +201,15 @@ export function validateAndFix(message) {
     return { ok: false, error: '🚫 ایموجی در پیام مجاز نیست.' };
   }
 
+  // کلمات ناسزا (لیست ثابت — بدون تغییر دیتابیس)
+  const BAD_WORDS = ['کیرم', 'گاییدم', 'جنده', 'کیر', 'کص', 'کس'];
+  const lowerCheck = text.replace(/ك/g, 'ک').replace(/ي/g, 'ی');
+  for (const w of BAD_WORDS) {
+    if (lowerCheck.includes(w)) {
+      return { ok: false, error: 'پیام شما شامل کلمات ناسزا می باشد' };
+    }
+  }
+
   // نقطه آخر: دقیقاً یک فاصله قبل از نقطه — فاصله‌های اضافه حذف
   text = text.replace(/\s*[.]\s*$/, '').replace(/\s+$/, '') + ' .';
 

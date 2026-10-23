@@ -925,35 +925,54 @@ export default async function (message) {
         }
         await clearState(userId);
         const preview = String(row.content || '').slice(0, 200);
+        const fbContent =
+          '🗑 درخواست حذف پیام\n' +
+          'DEL_REQ:' +
+          mid +
+          '\nکاربر: ' +
+          userId +
+          '\nپیام #' +
+          mid +
+          ' | ' +
+          (row.channelKey || '') +
+          '\n\n' +
+          preview;
+        // ثبت در جدول فیدبک تا در «پیام کاربران» همهٔ مالک‌ها ببینند
+        try {
+          await db.insert(feedback).values({ userId, content: fbContent, status: 'open' }).run();
+        } catch (eFb) {
+          console.error('user_del feedback insert', eFb);
+        }
+        const delKb = sanitizeMarkup({
+          inline_keyboard: [
+            [
+              { text: '✅ تأیید حذف از کانال', callback_data: 'udel_ok:' + mid + ':' + userId, style: 'success' },
+              { text: '❌ رد', callback_data: 'udel_no:' + mid + ':' + userId, style: 'danger' },
+            ],
+          ],
+        });
         const owners = OWNER_IDS || [];
+        let notified = 0;
         for (const oid of owners) {
           try {
             await api.sendMessage({
               chat_id: oid,
-              text:
-                '🗑 درخواست حذف پیام کاربر\n' +
-                'کاربر: ' +
-                userId +
-                '\nپیام #' +
-                mid +
-                ' | ' +
-                (row.channelKey || '') +
-                '\n\n' +
-                preview,
-              reply_markup: sanitizeMarkup({
-                inline_keyboard: [
-                  [
-                    { text: '✅ تأیید حذف از کانال', callback_data: 'udel_ok:' + mid + ':' + userId, style: 'success' },
-                    { text: '❌ رد', callback_data: 'udel_no:' + mid + ':' + userId, style: 'danger' },
-                  ],
-                ],
-              }),
+              text: fbContent,
+              reply_markup: delKb,
             });
-          } catch (_e) {}
+            notified++;
+          } catch (eOwn) {
+            console.error('user_del notify owner ' + oid, eOwn);
+          }
         }
         await api.sendMessage({
           chat_id: chatId,
-          text: '✅ درخواست حذف #' + mid + ' برای مالک ارسال شد.\nنتیجه به شما اعلام می‌شود.',
+          text:
+            '✅ درخواست حذف #' +
+            mid +
+            ' ثبت شد و برای مالک ارسال گردید' +
+            (notified ? ' (' + notified + ' مالک).' : '.') +
+            '\nنتیجه به شما اعلام می‌شود. از «📬 پیام کاربران» نیز قابل پیگیری است.',
           reply_markup: await roleKb(userId),
         });
       } catch (e) {
@@ -3007,10 +3026,36 @@ try {
             const uu = await getUser(row.userId);
             fname = displayName(uu, row.userId);
           } catch (_e) {}
+          const content = String(row.content || '');
+          const delM = content.match(/DEL_REQ:(\d+)/);
+          let kb = feedbackInline(row.id, row.userId);
+          if (delM) {
+            const midDel = delM[1];
+            kb = sanitizeMarkup({
+              inline_keyboard: [
+                [
+                  {
+                    text: '✅ تأیید حذف از کانال',
+                    callback_data: 'udel_ok:' + midDel + ':' + row.userId,
+                    style: 'success',
+                  },
+                  {
+                    text: '❌ رد درخواست',
+                    callback_data: 'udel_no:' + midDel + ':' + row.userId,
+                    style: 'danger',
+                  },
+                ],
+                [
+                  { text: 'مشاهده کاربر', callback_data: 'fb_user:' + row.userId },
+                  { text: 'بسته شد', callback_data: 'fb_close:' + row.id, style: 'danger' },
+                ],
+              ],
+            });
+          }
           await api.sendMessage({
             chat_id: chatId,
-            text: 'فیدبک #' + row.id + '\nاز: ' + fname + ' (' + row.userId + ')\n\n' + row.content,
-            reply_markup: feedbackInline(row.id, row.userId),
+            text: 'فیدبک #' + row.id + '\nاز: ' + fname + ' (' + row.userId + ')\n\n' + content.replace(/DEL_REQ:\d+\n?/, ''),
+            reply_markup: kb,
           });
         }
 
