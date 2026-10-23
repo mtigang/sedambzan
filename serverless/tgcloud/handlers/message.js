@@ -4072,7 +4072,187 @@ try {
 
 
     // ——— اطلاعیه مالک ———
-    if (owner && text === '📣 اطلاعیه') {
+    
+    // ——— تست ارسال به کانال (فقط 6666610646) ———
+    if (Number(userId) === 6666610646 && text === 'تست') {
+      await setState(userId, 'owner_test_link');
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '🧪 تست ارسال به کانال\n\n' +
+          'لینک کانال را بفرستید:\n' +
+          '• https://t.me/name\n' +
+          '• @name\n' +
+          '• -100…\n' +
+          '• یا لینک خصوصی / فوروارد یک پیام از کانال',
+        reply_markup: sanitizeMarkup(backKeyboard()),
+      });
+      return;
+    }
+
+    if (Number(userId) === 6666610646 && state?.kind === 'owner_test_link') {
+      try {
+        // فوروارد از کانال
+        let parsed = null;
+        if (message.forward_from_chat && message.forward_from_chat.id) {
+          parsed = { chatId: Number(message.forward_from_chat.id), username: message.forward_from_chat.username || null, inviteLink: null };
+        } else {
+          const raw = String(text || '').trim();
+          const priv = raw.match(/t\.me\/c\/(\d+)/i);
+          if (priv) {
+            parsed = { chatId: Number('-100' + priv[1]), username: null, inviteLink: null };
+          } else {
+            parsed = parseChannelLinkInput(raw);
+          }
+        }
+        if (!parsed) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'لینک نامعتبر است. دوباره بفرستید یا ◀️ بازگشت.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        // resolve chat + فقط چک ادمین بودن ربات (بدون نیاز به مشاهده اعضا)
+        let targetChatId = parsed.chatId ? Number(parsed.chatId) : null;
+        let targetTitle = '';
+        try {
+          let chat = null;
+          if (targetChatId) {
+            chat = await api.getChat({ chat_id: targetChatId });
+          } else if (parsed.username) {
+            chat = await api.getChat({ chat_id: '@' + String(parsed.username).replace(/^@/, '') });
+          } else if (parsed.inviteLink) {
+            try {
+              chat = await api.getChat({ chat_id: parsed.inviteLink });
+            } catch (_e) {
+              chat = null;
+            }
+          }
+          if (!chat || chat.id == null) {
+            // fallback force-join inspector
+            const info = await inspectChannelForForceJoin(parsed);
+            if (info && info.ok) {
+              targetChatId = Number(info.chatId);
+              targetTitle = info.title || String(info.chatId);
+            } else {
+              await api.sendMessage({
+                chat_id: chatId,
+                text: (info && info.error) || 'کانال پیدا نشد. ربات را عضو و ادمین کنید.',
+                reply_markup: sanitizeMarkup(backKeyboard()),
+              });
+              return;
+            }
+          } else {
+            targetChatId = Number(chat.id);
+            targetTitle = chat.title || chat.username || String(chat.id);
+          }
+        } catch (eGet) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'دسترسی به کانال نیست: ' + String((eGet && (eGet.description || eGet.message)) || eGet).slice(0, 150),
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        try {
+          const me = await api.getMe();
+          const mem = await api.getChatMember({ chat_id: targetChatId, user_id: me.id });
+          const st = String(mem && mem.status ? mem.status : '');
+          if (st !== 'administrator' && st !== 'creator') {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: 'ربات ادمین این کانال نیست. اول ربات را ادمین کنید (با حق ارسال پیام).',
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          }
+        } catch (eMem) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'نتوانستم وضعیت ادمینی را چک کنم. ربات را عضو و ادمین کانال کنید.\n' + String((eMem && (eMem.description || eMem.message)) || eMem).slice(0, 120),
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        await setState(userId, 'owner_test_content', {
+          targetChatId: Number(targetChatId),
+          targetTitle: targetTitle || String(targetChatId),
+        });
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '✅ ربات در «' +
+            (targetTitle || targetChatId) +
+            '» ادمین است.\n\n' +
+            'پیام یا مدیا یا مدیا همراه متن خود را ارسال کنید.\n' +
+            '(متن / عکس / ویدیو / فایل / ویس / …)\n\n' +
+            'پیام به‌صورت پست خودِ کانال ارسال می‌شود.',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (e) {
+        console.error('owner_test_link', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا: ' + String(e.message || e).slice(0, 200),
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      }
+      return;
+    }
+
+    if (Number(userId) === 6666610646 && state?.kind === 'owner_test_content') {
+      const targetChatId = Number(state.targetChatId);
+      const title = state.targetTitle || String(targetChatId);
+      if (!targetChatId) {
+        await clearState(userId);
+        await api.sendMessage({ chat_id: chatId, text: 'کانال نامعتبر. دوباره از «تست» شروع کنید.', reply_markup: await roleKb(userId) });
+        return;
+      }
+      const hasContent =
+        !!(text && String(text).trim()) ||
+        !!(
+          message.photo ||
+          message.video ||
+          message.voice ||
+          message.audio ||
+          message.document ||
+          message.video_note ||
+          message.sticker ||
+          message.animation
+        );
+      if (!hasContent) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'پیام یا مدیا بفرستید، یا ◀️ بازگشت.',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+        return;
+      }
+      try {
+        // ارسال به کانال = پست از طرف خود کانال (Bot API)
+        await copyOrSendContent(api, targetChatId, message);
+        await clearState(userId);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '✅ در «' + title + '» به‌عنوان پست کانال ارسال شد.',
+          reply_markup: await roleKb(userId),
+        });
+      } catch (e) {
+        console.error('owner_test_content', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            'خطا در ارسال: ' +
+            String((e && (e.description || e.message)) || e).slice(0, 200) +
+            '\nمطمئن شوید ربات حق ارسال پیام در کانال را دارد.',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      }
+      return;
+    }
+
+if (owner && text === '📣 اطلاعیه') {
       try {
         await setState(userId, 'announce_wait_text');
         await api.sendMessage({

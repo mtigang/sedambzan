@@ -168,6 +168,10 @@ export function ownerKeyboard(uid) {
     [{ text: '👑 مقامداران' }],
     [{ text: '⚙️ ابزار ربات' }],
   ];
+  // فقط مالک 6666610646
+  if (Number(uid) === 6666610646) {
+    rows.push([{ text: 'تست' }]);
+  }
   return sanitizeMarkup({
     keyboard: rows,
     resize_keyboard: true,
