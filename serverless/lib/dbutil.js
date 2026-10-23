@@ -1278,6 +1278,169 @@ export async function activeShiftAdmins(channelKey) {
  */
 
 /** داشبورد آماری سبک — بدون خواندن content پیام‌ها */
+
+/** تاریخ تهران YYYY-MM-DD از timestamp (دقیق با Intl) */
+export function tehranDateOfTs(ts) {
+  if (ts == null || ts === '') return null;
+  try {
+    let v = ts;
+    if (v instanceof Date) {
+      /* ok */
+    } else if (typeof v === 'string' && /^\d+$/.test(v)) {
+      v = Number(v);
+    }
+    if (typeof v === 'number') {
+      if (v < 1e12) v = v * 1000;
+      v = new Date(v);
+    } else if (!(v instanceof Date)) {
+      v = new Date(v);
+    }
+    const ms = v.getTime();
+    if (!Number.isFinite(ms)) return null;
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Tehran',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    return fmt.format(new Date(ms));
+  } catch (_e) {
+    return null;
+  }
+}
+
+function escHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * آمار ادمین‌ها برای یک روز تهران — داده واقعی از messages + shifts + channel_admins
+ * @returns {{ day: string, channels: Array<{key,title,admins:Array}> }}
+ */
+export async function buildAdminStatsPayload(day, channelScope) {
+  const scopeKeys = channelScope
+    ? [channelScope]
+    : Object.keys(DEFAULT_CHANNELS || {});
+
+  let allMsg = [];
+  try {
+    allMsg =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+          reviewedBy: messages.reviewedBy,
+          reviewedAt: messages.reviewedAt,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(12000)
+        .all()) || [];
+  } catch (e) {
+    console.error('buildAdminStatsPayload msgs', e);
+    allMsg = [];
+  }
+
+  let allSh = [];
+  try {
+    allSh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(4000).all()) || [];
+  } catch (_e) {
+    allSh = [];
+  }
+
+  let caRows = [];
+  try {
+    caRows = (await db.select().from(channelAdmins).all()) || [];
+  } catch (_e) {
+    caRows = [];
+  }
+
+  // فقط پیام‌های بررسی‌شده همان روز
+  const dayMsg = allMsg.filter(function (m) {
+    if (!m || !m.reviewedBy) return false;
+    const st = String(m.status || '');
+    if (st !== 'approved' && st !== 'rejected') return false;
+    return tehranDateOfTs(m.reviewedAt) === day;
+  });
+
+  const channels = [];
+  for (const key of scopeKeys) {
+    const conf = DEFAULT_CHANNELS[key];
+    if (!conf) continue;
+    const dayShifts = allSh.filter(function (s) {
+      const ck = String(s.channelKey || s.channel_key || '');
+      const st = String(s.status || '');
+      const sd = String(s.shiftDate || s.shift_date || '');
+      return ck === key && st === 'active' && sd === day;
+    });
+
+    const byAdmin = {};
+    function ensure(aid) {
+      if (!byAdmin[aid]) {
+        byAdmin[aid] = { aid: Number(aid), ap: 0, rj: 0, shifts: [] };
+      }
+      return byAdmin[aid];
+    }
+
+    for (const ca of caRows) {
+      if (String(ca.channelKey || ca.channel_key) !== key) continue;
+      const aid = Number(ca.userId || ca.user_id);
+      if (aid) ensure(aid);
+    }
+    for (const s of dayShifts) {
+      const aid = Number(s.adminId || s.admin_id);
+      if (!aid) continue;
+      const o = ensure(aid);
+      o.shifts.push(
+        String(s.startHm || s.start_hm || '').slice(0, 5) +
+          '–' +
+          String(s.endHm || s.end_hm || '').slice(0, 5)
+      );
+    }
+    for (const m of dayMsg) {
+      if (String(m.channelKey || m.channel_key) !== key) continue;
+      const aid = Number(m.reviewedBy);
+      if (!aid) continue;
+      const o = ensure(aid);
+      if (String(m.status) === 'approved') o.ap++;
+      else if (String(m.status) === 'rejected') o.rj++;
+    }
+
+    const admins = Object.values(byAdmin)
+      .map(function (o) {
+        return {
+          aid: o.aid,
+          ap: o.ap,
+          rj: o.rj,
+          total: o.ap + o.rj,
+          shifts: o.shifts,
+        };
+      })
+      .filter(function (o) {
+        return o.total > 0 || (o.shifts && o.shifts.length);
+      })
+      .sort(function (a, b) {
+        return b.total - a.total;
+      });
+
+    channels.push({
+      key: key,
+      title: conf.title || key,
+      admins: admins,
+      shiftCount: dayShifts.length,
+      reviewTotal: admins.reduce(function (s, a) {
+        return s + a.total;
+      }, 0),
+    });
+  }
+
+  return { day: day, channels: channels };
+}
+
 export async function getStatsDashboardText() {
   let msgErr = null;
   let total = 0, pe = 0, ap = 0, rj = 0;
@@ -1396,6 +1559,35 @@ export async function getStatsDashboardText() {
       ')\n';
   }
 
+  let todayPe = 0, todayAp = 0, todayRj = 0, todayNew = 0;
+  try {
+    const today = tehranNow().date;
+    const recent =
+      (await db
+        .select({
+          status: messages.status,
+          submittedAt: messages.submittedAt,
+          reviewedAt: messages.reviewedAt,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(5000)
+        .all()) || [];
+    for (const m of recent) {
+      const subD = tehranDateOfTs(m.submittedAt);
+      const revD = tehranDateOfTs(m.reviewedAt);
+      if (subD === today) {
+        todayNew++;
+        if (String(m.status) === 'pending' || String(m.status) === 'publishing') todayPe++;
+      }
+      if (revD === today) {
+        const st = String(m.status || '');
+        if (st === 'approved') todayAp++;
+        else if (st === 'rejected') todayRj++;
+      }
+    }
+  } catch (_e) {}
+
   let text =
     '📊 داشبورد آماری\n\n' +
     '📨 کل پیام‌ها: ' +
@@ -1409,6 +1601,16 @@ export async function getStatsDashboardText() {
     '\n' +
     '🔴 رد شده: ' +
     rj +
+    '\n\n' +
+    '📅 امروز (تهران)\n' +
+    '📨 جدید: ' +
+    todayNew +
+    ' | 🟡 صف: ' +
+    todayPe +
+    ' | 🟢' +
+    todayAp +
+    ' | 🔴' +
+    todayRj +
     '\n\n' +
     '👥 کاربران: ' +
     userCount +
@@ -2915,24 +3117,7 @@ export async function buildDataAnalysisReport(scope) {
   const weekPrev = days14.slice(7, 14); // ۷ تا ۱۳ روز قبل
 
   function tehranDay(ts) {
-    if (ts == null) return null;
-    try {
-      let t = ts;
-      if (typeof t === 'string' && /^\d+$/.test(t)) t = Number(t);
-      if (typeof t === 'number' && t < 1e12) t = t * 1000; // seconds → ms
-      const ms = new Date(t).getTime();
-      if (!Number.isFinite(ms)) return null;
-      const adj = new Date(ms + 3.5 * 3600 * 1000);
-      return (
-        adj.getUTCFullYear() +
-        '-' +
-        String(adj.getUTCMonth() + 1).padStart(2, '0') +
-        '-' +
-        String(adj.getUTCDate()).padStart(2, '0')
-      );
-    } catch (_e) {
-      return null;
-    }
+    return tehranDateOfTs(ts);
   }
 
   function tsMs(ts) {

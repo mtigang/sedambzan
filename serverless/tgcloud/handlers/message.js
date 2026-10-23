@@ -153,6 +153,7 @@ import {
   sendReviewBatch,
   decideMessage,
   finishReviewBatchIfComplete,
+  buildAdminStatsPayload,
   testChannels,
   displayName,
   formatReviewerLabel,
@@ -2213,11 +2214,29 @@ try {
           if (sd === 'perm' || sd === 'permanent') return false;
           return sd === pdate || sd === now.date;
         });
-        let t = '⏰ شیفت‌های دوره فعلی\n📅 ' + pdate + ' (۲۴ ساعته — فعال و لغوشده)\n';
+        const activeN = today.filter(function (s) { return String(s.status || 'active') === 'active'; }).length;
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '⏰ شیفت‌های دوره فعلی\n📅 ' +
+            pdate +
+            '\nکل: ' +
+            today.length +
+            ' (فعال: ' +
+            activeN +
+            ')\n\nاز دکمه‌های زیر:\n• تخصیص این دوره\n• لیست و لغو\n• لغو همه',
+          reply_markup: sanitizeMarkup(ownerShiftMenuInline()),
+        });
         if (!today.length) {
-          t += '\nهنوز شیفتی ثبت نشده.\n';
+          await api.sendMessage({ chat_id: chatId, text: 'هنوز شیفتی برای این دوره ثبت نشده.' });
         } else {
           const order = Object.keys(DEFAULT_CHANNELS);
+          function escSh(s) {
+            return String(s || '')
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;');
+          }
           for (const ck of order) {
             const group = sortShiftsByPeriod(
               today.filter(function (s) {
@@ -2225,33 +2244,46 @@ try {
               })
             );
             if (!group.length) continue;
-            const title =
-              (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-            t += '\n—— «' + title + '» ——\n';
+            const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '📢 «' + title + '» — ' + group.length + ' شیفت',
+            });
             for (const s of group) {
               let name = String(s.adminId);
               try {
                 name = displayName(await getUser(s.adminId), s.adminId);
               } catch (_e) {}
               const st = String(s.status || 'active');
-              const mark = st === 'cancelled' ? '🔴لغو ' : '▫️ ';
-              t +=
+              const mark = st === 'cancelled' ? '🔴 لغو شده' : '🟢 فعال';
+              const html =
+                '<blockquote>' +
                 mark +
-                String(s.startHm).slice(0, 5) +
-                '–' +
-                String(s.endHm).slice(0, 5) +
-                '  ·  ' +
-                name +
-                '\n';
+                '\n⏰ ' +
+                escSh(String(s.startHm).slice(0, 5) + '–' + String(s.endHm).slice(0, 5)) +
+                '\n👤 ' +
+                escSh(name) +
+                '\n🆔 <code>' +
+                Number(s.adminId) +
+                '</code></blockquote>';
+              try {
+                await api.sendMessage({ chat_id: chatId, text: html, parse_mode: 'HTML' });
+              } catch (_e) {
+                await api.sendMessage({
+                  chat_id: chatId,
+                  text:
+                    mark +
+                    ' ' +
+                    String(s.startHm).slice(0, 5) +
+                    '–' +
+                    String(s.endHm).slice(0, 5) +
+                    ' · ' +
+                    name,
+                });
+              }
             }
           }
         }
-        t += '\nاز دکمه‌های زیر:\n• تخصیص این دوره\n• لیست و لغو\n• لغو همه شیفت‌های دوره';
-        await api.sendMessage({
-          chat_id: chatId,
-          text: t,
-          reply_markup: sanitizeMarkup(ownerShiftMenuInline()),
-        });
       } catch (e) {
         console.error('owner shifts', e);
         await api.sendMessage({
@@ -2969,22 +3001,74 @@ try {
 
       if (text === '📊 آمار کانال') {
         const st = await channelStatsFor(myCh);
+        let extra = '';
+        try {
+          const day = tehranNow().date;
+          const payload = await buildAdminStatsPayload(day, myCh);
+          const ch = (payload.channels || [])[0];
+          if (ch) {
+            extra =
+              '\n\n📅 امروز ' +
+              day +
+              '\nشیفت‌ها: ' +
+              ch.shiftCount +
+              ' · بررسی امروز: ' +
+              ch.reviewTotal;
+          }
+        } catch (_e) {}
         await api.sendMessage({
           chat_id: chatId,
           text:
             '📊 آمار «' +
             st.title +
             '»\n\n' +
-            'کل: ' +
+            '📨 کل: ' +
             st.total +
-            '\n🟡' +
+            '\n🟡 در انتظار: ' +
             st.pe +
-            ' 🟢' +
+            '\n🟢 تأیید: ' +
             st.ap +
-            ' 🔴' +
-            st.rj,
+            '\n🔴 رد: ' +
+            st.rj +
+            extra +
+            '\n\nجزئیات هر ادمین در Quote جدا:',
           reply_markup: sanitizeMarkup(subLeaderKeyboard()),
         });
+        try {
+          const day = tehranNow().date;
+          const payload = await buildAdminStatsPayload(day, myCh);
+          const ch = (payload.channels || [])[0];
+          if (ch && ch.admins && ch.admins.length) {
+            function esc(s) {
+              return String(s || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            }
+            for (const sc of ch.admins.slice(0, 20)) {
+              let name = String(sc.aid);
+              try {
+                name = displayName(await getUser(sc.aid), sc.aid);
+              } catch (_e) {}
+              const sh = sc.shifts && sc.shifts.length ? sc.shifts.join(' | ') : 'بدون شیفت';
+              const html =
+                '<blockquote>👤 ' +
+                esc(name) +
+                '\n⏰ ' +
+                esc(sh) +
+                '\n✅ ' +
+                sc.ap +
+                ' · ❌ ' +
+                sc.rj +
+                ' · جمع ' +
+                sc.total +
+                '</blockquote>';
+              try {
+                await api.sendMessage({ chat_id: chatId, text: html, parse_mode: 'HTML' });
+              } catch (_e) {}
+            }
+          }
+        } catch (_e) {}
         return;
       }
 

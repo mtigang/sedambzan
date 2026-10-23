@@ -70,6 +70,7 @@ import {
   releaseLock,
   shiftIntervalOverlaps,
   buildDataAnalysisReport,
+  buildAdminStatsPayload,
 } from 'lib/dbutil';
 import { drainHoleWave, startHoleJob, getHoleJob, saveHoleJob, drainHolePiggyback } from 'lib/hole_drain';
 import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob, countAnnounceAudience } from 'lib/announce_drain';
@@ -3397,7 +3398,6 @@ if (data.startsWith('own_shift:')) {
       const scope = data.split(':')[2] || 'all';
       try {
         const report = await buildDataAnalysisReport(scope);
-        // شکستن هوشمند روی خط جدید تا پیام‌ها خوانا بمانند
         const chunks = [];
         let cur = String(report || '');
         while (cur.length > 3500) {
@@ -3413,6 +3413,57 @@ if (data.startsWith('own_shift:')) {
             chat_id: cq.message.chat.id,
             text: prefix + chunks[i],
           });
+        }
+        // خلاصه ادمین‌های امروز با Quote جدا
+        try {
+          const day = tehranNow().date;
+          const sc = scope === 'all' ? null : scope;
+          const payload = await buildAdminStatsPayload(day, sc);
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: '👮 عملکرد ادمین‌ها — امروز ' + day + '\n(هر ادمین در Quote جدا)',
+          });
+          function esc(s) {
+            return String(s || '')
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;');
+          }
+          for (const ch of payload.channels || []) {
+            if (!ch.admins || !ch.admins.length) continue;
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: '📢 «' + ch.title + '» — بررسی امروز: ' + ch.reviewTotal,
+            });
+            for (const sca of ch.admins.slice(0, 25)) {
+              let name = String(sca.aid);
+              try {
+                name = displayName(await getUser(sca.aid), sca.aid);
+              } catch (_e) {}
+              const sh = sca.shifts && sca.shifts.length ? sca.shifts.join(' | ') : '—';
+              const html =
+                '<blockquote>👤 ' +
+                esc(name) +
+                '\n⏰ ' +
+                esc(sh) +
+                '\n✅ ' +
+                sca.ap +
+                ' · ❌ ' +
+                sca.rj +
+                ' · جمع ' +
+                sca.total +
+                '</blockquote>';
+              try {
+                await api.sendMessage({
+                  chat_id: cq.message.chat.id,
+                  text: html,
+                  parse_mode: 'HTML',
+                });
+              } catch (_e) {}
+            }
+          }
+        } catch (e2) {
+          console.error('da admin quotes', e2);
         }
       } catch (e) {
         console.error('data analysis', e);
@@ -3440,12 +3491,11 @@ if (data.startsWith('own_shift:')) {
           return;
         }
       }
-      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'در حال محاسبه…' });
       const daysAgo = Number(data.split(':')[1]) || 0;
       const now = tehranNow();
-      // تاریخ هدف به وقت تهران
-      const [y0, m0, d0] = String(now.date).split('-').map(Number);
-      const dt = new Date(Date.UTC(y0, m0 - 1, d0));
+      const parts0 = String(now.date).split('-').map(Number);
+      const dt = new Date(Date.UTC(parts0[0], parts0[1] - 1, parts0[2]));
       dt.setUTCDate(dt.getUTCDate() - daysAgo);
       const day =
         dt.getUTCFullYear() +
@@ -3454,189 +3504,90 @@ if (data.startsWith('own_shift:')) {
         '-' +
         String(dt.getUTCDate()).padStart(2, '0');
 
-      function tehranDateOf(ts) {
-        if (ts == null || ts === '') return null;
-        try {
-          let v = ts;
-          if (v instanceof Date) {
-            /* ok */
-          } else if (typeof v === 'string' && /^\d+$/.test(v)) {
-            v = Number(v);
-          }
-          if (typeof v === 'number') {
-            if (v < 1e12) v = v * 1000;
-            v = new Date(v);
-          }
-          const ms = v.getTime ? v.getTime() : new Date(v).getTime();
-          if (!Number.isFinite(ms)) return null;
-          const fmt = new Intl.DateTimeFormat('en-CA', {
-            timeZone: 'Asia/Tehran',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-          });
-          return fmt.format(new Date(ms));
-        } catch (_e) {
-          return null;
-        }
-      }
-
-      // پیام‌های بررسی‌شده — حداکثر ۸۰۰۰ رکورد اخیر
-      let allMsg = [];
+      let payload;
       try {
-        const raw =
-          (await db
-            .select({
-              id: messages.id,
-              status: messages.status,
-              channelKey: messages.channelKey,
-              reviewedBy: messages.reviewedBy,
-              reviewedAt: messages.reviewedAt,
-            })
-            .from(messages)
-            .orderBy(desc(messages.id))
-            .limit(8000)
-            .all()) || [];
-        allMsg = raw.filter(function (m) {
-          return m.reviewedBy && (m.status === 'approved' || m.status === 'rejected');
-        });
+        payload = await buildAdminStatsPayload(day, slScope || null);
       } catch (e) {
-        console.error('admin_stats messages', e);
+        console.error('admin_stats payload', e);
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: '⚠️ خطا در خواندن پیام‌ها.\n' + String(e.message || e).slice(0, 150),
+          text: '⚠️ خطا در آمار: ' + String(e.message || e).slice(0, 150),
         });
         return;
       }
 
-      let allSh = [];
-      try {
-        allSh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(3000).all()) || [];
-      } catch (e) {
-        console.error('admin_stats shifts', e);
-        allSh = [];
+      const label = daysAgo ? daysAgo + ' روز پیش' : 'امروز';
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '👮 آمار ادمین‌ها\n📅 ' +
+          day +
+          ' (' +
+          label +
+          ')\n' +
+          'منبع: بررسی‌های واقعی + شیفت‌های همان روز (وقت تهران)',
+      });
+
+      function esc(s) {
+        return String(s || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
       }
 
-      // لیست ادمین‌های هر کانال از جدول channel_admins
-      let caRows = [];
-      try {
-        caRows = (await db.select().from(channelAdmins).all()) || [];
-      } catch (_e) {
-        caRows = [];
-      }
-
-      let body =
-        '👮 آمار ادمین‌ها\n📅 ' + day + (daysAgo ? ' (' + daysAgo + ' روز پیش)' : ' (امروز)') + '\n';
-
-      const _statsChannels = slScope
-        ? Object.values(DEFAULT_CHANNELS).filter(function (c) {
-            return c.key === slScope;
-          })
-        : Object.values(DEFAULT_CHANNELS);
-
-      for (const conf of _statsChannels) {
-        body += '\n━━━━━━━━━━━━\n📢 «' + conf.title + '»\n━━━━━━━━━━━━\n';
-        const dayShifts = allSh.filter(function (s) {
-          const ck = String(s.channelKey || s.channel_key || '');
-          const st = String(s.status || '');
-          const sd = String(s.shiftDate || s.shift_date || '');
-          return (
-            ck === conf.key &&
-            st === 'active' &&
-            sd === day &&
-            String(s.startHm || s.start_hm) !== String(s.endHm || s.end_hm)
-          );
+      for (const ch of payload.channels || []) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text:
+            '━━━━━━━━━━━━\n📢 «' +
+            ch.title +
+            '»\nشیفت‌ها: ' +
+            ch.shiftCount +
+            ' · کل بررسی: ' +
+            ch.reviewTotal,
         });
-        const adminIds = [];
-        const seenA = {};
-        // از جدول ادمین‌های کانال
-        for (const ca of caRows) {
-          const ck = String(ca.channelKey || ca.channel_key || '');
-          if (ck !== conf.key) continue;
-          const aid = Number(ca.userId || ca.user_id);
-          if (aid && !seenA[aid]) {
-            seenA[aid] = true;
-            adminIds.push(aid);
-          }
-        }
-        for (const s of dayShifts) {
-          const aid = Number(s.adminId || s.admin_id);
-          if (aid && !seenA[aid]) {
-            seenA[aid] = true;
-            adminIds.push(aid);
-          }
-        }
-        for (const msg of allMsg) {
-          const ck = String(msg.channelKey || msg.channel_key || '');
-          if (ck !== conf.key || !msg.reviewedBy) continue;
-          const dstr = tehranDateOf(msg.reviewedAt || msg.reviewed_at);
-          if (dstr !== day) continue;
-          const aid = Number(msg.reviewedBy || msg.reviewed_by);
-          if (aid && !seenA[aid]) {
-            seenA[aid] = true;
-            adminIds.push(aid);
-          }
-        }
-        if (!adminIds.length) {
-          body += 'بدون فعالیت\n';
+        if (!ch.admins || !ch.admins.length) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: 'بدون فعالیت ثبت‌شده در این روز.',
+          });
           continue;
         }
-        // مرتب‌سازی بر اساس تعداد بررسی نزولی
-        const scored = [];
-        for (const aid of adminIds) {
-          const reviewed = allMsg.filter(function (msg) {
-            const ck = String(msg.channelKey || msg.channel_key || '');
-            if (ck !== conf.key) return false;
-            if (Number(msg.reviewedBy || msg.reviewed_by) !== aid) return false;
-            const dstr = tehranDateOf(msg.reviewedAt || msg.reviewed_at);
-            return dstr === day;
-          });
-          const ap = reviewed.filter(function (x) {
-            return String(x.status) === 'approved';
-          }).length;
-          const rj = reviewed.filter(function (x) {
-            return String(x.status) === 'rejected';
-          }).length;
-          const shList = dayShifts
-            .filter(function (s) {
-              return Number(s.adminId || s.admin_id) === aid;
-            })
-            .map(function (s) {
-              return String(s.startHm || s.start_hm).slice(0, 5) + ' تا ' + String(s.endHm || s.end_hm).slice(0, 5);
-            })
-            .join(' | ');
-          scored.push({ aid: aid, ap: ap, rj: rj, total: reviewed.length, shList: shList });
-        }
-        scored.sort(function (a, b) {
-          return b.total - a.total;
-        });
-        for (const sc of scored) {
-          // فقط کسانی که شیفت یا بررسی داشته‌اند
-          if (sc.total === 0 && !sc.shList) continue;
+        for (const sc of ch.admins) {
           let name = String(sc.aid);
           try {
             name = displayName(await getUser(sc.aid), sc.aid);
           } catch (_e) {}
-          body +=
-            '\n────────────\n👤 ' +
-            name +
-            '\n⏰ ' +
-            (sc.shList || 'بدون شیفت') +
+          const sh = sc.shifts && sc.shifts.length ? sc.shifts.join(' | ') : 'بدون شیفت';
+          const html =
+            '<blockquote>👤 ' +
+            esc(name) +
+            '\n🆔 <code>' +
+            sc.aid +
+            '</code>\n⏰ ' +
+            esc(sh) +
             '\n✅ تأیید ' +
             sc.ap +
-            ' | ❌ رد ' +
+            ' · ❌ رد ' +
             sc.rj +
-            ' | جمع ' +
+            ' · جمع ' +
             sc.total +
-            '\n';
+            '</blockquote>';
+          try {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: html,
+              parse_mode: 'HTML',
+            });
+          } catch (_e) {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text:
+                '👤 ' + name + '\n⏰ ' + sh + '\n✅ ' + sc.ap + ' · ❌ ' + sc.rj + ' · جمع ' + sc.total,
+            });
+          }
         }
       }
-      let cur = body;
-      while (cur.length > 3500) {
-        await api.sendMessage({ chat_id: cq.message.chat.id, text: cur.slice(0, 3500) });
-        cur = cur.slice(3500);
-      }
-      await api.sendMessage({ chat_id: cq.message.chat.id, text: cur });
       return;
     }
 
