@@ -71,7 +71,7 @@ import {
   buildDataAnalysisReport,
 } from 'lib/dbutil';
 import { drainHoleWave, startHoleJob, getHoleJob, saveHoleJob, drainHolePiggyback } from 'lib/hole_drain';
-import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob } from 'lib/announce_drain';
+import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob, countAnnounceAudience } from 'lib/announce_drain';
 import { setState, getState, clearState } from 'lib/state';
 import {
   upsertSubLeader,
@@ -97,6 +97,7 @@ import {
   shiftSlotsInline,
   shiftModePickInline,
   announceProgressInline,
+  adminFbReplyInline,
   subLeaderPickChannelInline,
   subLeaderManageInline,
   subLeaderKeyboard,
@@ -3318,7 +3319,7 @@ if (data.startsWith('own_shift:')) {
 
 
     async function runAnnounceBatch(chatId, progressMessageId) {
-      await drainAnnounceOwnerBurst(chatId, progressMessageId, 12000);
+      await drainAnnounceOwnerBurst(chatId, progressMessageId, 22000);
     }
 
 
@@ -4367,8 +4368,10 @@ if (data.startsWith('ann_target:')) {
         });
         return;
       }
-      let ids = [];
+            let ids = [];
       const seen = {};
+      let totalAudience = 0;
+      var adminFbMode = target === 'admin_fb';
       try {
         if (target === 'admins' || target === 'admin_fb') {
           const ads = (await db.select().from(channelAdmins).all()) || [];
@@ -4379,18 +4382,18 @@ if (data.startsWith('ann_target:')) {
               ids.push(id);
             }
           }
+          totalAudience = ids.length;
         } else {
-          const all = (await db.select().from(users).all()) || [];
-          for (const u of all) {
-            const id = Number(u.userId || u.user_id);
-            if (!id || seen[id]) continue;
-            if (Number(u.blocked) === 1) continue;
-            seen[id] = true;
-            ids.push(id);
+          // همه کاربران: فقط شمارش — لیست کامل در job ذخیره نمی‌شود
+          totalAudience = await countAnnounceAudience('all');
+          if (!totalAudience) {
+            // fallback سبک
+            try {
+              const sample = (await db.select({ userId: users.userId, blocked: users.blocked }).from(users).limit(5).all()) || [];
+              if (sample.length) totalAudience = sample.length; // حداقل نشانه وجود کاربر
+            } catch (_e) {}
           }
         }
-        // برای انتقادات ادمین: بعداً دکمه پاسخ زیر پیام می‌چسبد
-        var adminFbMode = target === 'admin_fb';
       } catch (e) {
         console.error('ann collect', e);
         await api.sendMessage({
@@ -4399,10 +4402,17 @@ if (data.startsWith('ann_target:')) {
         });
         return;
       }
-      if (!ids.length) {
+      if ((target === 'admins' || target === 'admin_fb') && !ids.length) {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text: 'هیچ مخاطبی پیدا نشد.',
+        });
+        return;
+      }
+      if (target === 'all' && !totalAudience) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'هیچ کاربری در دیتابیس نیست یا شمارش ناموفق بود. دوباره تلاش کنید.',
         });
         return;
       }
@@ -4414,9 +4424,9 @@ if (data.startsWith('ann_target:')) {
           try {
             const payload = { chat_id: id, text: body };
             try {
-              const { adminFbReplyInline } = await import('lib/keyboards');
               payload.reply_markup = adminFbReplyInline();
             } catch (_e) {}
+            if (annEntities) payload.entities = annEntities;
             await api.sendMessage(payload);
             ok++;
           } catch (_e) {
@@ -4425,39 +4435,46 @@ if (data.startsWith('ann_target:')) {
         }
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: '✅ ارسال انتقادات/پیشنهادات به ادمین‌ها\nموفق: ' + ok + ' | ناموفق: ' + fail,
+          text: '✅ ارسال به ادمین‌ها تمام شد.\nموفق: ' + ok + ' / ناموفق: ' + fail,
         });
         return;
       }
-      const progress = await api.sendMessage({
-        chat_id: cq.message.chat.id,
-        text:
-          '📣 ارسال اطلاعیه شروع شد\n' +
-          '░░░░░░░░░░ 0%\n' +
-          '0 / ' +
-          ids.length +
-          '\n✅ موفق: 0   ❌ ناموفق: 0\n\n' +
-          'این پیام سنجاق می‌شود و با پیشرفت صف به‌روز می‌گردد.',
-        reply_markup: sanitizeMarkup(announceProgressInline(false)),
-      });
-      const mid = (progress && (progress.message_id || progress.messageId || progress.id)) || null;
+      // پیام پیشرفت
+      let mid = null;
       try {
+        const prog = await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text:
+            '📣 ارسال اطلاعیه شروع شد\n' +
+            '░░░░░░░░░░ 0%\n' +
+            '0 / ' +
+            totalAudience +
+            '\n✅ موفق: 0   ❌ ناموفق: 0\n\n' +
+            'این پیام سنجاق می‌شود و با پیشرفت صف به‌روز می‌گردد.',
+          reply_markup: sanitizeMarkup(announceProgressInline(false)),
+        });
+        mid = prog && (prog.message_id || prog.messageId || prog.id);
         if (mid) {
-          await api.pinChatMessage({
-            chat_id: cq.message.chat.id,
-            message_id: mid,
-            disable_notification: true,
-          });
+          try {
+            await api.pinChatMessage({
+              chat_id: cq.message.chat.id,
+              message_id: mid,
+              disable_notification: true,
+            });
+          } catch (_pin) {}
         }
-      } catch (_pin) {}
+      } catch (_e) {}
       const job = {
         status: 'running',
         text: annText,
         entities: Array.isArray(annEntities) && annEntities.length ? annEntities : null,
-        ids: ids,
+        // فقط برای ادمین‌ها ids نگه می‌داریم
+        ids: target === 'admins' ? ids : undefined,
+        lastId: 0,
         cursor: 0,
         ok: 0,
         fail: 0,
+        total: totalAudience,
         target: target,
         ownerId: userId,
         progressChatId: cq.message.chat.id,
@@ -4511,7 +4528,7 @@ if (data === 'ann_continue') {
           text:
             '⏹ ارسال متوقف شد.\n' +
             (job
-              ? 'پیشرفت: ' + (job.cursor || 0) + '/' + ((job.ids && job.ids.length) || 0) +
+              ? 'پیشرفت: ' + (job.cursor || 0) + '/' + (Number(job.total) || (job.ids && job.ids.length) || 0) +
                 '\n✅ ' + (job.ok || 0) + '  ❌ ' + (job.fail || 0)
               : ''),
           reply_markup: sanitizeMarkup(announceProgressInline(true)),
