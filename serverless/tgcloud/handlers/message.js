@@ -127,6 +127,7 @@ import {
   dropMessageFromAllReviewBatches,
   dropMessageFromReviewBatch,
   toBoldHtml,
+  rememberChannelMessage,
   activeShiftChannelKeys,
   checkInactiveShiftAndCancel,
   restoreMistakenlyCancelledShifts,
@@ -982,6 +983,32 @@ export default async function (message) {
       return;
     }
 
+
+    // ادمین: ارسال مثل کاربر عادی — مستقیم در کانال، بدون نیاز به شیفت
+        if (role === 'admin' && text === '📝 ارسال پیام به صورت کاربر عادی') {
+      if (!(await isBotOn())) {
+        await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
+        return;
+      }
+      if (await isFridayMode()) {
+        await api.sendMessage({ chat_id: chatId, text: FRIDAY_MODE_TEXT, reply_markup: await roleKb(userId) });
+        return;
+      }
+      await setState(userId, 'admin_as_user');
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '📝 ارسال مستقیم به کانال (مثل کاربر عادی)\n\n' +
+          'پیامتون با «صدام بزن / این کاربر / تو زندگی بعدی» شروع بشه.\n\n' +
+          'سیاسی و بی‌احترامی و حاوی کلمات ناسزا نباشه.\n\n' +
+          'پیام شما بدون صف، مستقیم در کانال منتشر می‌شود.\n' +
+          '(حتی بدون شیفت — مگر ربات/کانال غیرفعال باشد)\n\n' +
+          'با تشکر مدیریت مجموعه آرال',
+        reply_markup: sanitizeMarkup(backKeyboard()),
+      });
+      return;
+    }
+
 if (text === '📝 ارسال پیام') {
       if (!(await isBotOn()) && !owner) {
         await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
@@ -1115,7 +1142,7 @@ if (text === '📝 ارسال پیام') {
       return;
     }
 
-    if (state?.kind === 'user_send' && text) {
+    if ((state?.kind === 'user_send' || state?.kind === 'admin_as_user') && text) {
       try {
         // درِ ساعت کاری اینجا برداشته شد؛ بعد از تشخیص کانال، شیفت فعال چک می‌شود
         const [_fri, _botOn] = await Promise.all([isFridayMode(), isBotOn()]);
@@ -1209,7 +1236,7 @@ if (text === '📝 ارسال پیام') {
         }
 
         // —— شیفت فعال برای کانال؟ (معیار اصلی؛ خارج از ساعت کاری هم اگر شیفت باشد مجاز است)
-        if (!owner) {
+        if (!owner && state?.kind !== 'admin_as_user') {
           let activeAds = [];
           try {
             activeAds = await activeShiftAdmins(v.channelKey);
@@ -1507,7 +1534,65 @@ if (text === '📝 ارسال پیام') {
             }).length;
           }
         } catch (_e) {}
-        let note =
+        
+        // ادمین به‌عنوان کاربر عادی: مستقیم منتشر کن
+        if (state?.kind === 'admin_as_user' && msgId != null) {
+          try {
+            const conf = DEFAULT_CHANNELS[v.channelKey];
+            if (!conf || !conf.chatId) throw new Error('channel');
+            const sent = await api.sendMessage({
+              chat_id: conf.chatId,
+              text: toBoldHtml(v.content),
+              parse_mode: 'HTML',
+            });
+            const mid = sent && (sent.message_id || sent.messageId);
+            if (mid) {
+              try {
+                await rememberChannelMessage(v.channelKey, mid, msgId);
+              } catch (_e) {}
+            }
+            try {
+              await db
+                .update(messages)
+                .set({
+                  status: 'approved',
+                  reviewedBy: Number(userId),
+                  reviewedAt: new Date(),
+                })
+                .where(eq(messages.id, msgId))
+                .run();
+            } catch (_e) {}
+            try {
+              const bk2 = exactBodyKey(v.content);
+              if (bk2) await settingSet(bodyIndexSettingKey(v.channelKey, bk2), String(msgId) + '|approved');
+            } catch (_e) {}
+            const link = mid ? channelMessageLink(conf.chatId, mid, v.channelKey) : '';
+            await api.sendMessage({
+              chat_id: chatId,
+              text:
+                '✅ پیام مستقیم در «' +
+                ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
+                '» منتشر شد.\n🆔 #' +
+                msgId +
+                (link ? '\n' + link : '') +
+                '\n\nپیام بعدی را بفرستید یا ◀️ بازگشت',
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          } catch (ePub) {
+            console.error('admin_as_user publish', ePub);
+            await api.sendMessage({
+              chat_id: chatId,
+              text:
+                'ثبت شد اما انتشار مستقیم خطا داد: ' +
+                String((ePub && (ePub.description || ePub.message)) || ePub).slice(0, 150),
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          }
+        }
+
+let note =
           '✅ ثبت شد.\n🆔 #' + (msgId != null ? msgId : '?') + '\n🟡 در انتظار بررسی ادمین';
         if (ahead > 0) {
           note += '\n📋 حدود ' + toFaDigits(String(ahead)) + ' پیام جلوتر از شما در صف «' + ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || '') + '» است.';

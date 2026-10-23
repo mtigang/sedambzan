@@ -48,6 +48,7 @@ import {
   createReviewBatch,
   restoreMistakenlyCancelledShifts,
   sendReviewBatch,
+  clearReviewUiMessages,
   finishReviewBatchIfComplete,
   getReviewBatch,
   findAdminShiftConflict,
@@ -136,8 +137,6 @@ async function refreshAllShiftBoards(channelKey, date) {
 
 /** ویرایش پیام بعد از تأیید/رد؛ اگر Batch کامل شد دکمه‌ی بعدی یا «صف تمام شد» */
 async function editReviewResult(cq, text, fin) {
-  // روی پیام تأیید/رد دکمه‌ای نمی‌ماند.
-  // فقط اگر Batch تمام شد و صف دارد: یک پیام جدا با دکمه سبز «Batch بعدی»
   let markup = { inline_keyboard: [] };
   let extraSend = null;
   if (fin && fin.complete) {
@@ -170,17 +169,36 @@ async function editReviewResult(cq, text, fin) {
       });
     } catch (_e) {}
   }
-  // پیام جدا به‌عنوان پشتیبان — اگر edit کیبورد را نگه نداشت، دکمه از دست نرود
+  async function pushUi(mid) {
+    try {
+      const uid = cq.from && cq.from.id;
+      if (!uid || !mid) return;
+      const key = 'review_ui:' + Number(uid);
+      let prev = [];
+      try {
+        prev = JSON.parse(await settingGet(key, '[]')) || [];
+      } catch (_e) {
+        prev = [];
+      }
+      if (prev.indexOf(Number(mid)) < 0) prev.push(Number(mid));
+      await settingSet(key, JSON.stringify(prev.slice(-80)));
+    } catch (_e) {}
+  }
+  try {
+    await pushUi(cq.message && cq.message.message_id);
+  } catch (_e) {}
   if (extraSend) {
     try {
-      await api.sendMessage({
+      const sent = await api.sendMessage({
         chat_id: cq.message.chat.id,
         text: extraSend.text,
         reply_markup: extraSend.reply_markup,
       });
+      await pushUi(sent && (sent.message_id || sent.messageId));
     } catch (_) {}
   }
 }
+
 
 export default async function (cq) {
   try {
@@ -1565,7 +1583,16 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
           return;
         }
       }
-            const res = await createReviewBatch(userId);
+                  try {
+        await clearReviewUiMessages(userId, cq.message.chat.id);
+      } catch (_e) {}
+      try {
+        await api.deleteMessage({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+        });
+      } catch (_e) {}
+const res = await createReviewBatch(userId);
       if (res.status === 'no_shift') {
         await api.sendMessage({ chat_id: cq.message.chat.id, text: '❌ شیفت شما تمام شده است.' });
         return;

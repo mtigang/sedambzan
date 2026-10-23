@@ -2048,7 +2048,30 @@ async function saveReviewBatch(adminId, batch) {
 }
 
 /** فقط state Batch را پاک می‌کند؛ هیچ پیامی تغییر نمی‌کند */
+/** پاک کردن پیام‌های UI مربوط به Batch قبلی در چت ادمین */
+export async function clearReviewUiMessages(adminId, chatId) {
+  const key = 'review_ui:' + Number(adminId);
+  let ids = [];
+  try {
+    const raw = await settingGet(key, '[]');
+    ids = JSON.parse(raw) || [];
+  } catch (_e) {
+    ids = [];
+  }
+  const chat = chatId != null ? Number(chatId) : Number(adminId);
+  for (const mid of ids) {
+    try {
+      await api.deleteMessage({ chat_id: chat, message_id: Number(mid) });
+    } catch (_e) {}
+  }
+  try {
+    await settingSet(key, '[]');
+  } catch (_e) {}
+  return ids.length;
+}
+
 export async function clearReviewBatch(adminId) {
+
   try {
     await db.delete(settings).where(eq(settings.key, reviewBatchKey(adminId))).run();
   } catch (e) {
@@ -2566,13 +2589,22 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
       live.length +
       ' پیام برای بررسی' +
       queueHint;
-  await api.sendMessage({ chat_id: chatId, text: head });
+  const uiIds = [];
+  try {
+    const headMsg = await api.sendMessage({ chat_id: chatId, text: head });
+    const hid = headMsg && (headMsg.message_id || headMsg.messageId);
+    if (hid) uiIds.push(Number(hid));
+  } catch (_e) {
+    try {
+      await api.sendMessage({ chat_id: chatId, text: head });
+    } catch (_e2) {}
+  }
   for (const row of live) {
     try {
       const ck = String((row.channelKey ?? row.channel_key) || '');
       const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
       // ادمین/ساب‌لیدر نباید مشخصات فرستنده را ببینند
-      await api.sendMessage({
+      const sent = await api.sendMessage({
         chat_id: chatId,
         text:
           '#' +
@@ -2581,12 +2613,27 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
           title +
           '\n\n' +
           String(row.content || '').slice(0, 3800),
-        // فقط زیر آخرین پیام Batch دکمه «Batch بعدی» باشد
         reply_markup: sanitizeMarkup(reviewInline(row.id, false, batch.batchNumber)),
       });
+      const mid = sent && (sent.message_id || sent.messageId);
+      if (mid) uiIds.push(Number(mid));
     } catch (e) {
       console.error('sendReviewBatch', row.id, e);
     }
+  }
+  try {
+    const adminKey = Number(chatId);
+    const prevRaw = await settingGet('review_ui:' + adminKey, '[]');
+    let prev = [];
+    try {
+      prev = JSON.parse(prevRaw) || [];
+    } catch (_e) {
+      prev = [];
+    }
+    const merged = prev.concat(uiIds).filter(Boolean).slice(-80);
+    await settingSet('review_ui:' + adminKey, JSON.stringify(merged));
+  } catch (eUi) {
+    console.error('review_ui save', eUi);
   }
 }
 

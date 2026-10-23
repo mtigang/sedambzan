@@ -155,6 +155,7 @@ export function adminKeyboard() {
       [{ text: '📊 عملکرد من' }, { text: '📌 فراخوان کانال' }],
       [{ text: '🆘 درخواست کمک' }, { text: '🐞 گزارش مشکل' }],
       [{ text: '🗑 حذف پیام کانال' }],
+      [{ text: '📝 ارسال پیام به صورت کاربر عادی' }],
     ],
     resize_keyboard: true,
   });
@@ -205,8 +206,8 @@ export function dbExportContinueInline(done) {
 export function subLeaderKeyboard() {
   return sanitizeMarkup({
     keyboard: [
-      [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌های من' }],
-      [{ text: '➕ افزودن ادمین' }, { text: '⏰ شیفت من' }],
+      [{ text: '📥 پیام‌های در انتظار' }, { text: '⏰ شیفت من' }],
+      [{ text: '👥 ادمین‌های من' }, { text: '➕ افزودن ادمین' }],
       [{ text: '📋 شیفت‌های کانال' }, { text: '🔎 جستجوی پیام' }],
       [{ text: '📊 آمار کانال' }, { text: '👮 آمار ادمین‌ها' }],
       [{ text: '📢 اطلاعیه برای ادمین‌ها' }, { text: '📌 فراخوان کانال' }],
