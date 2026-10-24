@@ -467,7 +467,7 @@ export async function isQueueBusyMode(channelKey) {
       return (await settingGet('queue_busy_mode', '0')) === '1';
     }
     // خلاصه برای پنل
-    for (const ck of ['sadambazan', 'inkarbar', 'zendegi']) {
+    for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
       if ((await settingGet('ch_queue:' + ck, '0')) === '1') return true;
     }
     return (await settingGet('queue_busy_mode', '0')) === '1';
@@ -479,7 +479,7 @@ export async function isQueueBusyMode(channelKey) {
 export async function setQueueBusyMode(on) {
   // سراسری (همه کانال‌ها)
   await settingSet('queue_busy_mode', on ? '1' : '0');
-  for (const ck of ['sadambazan', 'inkarbar', 'zendegi']) {
+  for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
     await settingSet('ch_queue:' + ck, on ? '1' : '0');
   }
 }

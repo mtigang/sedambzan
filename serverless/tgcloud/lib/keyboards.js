@@ -110,7 +110,6 @@ export function sanitizeMarkup(markup) {
 }
 
 
-import { DEFAULT_CHANNELS, buildShiftSlots } from 'lib/config';
 
 export function userKeyboard() {
   return sanitizeMarkup({
@@ -252,14 +251,12 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
 
 /** انتخاب کانال برای تحلیل داده */
 export function dataAnalysisChannelInline() {
-  return sanitizeMarkup({
-    inline_keyboard: [
-      [{ text: 'صدام بزن', callback_data: 'da:ch:sadambazan', style: 'primary' }],
-      [{ text: 'این کاربر', callback_data: 'da:ch:inkarbar', style: 'primary' }],
-      [{ text: 'تو زندگی بعدی', callback_data: 'da:ch:zendegi', style: 'primary' }],
-      [{ text: 'همه کانال‌ها', callback_data: 'da:ch:all', style: 'success' }],
-    ],
-  });
+  const rows = [];
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    rows.push([{ text: String(c.title || c.key), callback_data: 'da:ch:' + c.key, style: 'primary' }]);
+  }
+  rows.push([{ text: 'همه کانال‌ها', callback_data: 'da:ch:all', style: 'success' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 /**
@@ -361,17 +358,22 @@ export function recentUserMsgsInline(offset) {
 
 /** انتخاب کانال برای خاموش/تب — رنگی */
 export function channelPickFlagsInline(prefix) {
-  // prefix: choff | chon | chad | chad_off | chq
-  const style = { sadambazan: 'success', inkarbar: 'primary', zendegi: 'primary', all: 'danger' };
-  return sanitizeMarkup({
-    inline_keyboard: [
-      [{ text: 'صدام بزن', callback_data: prefix + ':sadambazan', style: style.sadambazan }],
-      [{ text: 'این کاربر', callback_data: prefix + ':inkarbar', style: style.inkarbar }],
-      [{ text: 'تو زندگی بعدی', callback_data: prefix + ':zendegi', style: style.zendegi }],
-      [{ text: 'همه کانال‌ها', callback_data: prefix + ':all', style: style.all }],
-      [{ text: 'انصراف', callback_data: prefix + ':cancel', style: 'danger' }],
-    ],
-  });
+  const styles = ['success', 'primary', 'primary', 'primary', 'primary'];
+  const rows = [];
+  let i = 0;
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    rows.push([
+      {
+        text: String(c.title || c.key),
+        callback_data: prefix + ':' + c.key,
+        style: styles[i % styles.length],
+      },
+    ]);
+    i++;
+  }
+  rows.push([{ text: 'همه کانال‌ها', callback_data: prefix + ':all', style: 'danger' }]);
+  rows.push([{ text: 'انصراف', callback_data: prefix + ':cancel', style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function sendDestInline() {
@@ -409,14 +411,21 @@ export function shiftChannelPickKeyboard(channelList) {
 }
 
 export function postChannelInline() {
-  return sanitizeMarkup({
-    inline_keyboard: [
-      [{ text: 'صدام بزن', callback_data: 'postch:sadambazan', style: 'success' }],
-      [{ text: 'این کاربر', callback_data: 'postch:inkarbar', style: 'primary' }],
-      [{ text: 'تو زندگی بعدی', callback_data: 'postch:zendegi', style: 'primary' }],
-      [{ text: 'لغو', callback_data: 'postch_cancel', style: 'danger' }],
-    ],
-  });
+  const styles = ['success', 'primary', 'primary', 'primary'];
+  const rows = [];
+  let i = 0;
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    rows.push([
+      {
+        text: String(c.title || c.key),
+        callback_data: 'postch:' + c.key,
+        style: styles[i % styles.length],
+      },
+    ]);
+    i++;
+  }
+  rows.push([{ text: 'لغو', callback_data: 'postch_cancel', style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function confirmPostInline() {

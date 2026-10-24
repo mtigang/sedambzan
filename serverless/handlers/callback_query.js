@@ -3363,9 +3363,9 @@ if (data.startsWith('own_shift:')) {
         text: 'کانال ادمین‌ها را انتخاب کنید:',
         reply_markup: {
           keyboard: [
-            [{ text: 'ادمین‌های صدام بزن' }],
-            [{ text: 'ادمین‌های این کاربر' }],
-            [{ text: 'ادمین‌های تو زندگی بعدی' }],
+            ...Object.values(DEFAULT_CHANNELS).map(function (c) {
+              return [{ text: 'ادمین‌های ' + (c.title || c.key) }];
+            }),
             [{ text: '◀️ بازگشت' }],
           ],
           resize_keyboard: true,

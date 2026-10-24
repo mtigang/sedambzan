@@ -9,18 +9,21 @@ export const CHANNEL_USERNAMES = {
   sadambazan: 'callMeAraIl',
   inkarbar: 'inKarbariral',
   zendegi: 'arialcuple',
+  fekrmikardam: '',
 };
 
 export const CHANNEL_IDS = {
   sadambazan: -1003877061735,
   inkarbar: -1003764383335,
   zendegi: -1004371148799,
+  fekrmikardam: -1003964656653,
 };
 
 export const ADMIN_GROUP_IDS = {
   sadambazan: -1004444089094,
   inkarbar: -1004335935102,
   zendegi: -1003812392984,
+  fekrmikardam: null,
 };
 
 export const DEFAULT_CHANNELS = {
@@ -51,12 +54,22 @@ export const DEFAULT_CHANNELS = {
     workStart: '12:00',
     workEnd: '00:00',
   },
+  fekrmikardam: {
+    key: 'fekrmikardam',
+    title: 'من فکر میکردم',
+    prefixes: ['من فکر میکردم'],
+    chatId: CHANNEL_IDS.fekrmikardam,
+    adminGroupId: ADMIN_GROUP_IDS.fekrmikardam,
+    workStart: '12:00',
+    workEnd: '00:00',
+  },
 };
 
 export const CHANNEL_PREFIXES = [
   { key: 'sadambazan', prefix: 'صدام بزن' },
   { key: 'inkarbar', prefix: 'این کاربر' },
   { key: 'zendegi', prefix: 'تو زندگی بعدی' },
+  { key: 'fekrmikardam', prefix: 'من فکر میکردم' },
 ];
 
 export const WELCOME_TEXT =
@@ -64,7 +77,7 @@ export const WELCOME_TEXT =
 
 export const RULES_TEXT =
   'پیام خودتو بفرست.\n\n' +
-  'پیامتون با «صدام بزن / این کاربر / تو زندگی بعدی» شروع بشه.\n\n' +
+  'پیامتون با «صدام بزن / این کاربر / تو زندگی بعدی / من فکر میکردم» شروع بشه.\n\n' +
   'سیاسی و بی‌احترامی و حاوی کلمات ناسزا نباشه.\n\n' +
   'می‌تونید چند پیام پشت‌سرهم بفرستید.\n' +
   'حداکثر ۶ پیام در ۱۰ دقیقه.\n\n' +
