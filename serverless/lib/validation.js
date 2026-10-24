@@ -191,7 +191,7 @@ export function validateAndFix(message) {
     return {
       ok: false,
       error:
-        '🚫 پیام باید با یکی از این‌ها شروع شود:\n• صدام بزن\n• این کاربر\n• تو زندگی بعدی',
+        '🚫 پیام باید با یکی از این‌ها شروع شود:\n• صدام بزن\n• این کاربر\n• تو زندگی بعدی\n• من فکر میکردم',
     };
   }
   if (hasLink(entities, text)) {
@@ -201,11 +201,28 @@ export function validateAndFix(message) {
     return { ok: false, error: '🚫 ایموجی در پیام مجاز نیست.' };
   }
 
-  // کلمات ناسزا (لیست ثابت — بدون تغییر دیتابیس)
+  // کلمات ناسزا — تطبیق کلمه‌ای (نه زیررشته؛ «کسی»/«کسب» رد نشوند)
   const BAD_WORDS = ['کیرم', 'گاییدم', 'جنده', 'کیر', 'کص', 'کس'];
   const lowerCheck = text.replace(/ك/g, 'ک').replace(/ي/g, 'ی');
+  function isArabicLetter(ch) {
+    if (!ch) return false;
+    const c = ch.charCodeAt(0);
+    return c >= 0x0600 && c <= 0x06ff;
+  }
+  function hasBadWord(hay, word) {
+    let from = 0;
+    while (from <= hay.length) {
+      const i = hay.indexOf(word, from);
+      if (i < 0) return false;
+      const before = i === 0 ? '' : hay.charAt(i - 1);
+      const after = i + word.length >= hay.length ? '' : hay.charAt(i + word.length);
+      if (!isArabicLetter(before) && !isArabicLetter(after)) return true;
+      from = i + 1;
+    }
+    return false;
+  }
   for (const w of BAD_WORDS) {
-    if (lowerCheck.includes(w)) {
+    if (hasBadWord(lowerCheck, w)) {
       return { ok: false, error: 'پیام شما شامل کلمات ناسزا می باشد' };
     }
   }

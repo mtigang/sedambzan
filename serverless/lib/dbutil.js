@@ -357,21 +357,15 @@ export async function pruneOldestMessageIfOverBudget() {
       if (!oldestId) oldestId = await pickOldestByStatus('approved');
       // فقط اگر هیچ rejected/approved نبود، از pending قدیمی حذف کن
       if (!oldestId) {
-        const oldest =
-          (await db
-            .select({ id: messages.id })
-            .from(messages)
-            .orderBy(asc(messages.id))
-            .limit(1)
-            .all()) || [];
-        if (oldest[0] && oldest[0].id != null) oldestId = Number(oldest[0].id);
-      }
+      // بودجه پر است ولی فقط rejected/approved قابل حذف‌اند — pending حفظ می‌شود
+      return { pruned: 0, estimate: estimate, n: n, skippedPending: true };
+    }
     } catch (_e) {
       try {
         const all = (await db.select({ id: messages.id, status: messages.status }).from(messages).limit(800).all()) || [];
         const rej = all.filter(function (r) { return String(r.status) === 'rejected'; });
         const ap = all.filter(function (r) { return String(r.status) === 'approved'; });
-        const pool = rej.length ? rej : ap.length ? ap : all;
+        const pool = rej.length ? rej : ap; // هرگز pending را برای بودجه حذف نکن
         if (pool.length) {
           oldestId = Math.min.apply(null, pool.map(function (r) { return Number(r.id); }));
         }
@@ -597,14 +591,16 @@ async function collectKnownChatIdsForForceJoin() {
   const set = new Set();
   try {
     for (const v of Object.values(CHANNEL_IDS || {})) {
+      if (v == null || v === '' || v === 0) continue;
       const n = Number(v);
-      if (Number.isFinite(n)) set.add(n);
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
     }
   } catch (_e) {}
   try {
     for (const v of Object.values(ADMIN_GROUP_IDS || {})) {
+      if (v == null || v === '' || v === 0) continue;
       const n = Number(v);
-      if (Number.isFinite(n)) set.add(n);
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
     }
   } catch (_e) {}
   try {
@@ -1066,26 +1062,28 @@ export async function getActiveSubLeaderChannel(userId) {
 
 /** نرمال‌سازی کلید کانال: title/alias → key استاندارد */
 export function normalizeChannelKey(raw) {
-  let s = String(raw == null ? '' : raw).trim();
-  if (!s) return '';
+  if (raw == null || raw === '') return '';
+  let s = String(raw).trim();
   if (DEFAULT_CHANNELS && DEFAULT_CHANNELS[s]) return s;
+  // تطبیق دقیق با title یا key (بدون indexOf زیررشته)
   try {
+    const low = s.toLowerCase();
     for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
       const c = DEFAULT_CHANNELS[k];
       if (!c) continue;
-      if (String(c.title || '') === s) return k;
-      if (String(c.key || '') === s) return k;
-      const prefs = c.prefixes || [];
-      for (const p of prefs) {
-        if (String(p) === s) return k;
-      }
+      if (String(c.key || '').toLowerCase() === low) return k;
+      if (String(c.title || '').trim() === s) return k;
+      if (String(c.title || '').toLowerCase() === low) return k;
     }
-    // شامل‌بودن عنوان داخل رشته (دکمه کوتاه‌شده و …)
-    for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
-      const c = DEFAULT_CHANNELS[k];
-      if (!c) continue;
-      const t = String(c.title || '');
-      if (t && (s.indexOf(t) >= 0 || t.indexOf(s) >= 0)) return k;
+  } catch (_e) {}
+  // تطبیق با chatId عددی
+  try {
+    const num = Number(s);
+    if (Number.isFinite(num)) {
+      for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+        const c = DEFAULT_CHANNELS[k];
+        if (c && Number(c.chatId) === num) return k;
+      }
     }
   } catch (_e) {}
   return s;

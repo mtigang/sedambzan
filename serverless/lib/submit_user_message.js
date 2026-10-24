@@ -275,13 +275,21 @@ export async function submitUserMessage(userId, text) {
     let msgId = null;
     const lastRows =
       (await db
-        .select({ id: messages.id })
+        .select({ id: messages.id, content: messages.content, channelKey: messages.channelKey, status: messages.status })
         .from(messages)
         .where(eq(messages.userId, uid))
         .orderBy(desc(messages.id))
-        .limit(1)
+        .limit(5)
         .all()) || [];
-    if (lastRows[0]) msgId = lastRows[0].id;
+    for (const row of lastRows) {
+      if (String(row.status) !== 'pending') continue;
+      if (String(row.channelKey || row.channel_key) !== String(v.channelKey)) continue;
+      if (String(row.content || '') === String(v.content)) {
+        msgId = row.id;
+        break;
+      }
+    }
+    if (msgId == null && lastRows[0]) msgId = lastRows[0].id;
     if (msgId != null && bodyKey) {
       try {
         await settingSet(bIdx, String(msgId) + '|pending');

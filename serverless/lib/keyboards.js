@@ -1,4 +1,4 @@
-import { MINI_APP_URL } from 'lib/config';
+import { MINI_APP_URL, DEFAULT_CHANNELS, buildShiftSlots } from 'lib/config';
 
 
 /** تضمین می‌کند همه text دکمه‌ها String و غیرخالی باشند */
