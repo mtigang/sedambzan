@@ -25,8 +25,7 @@ import {
   pruneOldestMessageIfOverBudget,
   FRIDAY_MODE_TEXT,
   QUEUE_BUSY_TEXT,
-  getUser,
-} from 'lib/dbutil';
+  getUser, findBodyDuplicate } from 'lib/dbutil';
 
 function isOwner(uid) {
   return (OWNER_IDS || []).map(Number).includes(Number(uid));
@@ -211,75 +210,21 @@ export async function submitUserMessage(userId, text) {
   }
 
   try {
-    // تکراری
-    let dup = null;
-    let dupIsPending = false;
-    let queuePos = 0;
-    const hit = await settingGet(bIdx, '');
-    if (hit) {
-      const hid = Number(String(hit).split('|')[0]);
-      const hst = String(hit).split('|')[1] || 'pending';
-      if (hid && (hst === 'pending' || hst === 'approved')) {
-        dup = { id: hid, status: hst };
-        dupIsPending = hst === 'pending';
-      }
+    // تکراری — سبک (ایندکس + نمونه محدود؛ نه .all)
+  let dup = null;
+  let dupIsPending = false;
+  let queuePos = 0;
+  try {
+    const found = await findBodyDuplicate(v.channelKey, bodyKey);
+    if (found && found.dup) {
+      dup = found.dup;
+      dupIsPending = !!found.dupIsPending;
+      queuePos = Number(found.queuePos) || 0;
     }
-    if (!dup) {
-      const pendingRows =
-        (await db
-          .select({
-            id: messages.id,
-            status: messages.status,
-            content: messages.content,
-          })
-          .from(messages)
-          .where(and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'pending')))
-          .all()) || [];
-      for (const row of pendingRows) {
-        const other = exactBodyKey(row.content);
-        if (other && other === bodyKey) {
-          dup = row;
-          dupIsPending = true;
-          const pendingSorted = pendingRows.slice().sort(function (a, b) {
-            return Number(a.id) - Number(b.id);
-          });
-          const idx = pendingSorted.findIndex(function (x) {
-            return Number(x.id) === Number(row.id);
-          });
-          queuePos = idx >= 0 ? idx : 0;
-          try {
-            await settingSet(bIdx, String(row.id) + '|pending');
-          } catch (_e) {}
-          break;
-        }
-      }
-    }
-    if (!dup) {
-      const recentApproved =
-        (await db
-          .select({
-            id: messages.id,
-            status: messages.status,
-            content: messages.content,
-          })
-          .from(messages)
-          .where(and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'approved')))
-          .orderBy(desc(messages.id))
-          .limit(200)
-          .all()) || [];
-      for (const row of recentApproved) {
-        const other = exactBodyKey(row.content);
-        if (other && other === bodyKey) {
-          dup = row;
-          dupIsPending = false;
-          try {
-            await settingSet(bIdx, String(row.id) + '|approved');
-          } catch (_e) {}
-          break;
-        }
-      }
-    }
-    if (dup) {
+  } catch (e) {
+    console.error('submit dup check', e);
+  }
+  if (dup) {
       if (dupIsPending) {
         return {
           ok: false,

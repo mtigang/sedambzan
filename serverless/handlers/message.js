@@ -132,6 +132,7 @@ import {
   checkInactiveShiftAndCancel,
   restoreMistakenlyCancelledShifts,
   getStatsDashboardText,
+  findBodyDuplicate,
   loadWorkHoursFromSettings,
   saveWorkHours,
   dedupeActiveShifts,
@@ -1310,104 +1311,33 @@ if (text === '📝 ارسال پیام') {
           let dup = null;
           let dupIsPending = false;
           let queuePos = 0;
+          const bIdx = bodyIndexSettingKey(v.channelKey, bodyKey);
+          let bodyLock = null;
           try {
-            // ایندکس سریع در settings
-            const bIdx = bodyIndexSettingKey(v.channelKey, bodyKey);
-            // قفل ضد ثبت موازی همان بدنه
-            let bodyLock = null;
-            try {
-              bodyLock = await acquireLock('lock:' + bIdx, 6000);
-            } catch (_e) {}
-            if (!bodyLock) {
-              await api.sendMessage({
-                chat_id: chatId,
-                text: '⏳ همین متن در حال ثبت است. چند ثانیه صبر کنید.',
-                reply_markup: sanitizeMarkup(backKeyboard()),
-              });
-              return;
-            }
-            // برای finally آزادسازی
-            globalThis.__bodyLock = { key: 'lock:' + bIdx, token: bodyLock };
-            const hit = await settingGet(bIdx, '');
-            if (hit) {
-              const hid = Number(String(hit).split('|')[0]);
-              const hst = String(hit).split('|')[1] || 'pending';
-              if (hid && (hst === 'pending' || hst === 'approved')) {
-                dup = { id: hid, status: hst };
-                dupIsPending = hst === 'pending';
-              }
-            }
-            if (!dup) {
-              // همهٔ pending کانال (سبک)
-              const pendingRows =
-                (await db
-                  .select({
-                    id: messages.id,
-                    status: messages.status,
-                    content: messages.content,
-                  })
-                  .from(messages)
-                  .where(
-                    and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'pending'))
-                  )
-                  .all()) || [];
-              for (const row of pendingRows) {
-                const other = exactBodyKey(row.content);
-                if (other && other === bodyKey) {
-                  dup = row;
-                  dupIsPending = true;
-                  const pendingSorted = pendingRows
-                    .slice()
-                    .sort(function (a, b) {
-                      return Number(a.id) - Number(b.id);
-                    });
-                  const idx = pendingSorted.findIndex(function (x) {
-                    return Number(x.id) === Number(row.id);
-                  });
-                  queuePos = idx >= 0 ? idx : 0;
-                  try {
-                    await settingSet(bIdx, String(row.id) + '|pending');
-                  } catch (_e) {}
-                  break;
-                }
-              }
-            }
-            if (!dup) {
-              const recentApproved =
-                (await db
-                  .select({
-                    id: messages.id,
-                    status: messages.status,
-                    content: messages.content,
-                  })
-                  .from(messages)
-                  .where(
-                    and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'approved'))
-                  )
-                  .orderBy(desc(messages.id))
-                  .limit(200)
-                  .all()) || [];
-              for (const row of recentApproved) {
-                const other = exactBodyKey(row.content);
-                if (other && other === bodyKey) {
-                  dup = row;
-                  dupIsPending = false;
-                  try {
-                    await settingSet(bIdx, String(row.id) + '|approved');
-                  } catch (_e) {}
-                  break;
-                }
-              }
-            }
-          } catch (e) {
-            console.error('dup check', e);
-            // fail-closed: در خطای چک تکراری، ثبت نکن
+            bodyLock = await acquireLock('lock:' + bIdx, 6000);
+          } catch (_e) {}
+          if (!bodyLock) {
             await api.sendMessage({
               chat_id: chatId,
-              text: '⏳ بررسی تکراری بودن پیام طول کشید. چند ثانیه بعد دوباره بفرستید.',
+              text: '⏳ همین متن در حال ثبت است. چند ثانیه صبر کنید.',
               reply_markup: sanitizeMarkup(backKeyboard()),
             });
             return;
+          }
+          try {
+            const found = await findBodyDuplicate(v.channelKey, bodyKey);
+            if (found && found.dup) {
+              dup = found.dup;
+              dupIsPending = !!found.dupIsPending;
+              queuePos = Number(found.queuePos) || 0;
+            }
+          } catch (e) {
+            console.error('dup check', e);
+            // fail-open: در خطای چک، مانع ثبت نشو (۵۰k+ timeout)
+          } finally {
+            try {
+              await releaseLock('lock:' + bIdx, bodyLock);
+            } catch (_e) {}
           }
           if (dup) {
             let msgText = '';

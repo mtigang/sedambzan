@@ -194,6 +194,141 @@ export async function findChannelMessageByInternalId(internalId) {
 
 
 /** سقف تقریبی حجم جدول messages ≈ ۵ مگابایت */
+
+/**
+ * چک تکراری سبک و مقیاس‌پذیر (بدون .all روی کل pending)
+ * 1) ایندکس settings
+ * 2) حداکثر N pending اخیر همان کانال
+ * 3) حداکثر M approved اخیر
+ * در خطا: null برمی‌گرداند تا caller تصمیم بگیرد (fail-open ترجیح داده می‌شود)
+ */
+export async function findBodyDuplicate(channelKey, bodyKey) {
+  const ck = String(channelKey || '');
+  const key = String(bodyKey || '');
+  if (!ck || !key) return { dup: null, dupIsPending: false, queuePos: 0, error: null };
+
+  const bIdx = bodyIndexSettingKey(ck, key);
+  let dup = null;
+  let dupIsPending = false;
+  let queuePos = 0;
+
+  try {
+    const hit = await settingGet(bIdx, '');
+    if (hit) {
+      const hid = Number(String(hit).split('|')[0]);
+      const hst = String(hit).split('|')[1] || 'pending';
+      if (hid && (hst === 'pending' || hst === 'approved' || hst === 'publishing')) {
+        // صحت وضعیت از DB (اگر پیام پاک شده باشد ایندکس باطل شود)
+        try {
+          const row = await getMessageById(hid);
+          if (row) {
+            const st = String(row.status || '');
+            if (st === 'pending' || st === 'publishing' || st === 'approved') {
+              dup = { id: hid, status: st };
+              dupIsPending = st === 'pending' || st === 'publishing';
+              if (dupIsPending) {
+                try {
+                  const cnt =
+                    (await db
+                      .select({ n: sql`count(*)` })
+                      .from(messages)
+                      .where(
+                        and(
+                          eq(messages.channelKey, ck),
+                          eq(messages.status, 'pending'),
+                          sql`${messages.id} < ${hid}`
+                        )
+                      )
+                      .all()) || [];
+                  queuePos = Number(cnt[0] && (cnt[0].n != null ? cnt[0].n : Object.values(cnt[0])[0])) || 0;
+                } catch (_e) {
+                  queuePos = 0;
+                }
+              }
+              return { dup: dup, dupIsPending: dupIsPending, queuePos: queuePos, error: null };
+            }
+          }
+          // ایندکس باطل
+          try {
+            await settingSet(bIdx, '');
+          } catch (_e) {}
+        } catch (_e) {}
+      }
+    }
+  } catch (e) {
+    console.error('findBodyDuplicate index', e);
+  }
+
+  // pending محدود — جدیدترین‌ها (اسپم تکراری معمولاً اخیر است)
+  try {
+    const pendingRows =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          content: messages.content,
+        })
+        .from(messages)
+        .where(and(eq(messages.channelKey, ck), eq(messages.status, 'pending')))
+        .orderBy(desc(messages.id))
+        .limit(400)
+        .all()) || [];
+    for (const row of pendingRows) {
+      const other = exactBodyKey(row.content);
+      if (other && other === key) {
+        dup = row;
+        dupIsPending = true;
+        // موقعیت تقریبی در صف: تعداد pending با id کوچکتر — سبک با نمونه
+        try {
+          const older = pendingRows.filter(function (x) {
+            return Number(x.id) < Number(row.id);
+          }).length;
+          queuePos = older;
+        } catch (_e) {
+          queuePos = 0;
+        }
+        try {
+          await settingSet(bIdx, String(row.id) + '|pending');
+        } catch (_e) {}
+        return { dup: dup, dupIsPending: true, queuePos: queuePos, error: null };
+      }
+    }
+  } catch (e) {
+    console.error('findBodyDuplicate pending', e);
+    // ادامه به approved — ثبت را مسدود نکن
+  }
+
+  try {
+    const recentApproved =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          content: messages.content,
+        })
+        .from(messages)
+        .where(and(eq(messages.channelKey, ck), eq(messages.status, 'approved')))
+        .orderBy(desc(messages.id))
+        .limit(250)
+        .all()) || [];
+    for (const row of recentApproved) {
+      const other = exactBodyKey(row.content);
+      if (other && other === key) {
+        dup = row;
+        dupIsPending = false;
+        try {
+          await settingSet(bIdx, String(row.id) + '|approved');
+        } catch (_e) {}
+        return { dup: dup, dupIsPending: false, queuePos: 0, error: null };
+      }
+    }
+  } catch (e) {
+    console.error('findBodyDuplicate approved', e);
+  }
+
+  return { dup: null, dupIsPending: false, queuePos: 0, error: null };
+}
+
 export const MESSAGES_SIZE_BUDGET_BYTES = 5 * 1024 * 1024;
 const MSG_ROW_OVERHEAD = 200;
 
