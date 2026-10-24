@@ -208,47 +208,27 @@ export async function findBodyDuplicate(channelKey, bodyKey) {
   if (!ck || !key) return { dup: null, dupIsPending: false, queuePos: 0, error: null };
 
   const bIdx = bodyIndexSettingKey(ck, key);
-  let dup = null;
-  let dupIsPending = false;
-  let queuePos = 0;
 
+  // ۱) ایندکس settings — سریع
   try {
     const hit = await settingGet(bIdx, '');
     if (hit) {
       const hid = Number(String(hit).split('|')[0]);
       const hst = String(hit).split('|')[1] || 'pending';
       if (hid && (hst === 'pending' || hst === 'approved' || hst === 'publishing')) {
-        // صحت وضعیت از DB (اگر پیام پاک شده باشد ایندکس باطل شود)
         try {
           const row = await getMessageById(hid);
           if (row) {
             const st = String(row.status || '');
             if (st === 'pending' || st === 'publishing' || st === 'approved') {
-              dup = { id: hid, status: st };
-              dupIsPending = st === 'pending' || st === 'publishing';
-              if (dupIsPending) {
-                try {
-                  const cnt =
-                    (await db
-                      .select({ n: sql`count(*)` })
-                      .from(messages)
-                      .where(
-                        and(
-                          eq(messages.channelKey, ck),
-                          eq(messages.status, 'pending'),
-                          sql`${messages.id} < ${hid}`
-                        )
-                      )
-                      .all()) || [];
-                  queuePos = Number(cnt[0] && (cnt[0].n != null ? cnt[0].n : Object.values(cnt[0])[0])) || 0;
-                } catch (_e) {
-                  queuePos = 0;
-                }
-              }
-              return { dup: dup, dupIsPending: dupIsPending, queuePos: queuePos, error: null };
+              return {
+                dup: { id: hid, status: st },
+                dupIsPending: st === 'pending' || st === 'publishing',
+                queuePos: 0,
+                error: null,
+              };
             }
           }
-          // ایندکس باطل
           try {
             await settingSet(bIdx, '');
           } catch (_e) {}
@@ -259,71 +239,62 @@ export async function findBodyDuplicate(channelKey, bodyKey) {
     console.error('findBodyDuplicate index', e);
   }
 
-  // pending محدود — جدیدترین‌ها (اسپم تکراری معمولاً اخیر است)
+  // ۲) فقط ۱۰۰ pending اخیر + ۱۰۰ approved اخیر (اسکن از id نزولی — بدون WHERE سنگین)
   try {
-    const pendingRows =
+    const recent =
       (await db
         .select({
           id: messages.id,
           status: messages.status,
+          channelKey: messages.channelKey,
           content: messages.content,
         })
         .from(messages)
-        .where(and(eq(messages.channelKey, ck), eq(messages.status, 'pending')))
         .orderBy(desc(messages.id))
-        .limit(400)
+        .limit(800)
         .all()) || [];
-    for (const row of pendingRows) {
-      const other = exactBodyKey(row.content);
-      if (other && other === key) {
-        dup = row;
-        dupIsPending = true;
-        // موقعیت تقریبی در صف: تعداد pending با id کوچکتر — سبک با نمونه
-        try {
-          const older = pendingRows.filter(function (x) {
-            return Number(x.id) < Number(row.id);
-          }).length;
-          queuePos = older;
-        } catch (_e) {
-          queuePos = 0;
-        }
-        try {
-          await settingSet(bIdx, String(row.id) + '|pending');
-        } catch (_e) {}
-        return { dup: dup, dupIsPending: true, queuePos: queuePos, error: null };
-      }
-    }
-  } catch (e) {
-    console.error('findBodyDuplicate pending', e);
-    // ادامه به approved — ثبت را مسدود نکن
-  }
 
-  try {
-    const recentApproved =
-      (await db
-        .select({
-          id: messages.id,
-          status: messages.status,
-          content: messages.content,
-        })
-        .from(messages)
-        .where(and(eq(messages.channelKey, ck), eq(messages.status, 'approved')))
-        .orderBy(desc(messages.id))
-        .limit(250)
-        .all()) || [];
-    for (const row of recentApproved) {
-      const other = exactBodyKey(row.content);
-      if (other && other === key) {
-        dup = row;
-        dupIsPending = false;
-        try {
-          await settingSet(bIdx, String(row.id) + '|approved');
-        } catch (_e) {}
-        return { dup: dup, dupIsPending: false, queuePos: 0, error: null };
+    let pendChecked = 0;
+    let apprChecked = 0;
+    for (const row of recent) {
+      const rck = String((row.channelKey ?? row.channel_key) || '');
+      if (rck !== ck) continue;
+      const st = String(row.status || '');
+      if (st === 'pending' || st === 'publishing') {
+        if (pendChecked >= 100) continue;
+        pendChecked++;
+        const other = exactBodyKey(row.content);
+        if (other && other === key) {
+          try {
+            await settingSet(bIdx, String(row.id) + '|pending');
+          } catch (_e) {}
+          return {
+            dup: row,
+            dupIsPending: true,
+            queuePos: 0,
+            error: null,
+          };
+        }
+      } else if (st === 'approved') {
+        if (apprChecked >= 100) continue;
+        apprChecked++;
+        const other = exactBodyKey(row.content);
+        if (other && other === key) {
+          try {
+            await settingSet(bIdx, String(row.id) + '|approved');
+          } catch (_e) {}
+          return {
+            dup: row,
+            dupIsPending: false,
+            queuePos: 0,
+            error: null,
+          };
+        }
       }
+      if (pendChecked >= 100 && apprChecked >= 100) break;
     }
   } catch (e) {
-    console.error('findBodyDuplicate approved', e);
+    console.error('findBodyDuplicate scan', e);
   }
 
   return { dup: null, dupIsPending: false, queuePos: 0, error: null };
@@ -1577,102 +1548,42 @@ export async function buildAdminStatsPayload(day, channelScope) {
 }
 
 export async function getStatsDashboardText() {
-  let msgErr = null;
   let total = 0;
   let pe = 0;
   let ap = 0;
   let rj = 0;
-  let other = 0;
   const byCh = {};
   for (const c of Object.values(DEFAULT_CHANNELS || {})) {
     byCh[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
   }
+  let note = '';
 
-  async function countAll() {
-    try {
-      const rows = (await db.select({ n: sql`count(*)` }).from(messages).all()) || [];
-      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
-    } catch (_e) {
-      return null;
-    }
-  }
-
-  // شمارش کل — سبک
   try {
-    const t0 = await countAll();
-    if (t0 != null) total = t0;
+    const rows = (await db.select({ n: sql`count(*)` }).from(messages).all()) || [];
+    total = Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
   } catch (e) {
-    msgErr = e;
+    console.error('stats total', e);
   }
 
-  // یک اسکن سبک: فقط status + channelKey — بدون content
-  // اول groupBy (اگر پشتیبانی شود)، وگرنه نمونهٔ جدیدترین‌ها + شمارش وضعیت جدا
-  let aggregated = false;
+  // یک اسکن سبک از جدیدترین‌ها روی PK — بدون WHERE (مقاوم روی ۵۰k+)
+  let sample = [];
   try {
-    const grouped =
+    sample =
       (await db
         .select({
           status: messages.status,
           channelKey: messages.channelKey,
-          n: sql`count(*)`,
+          submittedAt: messages.submittedAt,
+          reviewedAt: messages.reviewedAt,
         })
         .from(messages)
-        .groupBy(messages.status, messages.channelKey)
+        .orderBy(desc(messages.id))
+        .limit(6000)
         .all()) || [];
-    if (grouped.length) {
-      aggregated = true;
-      for (const row of grouped) {
-        const st = String(row.status || '');
-        const ck = String((row.channelKey ?? row.channel_key) || '');
-        const n = Number(row.n != null ? row.n : Object.values(row).find(function (v) {
-          return typeof v === 'number';
-        })) || 0;
-        if (st === 'pending' || st === 'publishing') pe += n;
-        else if (st === 'approved') ap += n;
-        else if (st === 'rejected') rj += n;
-        else other += n;
-        if (byCh[ck]) {
-          byCh[ck].total += n;
-          if (st === 'pending' || st === 'publishing') byCh[ck].pe += n;
-          else if (st === 'approved') byCh[ck].ap += n;
-          else if (st === 'rejected') byCh[ck].rj += n;
-        }
-      }
-    }
-  } catch (eG) {
-    console.error('stats groupBy', eG);
-  }
-
-  if (!aggregated) {
-    // شمارش وضعیت‌ها یکی‌یکی — با timeout مقاوم
-    async function safeCount(whereExpr) {
-      try {
-        const rows = (await db.select({ n: sql`count(*)` }).from(messages).where(whereExpr).all()) || [];
-        return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
-      } catch (e) {
-        console.error('safeCount', e);
-        return null;
-      }
-    }
+  } catch (e) {
+    console.error('stats sample', e);
     try {
-      const cPe = await safeCount(eq(messages.status, 'pending'));
-      const cAp = await safeCount(eq(messages.status, 'approved'));
-      const cRj = await safeCount(eq(messages.status, 'rejected'));
-      if (cPe != null) pe = cPe;
-      if (cAp != null) ap = cAp;
-      if (cRj != null) rj = cRj;
-      // publishing را به pending اضافه کن
-      try {
-        const cPub = await safeCount(eq(messages.status, 'publishing'));
-        if (cPub != null) pe += cPub;
-      } catch (_e) {}
-    } catch (e1) {
-      console.error('stats status counts', e1);
-    }
-
-    // تفکیک کانال: یک select محدود جدیدترین‌ها (بدون content)
-    try {
-      const sample =
+      sample =
         (await db
           .select({
             status: messages.status,
@@ -1680,115 +1591,70 @@ export async function getStatsDashboardText() {
           })
           .from(messages)
           .orderBy(desc(messages.id))
-          .limit(12000)
+          .limit(2000)
           .all()) || [];
-      const sampleBy = {};
-      for (const c of Object.keys(byCh)) sampleBy[c] = { total: 0, pe: 0, ap: 0, rj: 0 };
-      for (const x of sample) {
-        const st = String(x.status || '');
-        const ck = String((x.channelKey ?? x.channel_key) || '');
-        if (!sampleBy[ck]) continue;
-        sampleBy[ck].total++;
-        if (st === 'pending' || st === 'publishing') sampleBy[ck].pe++;
-        else if (st === 'approved') sampleBy[ck].ap++;
-        else if (st === 'rejected') sampleBy[ck].rj++;
-      }
-      // اگر شمارش کانال هنوز صفر است، از نسبت نمونه روی total واقعی تخمین نزن —
-      // فقط اگر count کانال جدا موفق شد استفاده کن، وگرنه نمونه را با برچسب نشان بده
-      let anyCh = false;
-      for (const key of Object.keys(byCh)) {
-        const c = await safeCount(eq(messages.channelKey, key));
-        if (c != null && c > 0) {
-          byCh[key].total = c;
-          anyCh = true;
-          const cPe = await safeCount(and(eq(messages.channelKey, key), eq(messages.status, 'pending')));
-          const cAp = await safeCount(and(eq(messages.channelKey, key), eq(messages.status, 'approved')));
-          const cRj = await safeCount(and(eq(messages.channelKey, key), eq(messages.status, 'rejected')));
-          if (cPe != null) byCh[key].pe = cPe;
-          if (cAp != null) byCh[key].ap = cAp;
-          if (cRj != null) byCh[key].rj = cRj;
-        }
-      }
-      if (!anyCh) {
-        // از نمونه ۱۲هزارتایی نسبت بگیر و روی total مقیاس کن
-        const sTot = sample.length || 1;
-        for (const key of Object.keys(byCh)) {
-          const s = sampleBy[key] || { total: 0, pe: 0, ap: 0, rj: 0 };
-          if (total > 0 && s.total > 0) {
-            const ratio = s.total / sTot;
-            byCh[key].total = Math.round(total * ratio);
-            byCh[key].pe = Math.round(pe * (s.pe / (sTot || 1)));
-            byCh[key].ap = Math.round(ap * (s.ap / (sTot || 1)));
-            byCh[key].rj = Math.round(rj * (s.rj / (sTot || 1)));
-          } else {
-            byCh[key].total = s.total;
-            byCh[key].pe = s.pe;
-            byCh[key].ap = s.ap;
-            byCh[key].rj = s.rj;
-          }
-        }
-      }
     } catch (e2) {
-      console.error('stats channel', e2);
-      msgErr = msgErr || e2;
+      console.error('stats sample2', e2);
     }
   }
 
-  // اگر هنوز pe/ap/rj صفر و total بزرگ است — از نمونهٔ اخیر پر کن
-  if (total > 100 && pe + ap + rj === 0) {
-    try {
-      const recent =
-        (await db
-          .select({ status: messages.status, channelKey: messages.channelKey })
-          .from(messages)
-          .orderBy(desc(messages.id))
-          .limit(8000)
-          .all()) || [];
-      let rPe = 0, rAp = 0, rRj = 0;
-      const rBy = {};
-      for (const c of Object.keys(byCh)) rBy[c] = { total: 0, pe: 0, ap: 0, rj: 0 };
-      for (const x of recent) {
-        const st = String(x.status || '');
-        const ck = String((x.channelKey ?? x.channel_key) || '');
-        if (st === 'pending' || st === 'publishing') rPe++;
-        else if (st === 'approved') rAp++;
-        else if (st === 'rejected') rRj++;
-        if (rBy[ck]) {
-          rBy[ck].total++;
-          if (st === 'pending' || st === 'publishing') rBy[ck].pe++;
-          else if (st === 'approved') rBy[ck].ap++;
-          else if (st === 'rejected') rBy[ck].rj++;
-        }
-      }
-      const rSum = rPe + rAp + rRj || 1;
-      // مقیاس تقریبی روی کل
-      pe = Math.round((rPe / rSum) * total);
-      ap = Math.round((rAp / rSum) * total);
-      rj = Math.round((rRj / rSum) * total);
-      for (const key of Object.keys(byCh)) {
-        const s = rBy[key];
-        const sT = s.total || 0;
-        byCh[key].total = Math.round((sT / recent.length) * total);
-        byCh[key].pe = Math.round((s.pe / rSum) * total);
-        byCh[key].ap = Math.round((s.ap / rSum) * total);
-        byCh[key].rj = Math.round((s.rj / rSum) * total);
-      }
-    } catch (e3) {
-      console.error('stats recent fallback', e3);
-      msgErr = msgErr || e3;
+  let sPe = 0;
+  let sAp = 0;
+  let sRj = 0;
+  let sOther = 0;
+  for (const x of sample) {
+    const st = String(x.status || '');
+    const ck = String((x.channelKey ?? x.channel_key) || '');
+    if (st === 'pending' || st === 'publishing') sPe++;
+    else if (st === 'approved') sAp++;
+    else if (st === 'rejected') sRj++;
+    else sOther++;
+    if (byCh[ck]) {
+      byCh[ck].total++;
+      if (st === 'pending' || st === 'publishing') byCh[ck].pe++;
+      else if (st === 'approved') byCh[ck].ap++;
+      else if (st === 'rejected') byCh[ck].rj++;
     }
   }
+
+  const sSum = sPe + sAp + sRj + sOther;
+  if (sSum > 0 && total > 0) {
+    // اگر نمونه تقریباً کل است، اعداد دقیق نمونه؛ وگرنه مقیاس تقریبی
+    if (total <= sample.length + 50) {
+      pe = sPe;
+      ap = sAp;
+      rj = sRj;
+    } else {
+      const ratio = total / sSum;
+      pe = Math.round(sPe * ratio);
+      ap = Math.round(sAp * ratio);
+      rj = Math.round(sRj * ratio);
+      for (const key of Object.keys(byCh)) {
+        const b = byCh[key];
+        byCh[key] = {
+          total: Math.round(b.total * ratio),
+          pe: Math.round(b.pe * ratio),
+          ap: Math.round(b.ap * ratio),
+          rj: Math.round(b.rj * ratio),
+          title: b.title,
+        };
+      }
+      note = '\n\nℹ️ تفکیک از نمونه ' + sample.length + ' پیام اخیر + مقیاس روی کل برآورد شده.';
+    }
+  } else {
+    pe = sPe;
+    ap = sAp;
+    rj = sRj;
+  }
+
+  // شمارش دقیق‌تر pending با اسکن همان نمونه (صف واقعی اخیر)
+  // pe از بالا کافی است
 
   let userCount = 0;
   try {
     const ur = (await db.select({ n: sql`count(*)` }).from(users).all()) || [];
     userCount = Number((ur[0] && (ur[0].n != null ? ur[0].n : Object.values(ur[0])[0])) || 0);
-  } catch (_e) {
-    try {
-      const us = (await db.select().from(users).limit(1).all()) || [];
-      userCount = us.length ? -1 : 0;
-    } catch (_e2) {}
-  }
+  } catch (_e) {}
 
   let adminUnique = 0;
   try {
@@ -1802,7 +1668,7 @@ export async function getStatsDashboardText() {
   try {
     const now = tehranNow();
     const pdate = periodDateStr(now);
-    const sh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(500).all()) || [];
+    const sh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(400).all()) || [];
     shToday = sh.filter(function (s) {
       if (String(s.status) !== 'active') return false;
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
@@ -1810,21 +1676,13 @@ export async function getStatsDashboardText() {
     }).length;
   } catch (_e) {}
 
-  let todayPe = 0, todayAp = 0, todayRj = 0, todayNew = 0;
+  let todayPe = 0;
+  let todayAp = 0;
+  let todayRj = 0;
+  let todayNew = 0;
   try {
     const today = tehranNow().date;
-    const recent =
-      (await db
-        .select({
-          status: messages.status,
-          submittedAt: messages.submittedAt,
-          reviewedAt: messages.reviewedAt,
-        })
-        .from(messages)
-        .orderBy(desc(messages.id))
-        .limit(5000)
-        .all()) || [];
-    for (const m of recent) {
+    for (const m of sample) {
       const subD = tehranDateOfTs(m.submittedAt);
       const revD = tehranDateOfTs(m.reviewedAt);
       if (subD === today) {
@@ -1853,25 +1711,24 @@ export async function getStatsDashboardText() {
       b.ap +
       ' 🔴' +
       b.rj +
-      ')\n';
+      ')\\n';
   }
 
   let text =
-    '📊 داشبورد آماری\n\n' +
+    '📊 داشبورد آماری\\n\\n' +
     '📨 کل پیام‌ها: ' +
     total +
-    '\n' +
+    '\\n' +
     '🟡 در انتظار: ' +
     pe +
-    '\n' +
+    '\\n' +
     '🟢 تأیید شده: ' +
     ap +
-    '\n' +
+    '\\n' +
     '🔴 رد شده: ' +
     rj +
-    (other ? '\n⚪ سایر: ' + other : '') +
-    '\n\n' +
-    '📅 امروز (تهران)\n' +
+    '\\n\\n' +
+    '📅 امروز (تهران)\\n' +
     '📨 جدید: ' +
     todayNew +
     ' | 🟡 صف: ' +
@@ -1880,23 +1737,19 @@ export async function getStatsDashboardText() {
     todayAp +
     ' | 🔴' +
     todayRj +
-    '\n\n' +
+    '\\n\\n' +
     '👥 کاربران: ' +
-    (userCount < 0 ? '—' : userCount) +
-    '\n' +
+    userCount +
+    '\\n' +
     '👮 ادمین‌ها (یکتا): ' +
     adminUnique +
-    '\n' +
+    '\\n' +
     '⏰ شیفت فعال امروز: ' +
     shToday +
-    '\n\n' +
-    '📺 تفکیک کانال:\n' +
-    by;
-  if (msgErr) {
-    text +=
-      '\n\n⚠️ هشدار خواندن آمار:\n' +
-      String(msgErr.message || msgErr.description || msgErr).slice(0, 180);
-  }
+    '\\n\\n' +
+    '📺 تفکیک کانال:\\n' +
+    by +
+    note;
   return text;
 }
 
@@ -2647,64 +2500,69 @@ export async function isReviewBatchComplete(adminId) {
 
 /** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول — بدون select همه‌ی content */
 async function selectReviewablePending(adminId) {
-  // سبک و مقیاس‌پذیر: فقط pending با limit — هرگز .all() روی ۵۰هزار ردیف
-  const LIMIT = Math.max(80, (REVIEW_BATCH_SIZE || 16) * 5);
-  let light = [];
+  /**
+   * روی جدول بزرگ، WHERE status=pending ORDER BY id ASC کل جدول را اسکن می‌کند و timeout می‌شود.
+   * مسیر مطمئن: ORDER BY id DESC LIMIT (ایندکس PK) سپس فیلتر pending در حافظه.
+   */
+  const SCAN = 4000;
+  const need = Math.max(16, Number(REVIEW_BATCH_SIZE) || 16);
 
   let ownerCh = '';
   if (isOwner(adminId)) {
     try {
       ownerCh = String((await settingGet('owner_pend_ch:' + adminId, '')) || '');
+      if (ownerCh === 'all') ownerCh = '';
     } catch (_e) {}
   }
 
-  async function queryPending(extraWhere) {
+  let allowSet = null;
+  if (!isOwner(adminId)) {
     try {
-      let q = db
+      const allowList = await allowedReviewChannels(adminId);
+      if (!allowList || !allowList.length) return [];
+      allowSet = {};
+      for (const k of allowList) {
+        const nk = normalizeChannelKey(k) || String(k);
+        if (nk) allowSet[nk] = true;
+        allowSet[String(k)] = true;
+      }
+    } catch (e) {
+      console.error('selectReviewablePending allow', e);
+      return [];
+    }
+  }
+
+  let light = [];
+  try {
+    const recent =
+      (await db
         .select({
           id: messages.id,
           status: messages.status,
           channelKey: messages.channelKey,
         })
         .from(messages)
-        .where(extraWhere)
-        .orderBy(asc(messages.id))
-        .limit(LIMIT);
-      return (await q.all()) || [];
-    } catch (e) {
-      console.error('queryPending', e);
-      return null;
-    }
-  }
-
-  // مسیر اصلی: status=pending (+ کانال مالک اگر انتخاب شده)
-  try {
-    let whereExpr = eq(messages.status, 'pending');
-    if (ownerCh && ownerCh !== 'all') {
-      whereExpr = and(eq(messages.status, 'pending'), eq(messages.channelKey, ownerCh));
-    }
-    light = (await queryPending(whereExpr)) || [];
-  } catch (e1) {
-    console.error('selectReviewablePending primary', e1);
-    light = [];
-  }
-
-  // اگر خالی بود ولی ممکن است timeout بوده — یک‌بار بدون فیلتر کانال با limit
-  if (!light.length && ownerCh) {
-    try {
-      light = (await queryPending(eq(messages.status, 'pending'))) || [];
-      if (ownerCh && ownerCh !== 'all') {
-        light = light.filter(function (m) {
-          return String((m.channelKey ?? m.channel_key) || '') === ownerCh;
-        });
+        .orderBy(desc(messages.id))
+        .limit(SCAN)
+        .all()) || [];
+    for (const m of recent) {
+      const st = String(m.status || '');
+      if (st !== 'pending' && st !== 'publishing') continue;
+      const ck = String((m.channelKey ?? m.channel_key) || '');
+      const nk = normalizeChannelKey(ck) || ck;
+      if (ownerCh) {
+        if (ck !== ownerCh && nk !== ownerCh) continue;
       }
-    } catch (_e) {}
-  }
-
-  // آخرین تلاش: جدیدترین‌ها و فیلتر در حافظه
-  if (!light.length) {
+      if (allowSet) {
+        if (!(allowSet[ck] || allowSet[nk])) continue;
+      }
+      light.push(m);
+    }
+  } catch (e) {
+    console.error('selectReviewablePending scan', e);
+    // تلاش دوم با limit کمتر
     try {
-      const recent =
+      const recent2 =
         (await db
           .select({
             id: messages.id,
@@ -2713,51 +2571,32 @@ async function selectReviewablePending(adminId) {
           })
           .from(messages)
           .orderBy(desc(messages.id))
-          .limit(3000)
+          .limit(1200)
           .all()) || [];
-      light = recent.filter(function (m) {
-        return String(m.status) === 'pending';
-      });
-      if (ownerCh && ownerCh !== 'all') {
-        light = light.filter(function (m) {
-          return String((m.channelKey ?? m.channel_key) || '') === ownerCh;
-        });
+      for (const m of recent2) {
+        if (String(m.status) !== 'pending' && String(m.status) !== 'publishing') continue;
+        const ck = String((m.channelKey ?? m.channel_key) || '');
+        const nk = normalizeChannelKey(ck) || ck;
+        if (ownerCh && ck !== ownerCh && nk !== ownerCh) continue;
+        if (allowSet && !(allowSet[ck] || allowSet[nk])) continue;
+        light.push(m);
       }
-      light.sort(function (a, b) {
-        return (Number(a.id) || 0) - (Number(b.id) || 0);
-      });
     } catch (e2) {
-      console.error('selectReviewablePending recent', e2);
+      console.error('selectReviewablePending scan2', e2);
       return [];
     }
   }
 
-  function msgCh(m) {
-    return String((m.channelKey ?? m.channel_key) || '');
-  }
+  // قدیمی‌ترین‌ها در نمونه اول (FIFO نسبی)
+  light.sort(function (a, b) {
+    return (Number(a.id) || 0) - (Number(b.id) || 0);
+  });
 
-  let filtered = light;
-  if (!isOwner(adminId)) {
-    const allowList = await allowedReviewChannels(adminId);
-    if (!allowList.length) return [];
-    const allowed = {};
-    for (const k of allowList) {
-      const nk = normalizeChannelKey(k) || String(k);
-      if (nk) allowed[nk] = true;
-      allowed[String(k)] = true;
-    }
-    filtered = light.filter(function (m) {
-      const ck = msgCh(m);
-      const nk = normalizeChannelKey(ck) || ck;
-      return !!(allowed[ck] || allowed[nk]);
-    });
-  }
-
-  const need = REVIEW_BATCH_SIZE || 16;
-  const ids = filtered.slice(0, need).map(function (m) {
+  const ids = light.slice(0, need).map(function (m) {
     return Number(m.id);
   });
   if (!ids.length) return [];
+
   const rows = await Promise.all(
     ids.map(function (id) {
       return getMessageById(id).catch(function () {
@@ -2767,7 +2606,9 @@ async function selectReviewablePending(adminId) {
   );
   const full = [];
   for (const row of rows) {
-    if (row && String(row.status) === 'pending') full.push(row);
+    if (row && (String(row.status) === 'pending' || String(row.status) === 'publishing')) {
+      full.push(row);
+    }
   }
   return full;
 }
