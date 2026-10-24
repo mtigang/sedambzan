@@ -1,5 +1,5 @@
 import { api, db } from 'sdk';
-import { eq, and, sql } from 'sdk/db';
+import { eq, and, desc, sql } from 'sdk/db';
 import { subLeaders, channelAdmins, users, messages, shifts } from 'schema';
 import { isOwner, getUser, displayName, listAdminsByChannel, normalizeChannelKey } from 'lib/dbutil';
 import { DEFAULT_CHANNELS } from 'lib/config';
@@ -205,28 +205,44 @@ export async function channelStatsFor(channelKey) {
     let pe = await countWhere(and(base, eq(messages.status, 'pending')));
     let ap = await countWhere(and(base, eq(messages.status, 'approved')));
     let rj = await countWhere(and(base, eq(messages.status, 'rejected')));
-    // publishing را به در انتظار اضافه کن
     const pub = await countWhere(and(base, eq(messages.status, 'publishing')));
     if (pe != null && pub != null) pe += pub;
-    // اگر count شکست خورد، نمونهٔ محدود
-    if (total == null) {
-      const sample = (await db.select({ status: messages.status, channelKey: messages.channelKey }).from(messages).limit(5000).all()) || [];
-      const rows = sample.filter(function (x) {
-        const k = String((x.channelKey ?? x.channel_key) || '');
-        return k === ck || k.toLowerCase() === ck.toLowerCase();
-      });
-      total = rows.length;
-      pe = ap = rj = 0;
-      for (const x of rows) {
-        const st = String(x.status || '');
-        if (st === 'pending' || st === 'publishing') pe++;
-        else if (st === 'approved') ap++;
-        else if (st === 'rejected') rj++;
+
+    // اگر countها صفر/شکست — نمونهٔ جدیدترین‌ها (مقیاس‌پذیر روی ۵۰k+)
+    if (total == null || (total === 0 && pe == null) || (total > 0 && pe == null && ap == null && rj == null)) {
+      try {
+        const sample =
+          (await db
+            .select({ status: messages.status, channelKey: messages.channelKey })
+            .from(messages)
+            .orderBy(desc(messages.id))
+            .limit(8000)
+            .all()) || [];
+        const rows = sample.filter(function (x) {
+          const k = String((x.channelKey ?? x.channel_key) || '');
+          return k === ck || k.toLowerCase() === String(ck).toLowerCase();
+        });
+        if (total == null || total === 0) total = rows.length;
+        pe = ap = rj = 0;
+        for (const x of rows) {
+          const st = String(x.status || '');
+          if (st === 'pending' || st === 'publishing') pe++;
+          else if (st === 'approved') ap++;
+          else if (st === 'rejected') rj++;
+        }
+      } catch (e2) {
+        console.error('channelStatsFor sample', e2);
       }
     }
-    return { title, total: total || 0, pe: pe || 0, ap: ap || 0, rj: rj || 0 };
+    return {
+      title: title,
+      total: total || 0,
+      pe: pe || 0,
+      ap: ap || 0,
+      rj: rj || 0,
+    };
   } catch (e) {
     console.error('channelStatsFor', e);
-    return { title, total: 0, pe: 0, ap: 0, rj: 0 };
+    return { title: title, total: 0, pe: 0, ap: 0, rj: 0 };
   }
 }

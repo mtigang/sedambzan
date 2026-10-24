@@ -1443,7 +1443,11 @@ export async function buildAdminStatsPayload(day, channelScope) {
 
 export async function getStatsDashboardText() {
   let msgErr = null;
-  let total = 0, pe = 0, ap = 0, rj = 0;
+  let total = 0;
+  let pe = 0;
+  let ap = 0;
+  let rj = 0;
+  let other = 0;
   const byCh = {};
   for (const c of Object.values(DEFAULT_CHANNELS || {})) {
     byCh[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
@@ -1457,57 +1461,186 @@ export async function getStatsDashboardText() {
       return null;
     }
   }
-  async function countWhere(extraSql) {
+
+  // شمارش کل — سبک
+  try {
+    const t0 = await countAll();
+    if (t0 != null) total = t0;
+  } catch (e) {
+    msgErr = e;
+  }
+
+  // یک اسکن سبک: فقط status + channelKey — بدون content
+  // اول groupBy (اگر پشتیبانی شود)، وگرنه نمونهٔ جدیدترین‌ها + شمارش وضعیت جدا
+  let aggregated = false;
+  try {
+    const grouped =
+      (await db
+        .select({
+          status: messages.status,
+          channelKey: messages.channelKey,
+          n: sql`count(*)`,
+        })
+        .from(messages)
+        .groupBy(messages.status, messages.channelKey)
+        .all()) || [];
+    if (grouped.length) {
+      aggregated = true;
+      for (const row of grouped) {
+        const st = String(row.status || '');
+        const ck = String((row.channelKey ?? row.channel_key) || '');
+        const n = Number(row.n != null ? row.n : Object.values(row).find(function (v) {
+          return typeof v === 'number';
+        })) || 0;
+        if (st === 'pending' || st === 'publishing') pe += n;
+        else if (st === 'approved') ap += n;
+        else if (st === 'rejected') rj += n;
+        else other += n;
+        if (byCh[ck]) {
+          byCh[ck].total += n;
+          if (st === 'pending' || st === 'publishing') byCh[ck].pe += n;
+          else if (st === 'approved') byCh[ck].ap += n;
+          else if (st === 'rejected') byCh[ck].rj += n;
+        }
+      }
+    }
+  } catch (eG) {
+    console.error('stats groupBy', eG);
+  }
+
+  if (!aggregated) {
+    // شمارش وضعیت‌ها یکی‌یکی — با timeout مقاوم
+    async function safeCount(whereExpr) {
+      try {
+        const rows = (await db.select({ n: sql`count(*)` }).from(messages).where(whereExpr).all()) || [];
+        return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+      } catch (e) {
+        console.error('safeCount', e);
+        return null;
+      }
+    }
     try {
-      const rows = (await db.select({ n: sql`count(*)` }).from(messages).where(extraSql).all()) || [];
-      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
-    } catch (_e) {
-      return null;
+      const cPe = await safeCount(eq(messages.status, 'pending'));
+      const cAp = await safeCount(eq(messages.status, 'approved'));
+      const cRj = await safeCount(eq(messages.status, 'rejected'));
+      if (cPe != null) pe = cPe;
+      if (cAp != null) ap = cAp;
+      if (cRj != null) rj = cRj;
+      // publishing را به pending اضافه کن
+      try {
+        const cPub = await safeCount(eq(messages.status, 'publishing'));
+        if (cPub != null) pe += cPub;
+      } catch (_e) {}
+    } catch (e1) {
+      console.error('stats status counts', e1);
+    }
+
+    // تفکیک کانال: یک select محدود جدیدترین‌ها (بدون content)
+    try {
+      const sample =
+        (await db
+          .select({
+            status: messages.status,
+            channelKey: messages.channelKey,
+          })
+          .from(messages)
+          .orderBy(desc(messages.id))
+          .limit(12000)
+          .all()) || [];
+      const sampleBy = {};
+      for (const c of Object.keys(byCh)) sampleBy[c] = { total: 0, pe: 0, ap: 0, rj: 0 };
+      for (const x of sample) {
+        const st = String(x.status || '');
+        const ck = String((x.channelKey ?? x.channel_key) || '');
+        if (!sampleBy[ck]) continue;
+        sampleBy[ck].total++;
+        if (st === 'pending' || st === 'publishing') sampleBy[ck].pe++;
+        else if (st === 'approved') sampleBy[ck].ap++;
+        else if (st === 'rejected') sampleBy[ck].rj++;
+      }
+      // اگر شمارش کانال هنوز صفر است، از نسبت نمونه روی total واقعی تخمین نزن —
+      // فقط اگر count کانال جدا موفق شد استفاده کن، وگرنه نمونه را با برچسب نشان بده
+      let anyCh = false;
+      for (const key of Object.keys(byCh)) {
+        const c = await safeCount(eq(messages.channelKey, key));
+        if (c != null && c > 0) {
+          byCh[key].total = c;
+          anyCh = true;
+          const cPe = await safeCount(and(eq(messages.channelKey, key), eq(messages.status, 'pending')));
+          const cAp = await safeCount(and(eq(messages.channelKey, key), eq(messages.status, 'approved')));
+          const cRj = await safeCount(and(eq(messages.channelKey, key), eq(messages.status, 'rejected')));
+          if (cPe != null) byCh[key].pe = cPe;
+          if (cAp != null) byCh[key].ap = cAp;
+          if (cRj != null) byCh[key].rj = cRj;
+        }
+      }
+      if (!anyCh) {
+        // از نمونه ۱۲هزارتایی نسبت بگیر و روی total مقیاس کن
+        const sTot = sample.length || 1;
+        for (const key of Object.keys(byCh)) {
+          const s = sampleBy[key] || { total: 0, pe: 0, ap: 0, rj: 0 };
+          if (total > 0 && s.total > 0) {
+            const ratio = s.total / sTot;
+            byCh[key].total = Math.round(total * ratio);
+            byCh[key].pe = Math.round(pe * (s.pe / (sTot || 1)));
+            byCh[key].ap = Math.round(ap * (s.ap / (sTot || 1)));
+            byCh[key].rj = Math.round(rj * (s.rj / (sTot || 1)));
+          } else {
+            byCh[key].total = s.total;
+            byCh[key].pe = s.pe;
+            byCh[key].ap = s.ap;
+            byCh[key].rj = s.rj;
+          }
+        }
+      }
+    } catch (e2) {
+      console.error('stats channel', e2);
+      msgErr = msgErr || e2;
     }
   }
 
-  try {
-    // کل
-    const t = await countAll();
-    if (t == null) throw new Error('count total failed');
-    total = t;
-    pe = (await countWhere(eq(messages.status, 'pending'))) || 0;
-    ap = (await countWhere(eq(messages.status, 'approved'))) || 0;
-    rj = (await countWhere(eq(messages.status, 'rejected'))) || 0;
-    for (const key of Object.keys(byCh)) {
-      const base = eq(messages.channelKey, key);
-      byCh[key].total = (await countWhere(base)) || 0;
-      byCh[key].pe = (await countWhere(and(base, eq(messages.status, 'pending')))) || 0;
-      byCh[key].ap = (await countWhere(and(base, eq(messages.status, 'approved')))) || 0;
-      byCh[key].rj = (await countWhere(and(base, eq(messages.status, 'rejected')))) || 0;
-    }
-  } catch (e1) {
-    console.error('stats count', e1);
-    msgErr = e1;
-    // fallback سبک: یک select محدود
+  // اگر هنوز pe/ap/rj صفر و total بزرگ است — از نمونهٔ اخیر پر کن
+  if (total > 100 && pe + ap + rj === 0) {
     try {
-      const rows =
+      const recent =
         (await db
           .select({ status: messages.status, channelKey: messages.channelKey })
           .from(messages)
+          .orderBy(desc(messages.id))
+          .limit(8000)
           .all()) || [];
-      total = rows.length;
-      for (const x of rows) {
+      let rPe = 0, rAp = 0, rRj = 0;
+      const rBy = {};
+      for (const c of Object.keys(byCh)) rBy[c] = { total: 0, pe: 0, ap: 0, rj: 0 };
+      for (const x of recent) {
         const st = String(x.status || '');
         const ck = String((x.channelKey ?? x.channel_key) || '');
-        if (st === 'pending') pe++;
-        else if (st === 'approved') ap++;
-        else if (st === 'rejected') rj++;
-        if (byCh[ck]) {
-          byCh[ck].total++;
-          if (st === 'pending') byCh[ck].pe++;
-          else if (st === 'approved') byCh[ck].ap++;
-          else if (st === 'rejected') byCh[ck].rj++;
+        if (st === 'pending' || st === 'publishing') rPe++;
+        else if (st === 'approved') rAp++;
+        else if (st === 'rejected') rRj++;
+        if (rBy[ck]) {
+          rBy[ck].total++;
+          if (st === 'pending' || st === 'publishing') rBy[ck].pe++;
+          else if (st === 'approved') rBy[ck].ap++;
+          else if (st === 'rejected') rBy[ck].rj++;
         }
       }
-      msgErr = null;
-    } catch (e2) {
-      msgErr = e2;
+      const rSum = rPe + rAp + rRj || 1;
+      // مقیاس تقریبی روی کل
+      pe = Math.round((rPe / rSum) * total);
+      ap = Math.round((rAp / rSum) * total);
+      rj = Math.round((rRj / rSum) * total);
+      for (const key of Object.keys(byCh)) {
+        const s = rBy[key];
+        const sT = s.total || 0;
+        byCh[key].total = Math.round((sT / recent.length) * total);
+        byCh[key].pe = Math.round((s.pe / rSum) * total);
+        byCh[key].ap = Math.round((s.ap / rSum) * total);
+        byCh[key].rj = Math.round((s.rj / rSum) * total);
+      }
+    } catch (e3) {
+      console.error('stats recent fallback', e3);
+      msgErr = msgErr || e3;
     }
   }
 
@@ -1517,8 +1650,8 @@ export async function getStatsDashboardText() {
     userCount = Number((ur[0] && (ur[0].n != null ? ur[0].n : Object.values(ur[0])[0])) || 0);
   } catch (_e) {
     try {
-      const us = (await db.select().from(users).all()) || [];
-      userCount = us.length;
+      const us = (await db.select().from(users).limit(1).all()) || [];
+      userCount = us.length ? -1 : 0;
     } catch (_e2) {}
   }
 
@@ -1534,30 +1667,13 @@ export async function getStatsDashboardText() {
   try {
     const now = tehranNow();
     const pdate = periodDateStr(now);
-    const sh = (await db.select().from(shifts).all()) || [];
+    const sh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(500).all()) || [];
     shToday = sh.filter(function (s) {
       if (String(s.status) !== 'active') return false;
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
-      return sd === String(now.date) || sd === String(pdate) || sd === 'perm' || sd === 'permanent';
+      return sd === String(now.date) || sd === String(pdate);
     }).length;
   } catch (_e) {}
-
-  let by = '';
-  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
-    const b = byCh[c.key] || { total: 0, pe: 0, ap: 0, rj: 0 };
-    by +=
-      '• ' +
-      c.title +
-      ': ' +
-      b.total +
-      ' (🟡' +
-      b.pe +
-      ' 🟢' +
-      b.ap +
-      ' 🔴' +
-      b.rj +
-      ')\n';
-  }
 
   let todayPe = 0, todayAp = 0, todayRj = 0, todayNew = 0;
   try {
@@ -1588,6 +1704,23 @@ export async function getStatsDashboardText() {
     }
   } catch (_e) {}
 
+  let by = '';
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    const b = byCh[c.key] || { total: 0, pe: 0, ap: 0, rj: 0 };
+    by +=
+      '• ' +
+      c.title +
+      ': ' +
+      b.total +
+      ' (🟡' +
+      b.pe +
+      ' 🟢' +
+      b.ap +
+      ' 🔴' +
+      b.rj +
+      ')\n';
+  }
+
   let text =
     '📊 داشبورد آماری\n\n' +
     '📨 کل پیام‌ها: ' +
@@ -1601,6 +1734,7 @@ export async function getStatsDashboardText() {
     '\n' +
     '🔴 رد شده: ' +
     rj +
+    (other ? '\n⚪ سایر: ' + other : '') +
     '\n\n' +
     '📅 امروز (تهران)\n' +
     '📨 جدید: ' +
@@ -1613,7 +1747,7 @@ export async function getStatsDashboardText() {
     todayRj +
     '\n\n' +
     '👥 کاربران: ' +
-    userCount +
+    (userCount < 0 ? '—' : userCount) +
     '\n' +
     '👮 ادمین‌ها (یکتا): ' +
     adminUnique +
@@ -1625,8 +1759,8 @@ export async function getStatsDashboardText() {
     by;
   if (msgErr) {
     text +=
-      '\n\n⚠️ خطا در خواندن پیام‌ها:\n' +
-      String(msgErr.message || msgErr.description || msgErr).slice(0, 220);
+      '\n\n⚠️ هشدار خواندن آمار:\n' +
+      String(msgErr.message || msgErr.description || msgErr).slice(0, 180);
   }
   return text;
 }
@@ -2378,23 +2512,64 @@ export async function isReviewBatchComplete(adminId) {
 
 /** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول — بدون select همه‌ی content */
 async function selectReviewablePending(adminId) {
-  // اول فقط id/status/channel (سبک) تا timeout نشود
+  // سبک و مقیاس‌پذیر: فقط pending با limit — هرگز .all() روی ۵۰هزار ردیف
+  const LIMIT = Math.max(80, (REVIEW_BATCH_SIZE || 16) * 5);
   let light = [];
-  try {
-    light =
-      (await db
+
+  let ownerCh = '';
+  if (isOwner(adminId)) {
+    try {
+      ownerCh = String((await settingGet('owner_pend_ch:' + adminId, '')) || '');
+    } catch (_e) {}
+  }
+
+  async function queryPending(extraWhere) {
+    try {
+      let q = db
         .select({
           id: messages.id,
           status: messages.status,
           channelKey: messages.channelKey,
         })
         .from(messages)
-        .where(eq(messages.status, 'pending'))
-        .all()) || [];
+        .where(extraWhere)
+        .orderBy(asc(messages.id))
+        .limit(LIMIT);
+      return (await q.all()) || [];
+    } catch (e) {
+      console.error('queryPending', e);
+      return null;
+    }
+  }
+
+  // مسیر اصلی: status=pending (+ کانال مالک اگر انتخاب شده)
+  try {
+    let whereExpr = eq(messages.status, 'pending');
+    if (ownerCh && ownerCh !== 'all') {
+      whereExpr = and(eq(messages.status, 'pending'), eq(messages.channelKey, ownerCh));
+    }
+    light = (await queryPending(whereExpr)) || [];
   } catch (e1) {
-    console.error('selectReviewablePending light+where', e1);
+    console.error('selectReviewablePending primary', e1);
+    light = [];
+  }
+
+  // اگر خالی بود ولی ممکن است timeout بوده — یک‌بار بدون فیلتر کانال با limit
+  if (!light.length && ownerCh) {
     try {
-      light =
+      light = (await queryPending(eq(messages.status, 'pending'))) || [];
+      if (ownerCh && ownerCh !== 'all') {
+        light = light.filter(function (m) {
+          return String((m.channelKey ?? m.channel_key) || '') === ownerCh;
+        });
+      }
+    } catch (_e) {}
+  }
+
+  // آخرین تلاش: جدیدترین‌ها و فیلتر در حافظه
+  if (!light.length) {
+    try {
+      const recent =
         (await db
           .select({
             id: messages.id,
@@ -2402,35 +2577,32 @@ async function selectReviewablePending(adminId) {
             channelKey: messages.channelKey,
           })
           .from(messages)
+          .orderBy(desc(messages.id))
+          .limit(3000)
           .all()) || [];
-      light = light.filter(function (m) {
+      light = recent.filter(function (m) {
         return String(m.status) === 'pending';
       });
+      if (ownerCh && ownerCh !== 'all') {
+        light = light.filter(function (m) {
+          return String((m.channelKey ?? m.channel_key) || '') === ownerCh;
+        });
+      }
+      light.sort(function (a, b) {
+        return (Number(a.id) || 0) - (Number(b.id) || 0);
+      });
     } catch (e2) {
-      console.error('selectReviewablePending light all', e2);
+      console.error('selectReviewablePending recent', e2);
       return [];
     }
   }
-
-  light.sort(function (a, b) {
-    return (Number(a.id) || 0) - (Number(b.id) || 0);
-  });
 
   function msgCh(m) {
     return String((m.channelKey ?? m.channel_key) || '');
   }
 
   let filtered = light;
-  if (isOwner(adminId)) {
-    try {
-      const ch = await settingGet('owner_pend_ch:' + adminId, '');
-      if (ch) {
-        filtered = light.filter(function (m) {
-          return msgCh(m) === String(ch);
-        });
-      }
-    } catch (_e) {}
-  } else {
+  if (!isOwner(adminId)) {
     const allowList = await allowedReviewChannels(adminId);
     if (!allowList.length) return [];
     const allowed = {};
@@ -2446,8 +2618,7 @@ async function selectReviewablePending(adminId) {
     });
   }
 
-  // فقط به اندازه یک Batch ردیف کامل — موازی برای سرعت
-  const need = REVIEW_BATCH_SIZE;
+  const need = REVIEW_BATCH_SIZE || 16;
   const ids = filtered.slice(0, need).map(function (m) {
     return Number(m.id);
   });
