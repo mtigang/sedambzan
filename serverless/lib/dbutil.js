@@ -2757,13 +2757,14 @@ export async function isReviewBatchComplete(adminId) {
 }
 
 /** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول — بدون select همه‌ی content */
+/** Pending قابل‌بررسی — FIFO واقعی (قدیمی‌ترین id اول)
+ * اسکن نزولی فقط «جدیدترین‌های صف» را می‌دید و idهای قدیمی‌تر را ایگنور می‌کرد.
+ * مسیر: از watermark صعودی روی PK، فقط ردیف‌های pending جمع کن تا need پر شود.
+ */
 async function selectReviewablePending(adminId) {
-  /**
-   * روی جدول بزرگ، WHERE status=pending ORDER BY id ASC کل جدول را اسکن می‌کند و timeout می‌شود.
-   * مسیر مطمئن: ORDER BY id DESC LIMIT (ایندکس PK) سپس فیلتر pending در حافظه.
-   */
-  const SCAN = 4000;
   const need = Math.max(16, Number(REVIEW_BATCH_SIZE) || 16);
+  const BATCH = 700;
+  const MAX_ROUNDS = 50; // حداکثر ~35k ردیف در یک درخواست
 
   let ownerCh = '';
   if (isOwner(adminId)) {
@@ -2774,53 +2775,62 @@ async function selectReviewablePending(adminId) {
   }
 
   let allowSet = null;
+  let scopeKey = 'owner';
   if (!isOwner(adminId)) {
     try {
       const allowList = await allowedReviewChannels(adminId);
       if (!allowList || !allowList.length) return [];
       allowSet = {};
+      const keys = [];
       for (const k of allowList) {
         const nk = normalizeChannelKey(k) || String(k);
-        if (nk) allowSet[nk] = true;
+        if (nk) {
+          allowSet[nk] = true;
+          keys.push(nk);
+        }
         allowSet[String(k)] = true;
       }
+      keys.sort();
+      scopeKey = 'a:' + String(adminId) + ':' + keys.join(',');
     } catch (e) {
       console.error('selectReviewablePending allow', e);
       return [];
     }
+  } else if (ownerCh) {
+    scopeKey = 'o:' + ownerCh;
   }
 
-  let light = [];
-  try {
-    const recent =
-      (await db
-        .select({
-          id: messages.id,
-          status: messages.status,
-          channelKey: messages.channelKey,
-        })
-        .from(messages)
-        .orderBy(desc(messages.id))
-        .limit(SCAN)
-        .all()) || [];
-    for (const m of recent) {
-      const st = String(m.status || '');
-      if (st !== 'pending' && st !== 'publishing') continue;
-      const ck = String((m.channelKey ?? m.channel_key) || '');
-      const nk = normalizeChannelKey(ck) || ck;
-      if (ownerCh) {
-        if (ck !== ownerCh && nk !== ownerCh) continue;
-      }
-      if (allowSet) {
-        if (!(allowSet[ck] || allowSet[nk])) continue;
-      }
-      light.push(m);
+  function passChannel(ck) {
+    const nk = normalizeChannelKey(ck) || ck;
+    if (ownerCh) {
+      if (ck !== ownerCh && nk !== ownerCh) return false;
     }
-  } catch (e) {
-    console.error('selectReviewablePending scan', e);
-    // تلاش دوم با limit کمتر
+    if (allowSet) {
+      if (!(allowSet[ck] || allowSet[nk])) return false;
+    }
+    return true;
+  }
+
+  // watermark: آخرین idای که قبلش مطمئنیم pending مرتبط نداریم
+  let cursor = 0;
+  try {
+    const raw = await settingGet('fifo_wm:' + scopeKey, '0');
+    cursor = Math.max(0, Number(raw) || 0);
+    // کمی عقب برو تا اگر pending وسط از دست رفت جبران شود
+    if (cursor > 50) cursor = cursor - 50;
+  } catch (_e) {
+    cursor = 0;
+  }
+
+  const light = [];
+  let scanned = 0;
+  let lastSeenId = cursor;
+  let emptyRounds = 0;
+
+  for (let round = 0; round < MAX_ROUNDS && light.length < need; round++) {
+    let batch = [];
     try {
-      const recent2 =
+      batch =
         (await db
           .select({
             id: messages.id,
@@ -2828,24 +2838,73 @@ async function selectReviewablePending(adminId) {
             channelKey: messages.channelKey,
           })
           .from(messages)
-          .orderBy(desc(messages.id))
-          .limit(1200)
+          .where(sql`${messages.id} > ${cursor}`)
+          .orderBy(asc(messages.id))
+          .limit(BATCH)
           .all()) || [];
-      for (const m of recent2) {
-        if (String(m.status) !== 'pending' && String(m.status) !== 'publishing') continue;
-        const ck = String((m.channelKey ?? m.channel_key) || '');
-        const nk = normalizeChannelKey(ck) || ck;
-        if (ownerCh && ck !== ownerCh && nk !== ownerCh) continue;
-        if (allowSet && !(allowSet[ck] || allowSet[nk])) continue;
-        light.push(m);
+    } catch (e) {
+      console.error('selectReviewablePending asc', e);
+      // fallback: بدون where
+      try {
+        batch =
+          (await db
+            .select({
+              id: messages.id,
+              status: messages.status,
+              channelKey: messages.channelKey,
+            })
+            .from(messages)
+            .orderBy(asc(messages.id))
+            .limit(BATCH)
+            .all()) || [];
+        batch = batch.filter(function (m) {
+          return Number(m.id) > cursor;
+        });
+      } catch (e2) {
+        console.error('selectReviewablePending asc2', e2);
+        break;
       }
-    } catch (e2) {
-      console.error('selectReviewablePending scan2', e2);
-      return [];
     }
+    if (!batch.length) {
+      // به انتهای جدول رسیدیم — اگر چیزی پیدا نشد از اول
+      if (light.length === 0 && cursor > 0) {
+        cursor = 0;
+        emptyRounds++;
+        if (emptyRounds > 1) break;
+        continue;
+      }
+      break;
+    }
+    emptyRounds = 0;
+    for (const m of batch) {
+      const id = Number(m.id) || 0;
+      if (id > lastSeenId) lastSeenId = id;
+      cursor = id;
+      scanned++;
+      const st = String(m.status || '');
+      if (st !== 'pending' && st !== 'publishing') continue;
+      const ck = String((m.channelKey ?? m.channel_key) || '');
+      if (!passChannel(ck)) continue;
+      light.push(m);
+      if (light.length >= need) break;
+    }
+    if (batch.length < BATCH) break;
   }
 
-  // قدیمی‌ترین‌ها در نمونه اول (FIFO نسبی)
+  // watermark را جلو ببر فقط تا قبل از اولین pending پیدا‌شده
+  // تا دفعه بعد همان قدیمی‌ها را دوباره از دست ندهیم اگر بررسی نشدند
+  try {
+    if (light.length) {
+      const oldest = Number(light[0].id) || 0;
+      // کمی قبل از قدیمی‌ترین pending تا اگر reject/approve نشد دوباره دیده شود
+      await settingSet('fifo_wm:' + scopeKey, String(Math.max(0, oldest - 1)));
+    } else if (lastSeenId > 0) {
+      // هیچ pending در محدوده نبود — watermark را تا آخر اسکن ببر
+      await settingSet('fifo_wm:' + scopeKey, String(lastSeenId));
+    }
+  } catch (_e) {}
+
+  // تضمین ترتیب FIFO
   light.sort(function (a, b) {
     return (Number(a.id) || 0) - (Number(b.id) || 0);
   });
@@ -2868,9 +2927,12 @@ async function selectReviewablePending(adminId) {
       full.push(row);
     }
   }
+  // دوباره sort بر اساس id
+  full.sort(function (a, b) {
+    return (Number(a.id) || 0) - (Number(b.id) || 0);
+  });
   return full;
 }
-
 
 
 export async function finishReviewBatchIfComplete(adminId, messageId) {

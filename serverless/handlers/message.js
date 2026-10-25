@@ -218,7 +218,25 @@ function extractMedia(message) {
   return null;
 }
 
+function cloneMessageEntities(message) {
+  try {
+    const raw = (message && (message.entities || message.caption_entities)) || null;
+    if (!Array.isArray(raw) || !raw.length) return null;
+    return raw.map(function (e) {
+      const o = { type: e.type, offset: e.offset, length: e.length };
+      if (e.url) o.url = e.url;
+      if (e.language) o.language = e.language;
+      if (e.custom_emoji_id) o.custom_emoji_id = e.custom_emoji_id;
+      if (e.user && e.user.id) o.user = { id: e.user.id };
+      return o;
+    });
+  } catch (_e) {
+    return null;
+  }
+}
+
 async function copyOrSendContent(api, toChatId, message) {
+  // اول copyMessage تا بولد/کوچک/لینک/کپشن عیناً حفظ شود
   try {
     await api.copyMessage({
       chat_id: toChatId,
@@ -231,17 +249,29 @@ async function copyOrSendContent(api, toChatId, message) {
   }
   const media = extractMedia(message);
   const caption = message.caption || message.text || '';
+  const ents = cloneMessageEntities(message);
   if (!media) {
-    if (caption) await api.sendMessage({ chat_id: toChatId, text: caption });
+    if (caption) {
+      const payload = { chat_id: toChatId, text: caption };
+      if (ents) payload.entities = ents;
+      await api.sendMessage(payload);
+    }
     return;
   }
-  if (media.type === 'photo') await api.sendPhoto({ chat_id: toChatId, photo: media.fileId, caption: caption || undefined });
-  else if (media.type === 'video') await api.sendVideo({ chat_id: toChatId, video: media.fileId, caption: caption || undefined });
+  const withCap = { chat_id: toChatId };
+  if (caption) withCap.caption = caption;
+  if (ents && caption) withCap.caption_entities = ents;
+  if (media.type === 'photo') await api.sendPhoto(Object.assign({ photo: media.fileId }, withCap));
+  else if (media.type === 'video') await api.sendVideo(Object.assign({ video: media.fileId }, withCap));
   else if (media.type === 'voice') {
     await api.sendVoice({ chat_id: toChatId, voice: media.fileId });
-    if (caption) await api.sendMessage({ chat_id: toChatId, text: caption });
-  } else if (media.type === 'audio') await api.sendAudio({ chat_id: toChatId, audio: media.fileId, caption: caption || undefined });
-  else if (media.type === 'document') await api.sendDocument({ chat_id: toChatId, document: media.fileId, caption: caption || undefined });
+    if (caption) {
+      const payload = { chat_id: toChatId, text: caption };
+      if (ents) payload.entities = ents;
+      await api.sendMessage(payload);
+    }
+  } else if (media.type === 'audio') await api.sendAudio(Object.assign({ audio: media.fileId }, withCap));
+  else if (media.type === 'document') await api.sendDocument(Object.assign({ document: media.fileId }, withCap));
   else if (media.type === 'video_note') await api.sendVideoNote({ chat_id: toChatId, video_note: media.fileId });
   else if (media.type === 'sticker') await api.sendSticker({ chat_id: toChatId, sticker: media.fileId });
 }
@@ -498,9 +528,14 @@ export default async function (message) {
       }
       const media = extractMedia(message);
       const chKey = String(state.channelKey || '');
+      let postEntities = null;
+      try {
+        postEntities = cloneMessageEntities(message);
+      } catch (_e) {}
       await setState(userId, 'post_confirm', {
         channelKey: chKey,
         postText: text || message.caption || '',
+        postEntities: postEntities,
         media: media,
         fromChatId: chatId,
         fromMsgId: message.message_id,

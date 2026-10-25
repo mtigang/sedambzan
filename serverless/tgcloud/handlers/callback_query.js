@@ -2544,31 +2544,52 @@ const res = await createReviewBatch(userId);
         const conf = DEFAULT_CHANNELS[st.channelKey];
         const chId = conf && conf.chatId;
         let sent = null;
-        if (st.media && st.media.fileId && chId) {
-          const cap = st.postText || undefined;
-          const t = st.media.type;
-          if (t === 'photo') sent = await api.sendPhoto({ chat_id: chId, photo: st.media.fileId, caption: cap });
-          else if (t === 'video') sent = await api.sendVideo({ chat_id: chId, video: st.media.fileId, caption: cap });
-          else if (t === 'voice') {
-            sent = await api.sendVoice({ chat_id: chId, voice: st.media.fileId });
-            if (cap) await api.sendMessage({ chat_id: chId, text: cap });
-          } else if (t === 'audio') sent = await api.sendAudio({ chat_id: chId, audio: st.media.fileId, caption: cap });
-          else if (t === 'document') sent = await api.sendDocument({ chat_id: chId, document: st.media.fileId, caption: cap });
-          else if (t === 'video_note') sent = await api.sendVideoNote({ chat_id: chId, video_note: st.media.fileId });
-          else if (t === 'sticker') sent = await api.sendSticker({ chat_id: chId, sticker: st.media.fileId });
-          else sent = await postToChannel(st.channelKey, st.postText || '');
-        } else if (st.fromChatId && st.fromMsgId && chId) {
+        // اولویت: copyMessage تا قالب (بولد/کوچک/لینک) حفظ شود
+        if (st.fromChatId && st.fromMsgId && chId) {
           try {
             sent = await api.copyMessage({
               chat_id: chId,
               from_chat_id: st.fromChatId,
               message_id: st.fromMsgId,
             });
-          } catch (_e) {
+          } catch (eCopy) {
+            console.error('post_yes copyMessage', eCopy);
+            sent = null;
+          }
+        }
+        if (!sent && st.media && st.media.fileId && chId) {
+          const cap = st.postText || undefined;
+          const ents = Array.isArray(st.postEntities) && st.postEntities.length ? st.postEntities : null;
+          const t = st.media.type;
+          const base = { chat_id: chId };
+          if (cap) base.caption = cap;
+          if (ents && cap) base.caption_entities = ents;
+          if (t === 'photo') sent = await api.sendPhoto(Object.assign({ photo: st.media.fileId }, base));
+          else if (t === 'video') sent = await api.sendVideo(Object.assign({ video: st.media.fileId }, base));
+          else if (t === 'voice') {
+            sent = await api.sendVoice({ chat_id: chId, voice: st.media.fileId });
+            if (cap) {
+              const p = { chat_id: chId, text: cap };
+              if (ents) p.entities = ents;
+              await api.sendMessage(p);
+            }
+          } else if (t === 'audio') sent = await api.sendAudio(Object.assign({ audio: st.media.fileId }, base));
+          else if (t === 'document') sent = await api.sendDocument(Object.assign({ document: st.media.fileId }, base));
+          else if (t === 'video_note') sent = await api.sendVideoNote({ chat_id: chId, video_note: st.media.fileId });
+          else if (t === 'sticker') sent = await api.sendSticker({ chat_id: chId, sticker: st.media.fileId });
+        }
+        if (!sent) {
+          // متن خالی با entities
+          const ents = Array.isArray(st.postEntities) && st.postEntities.length ? st.postEntities : null;
+          if (ents && st.postText && chId) {
+            try {
+              sent = await api.sendMessage({ chat_id: chId, text: st.postText, entities: ents });
+            } catch (_e) {
+              sent = await postToChannel(st.channelKey, st.postText || '');
+            }
+          } else {
             sent = await postToChannel(st.channelKey, st.postText || '');
           }
-        } else {
-          sent = await postToChannel(st.channelKey, st.postText || '');
         }
         await clearState(userId);
         const link = await resolveChannelMessageLink(conf && conf.chatId, sent && sent.message_id, st.channelKey);
