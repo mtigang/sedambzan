@@ -36,6 +36,8 @@ import {
   addChannelAdmin,
   getRole,
   decideMessage,
+  loadUserMessages,
+  rememberUserMessageId,
   reserveMessageForPublish,
   canCompletePublishing,
   dropMessageFromAllReviewBatches,
@@ -588,23 +590,11 @@ if (data.startsWith('ban_user:')) {
       const un = u && u.username ? '@' + u.username : '—';
       await api.answerCallbackQuery({ callback_query_id: cq.id });
 
-      // پیام‌های کاربر (حداکثر ۲۰۰ اخیر) — بدون اسکن کل جدول
+      // پیام‌های کاربر
       let pe = 0, ap = 0, rj = 0;
       let lastLines = [];
       try {
-        const ms =
-          (await db
-            .select({
-              id: messages.id,
-              status: messages.status,
-              content: messages.content,
-              submittedAt: messages.submittedAt,
-            })
-            .from(messages)
-            .where(eq(messages.userId, uid))
-            .orderBy(desc(messages.id))
-            .limit(200)
-            .all()) || [];
+        const ms = await loadUserMessages(uid, 40, { maxRounds: 25 });
         for (const m of ms) {
           const st = String(m.status || '');
           if (st === 'pending' || st === 'publishing') pe++;
@@ -1725,19 +1715,7 @@ const res = await createReviewBatch(userId);
       let pe = 0, ap = 0, rj = 0;
       let ms = [];
       try {
-        ms =
-          (await db
-            .select({
-              id: messages.id,
-              status: messages.status,
-              content: messages.content,
-              submittedAt: messages.submittedAt,
-            })
-            .from(messages)
-            .where(eq(messages.userId, uid))
-            .orderBy(desc(messages.id))
-            .limit(200)
-            .all()) || [];
+        ms = await loadUserMessages(uid, 40, { maxRounds: 25 });
         for (const m of ms) {
           const st = String(m.status || '');
           if (st === 'pending' || st === 'publishing') pe++;

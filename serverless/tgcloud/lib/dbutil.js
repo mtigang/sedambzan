@@ -138,6 +138,7 @@ export async function settingGet(key, def = null) {
   }
 }
 
+
 export async function settingSet(key, value) {
   const v = String(value);
   try {
@@ -152,6 +153,188 @@ export async function settingSet(key, value) {
     console.error('settingSet', e);
   }
 }
+
+/** ایندکس سبک آخرین پیام‌های هر کاربر در settings (بدون تغییر schema) */
+export async function rememberUserMessageId(userId, msgId) {
+  const uid = Number(userId);
+  const mid = Number(msgId);
+  if (!Number.isFinite(uid) || !Number.isFinite(mid) || mid <= 0) return;
+  const key = 'umsg:' + uid;
+  let ids = [];
+  try {
+    const raw = await settingGet(key, '[]');
+    const parsed = JSON.parse(String(raw || '[]'));
+    if (Array.isArray(parsed)) ids = parsed.map(Number).filter(function (x) { return Number.isFinite(x) && x > 0; });
+  } catch (_e) {}
+  ids = [mid].concat(ids.filter(function (x) { return x !== mid; })).slice(0, 50);
+  try {
+    await settingSet(key, JSON.stringify(ids));
+  } catch (_e) {}
+}
+
+/**
+ * بارگذاری امن پیام‌های یک کاربر بدون WHERE روی userId روی کل جدول
+ * (جلوگیری از Sqlite rows_read limit exceeded)
+ * @returns {Promise<Array>}
+ */
+export async function loadUserMessages(userId, limit, opts) {
+  const uid = Number(userId);
+  const lim = Math.max(1, Math.min(Number(limit) || 30, 80));
+  const maxRounds = (opts && opts.maxRounds) || 20;
+  const batchSize = 600;
+  const out = [];
+  const seen = Object.create(null);
+
+  if (!Number.isFinite(uid) || uid <= 0) return out;
+
+  // ۱) ایندکس settings
+  try {
+    const raw = await settingGet('umsg:' + uid, '');
+    if (raw) {
+      const ids = JSON.parse(String(raw));
+      if (Array.isArray(ids)) {
+        for (const id0 of ids) {
+          const id = Number(id0);
+          if (!Number.isFinite(id) || seen[id]) continue;
+          try {
+            const rows =
+              (await db
+                .select({
+                  id: messages.id,
+                  userId: messages.userId,
+                  status: messages.status,
+                  content: messages.content,
+                  channelKey: messages.channelKey,
+                  submittedAt: messages.submittedAt,
+                  reviewedAt: messages.reviewedAt,
+                  reviewedBy: messages.reviewedBy,
+                })
+                .from(messages)
+                .where(eq(messages.id, id))
+                .limit(1)
+                .all()) || [];
+            if (rows[0]) {
+              seen[id] = 1;
+              out.push(rows[0]);
+            }
+          } catch (_e) {}
+          if (out.length >= lim) break;
+        }
+      }
+    }
+  } catch (_e) {}
+
+  if (out.length >= lim) {
+    return out.sort(function (a, b) { return Number(b.id) - Number(a.id); }).slice(0, lim);
+  }
+
+  // ۲) اسکن دسته‌ای روی PK (id نزولی) با cursor — هر دسته فقط batchSize ردیف می‌خواند
+  let cursor = Number.MAX_SAFE_INTEGER;
+  if (out.length) {
+    // ادامه زیر کوچک‌ترین id دیده‌شده
+    cursor = Math.min.apply(null, out.map(function (r) { return Number(r.id); }));
+  }
+  for (let round = 0; round < maxRounds && out.length < lim; round++) {
+    let batch = [];
+    try {
+      if (cursor < Number.MAX_SAFE_INTEGER) {
+        batch =
+          (await db
+            .select({
+              id: messages.id,
+              userId: messages.userId,
+              status: messages.status,
+              content: messages.content,
+              channelKey: messages.channelKey,
+              submittedAt: messages.submittedAt,
+              reviewedAt: messages.reviewedAt,
+              reviewedBy: messages.reviewedBy,
+            })
+            .from(messages)
+            .where(sql`${messages.id} < ${cursor}`)
+            .orderBy(desc(messages.id))
+            .limit(batchSize)
+            .all()) || [];
+      } else {
+        batch =
+          (await db
+            .select({
+              id: messages.id,
+              userId: messages.userId,
+              status: messages.status,
+              content: messages.content,
+              channelKey: messages.channelKey,
+              submittedAt: messages.submittedAt,
+              reviewedAt: messages.reviewedAt,
+              reviewedBy: messages.reviewedBy,
+            })
+            .from(messages)
+            .orderBy(desc(messages.id))
+            .limit(batchSize)
+            .all()) || [];
+      }
+    } catch (e) {
+      console.error('loadUserMessages batch', round, e);
+      break;
+    }
+    if (!batch.length) break;
+    for (const row of batch) {
+      const id = Number(row.id);
+      if (id < cursor) cursor = id;
+      if (Number(row.userId ?? row.user_id) !== uid) continue;
+      if (seen[id]) continue;
+      seen[id] = 1;
+      out.push(row);
+      if (out.length >= lim) break;
+    }
+    const lastId = Number(batch[batch.length - 1].id);
+    if (!Number.isFinite(lastId) || lastId <= 1) break;
+    cursor = lastId;
+    if (batch.length < batchSize) break;
+  }
+
+  return out.sort(function (a, b) { return Number(b.id) - Number(a.id); }).slice(0, lim);
+}
+
+/** شمارش امن pending — فقط از پیام‌های اخیر (pending تقریباً همیشه در انتهاست) */
+export async function countRecentByStatus(maxScan) {
+  const scan = Math.max(500, Math.min(Number(maxScan) || 12000, 20000));
+  const byCh = Object.create(null);
+  let pe = 0, ap = 0, rj = 0, other = 0;
+  try {
+    const rows =
+      (await db
+        .select({
+          status: messages.status,
+          channelKey: messages.channelKey,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(scan)
+        .all()) || [];
+    for (const x of rows) {
+      const st = String(x.status || '');
+      const ck = String((x.channelKey ?? x.channel_key) || '');
+      if (!byCh[ck]) byCh[ck] = { pe: 0, ap: 0, rj: 0, total: 0 };
+      byCh[ck].total++;
+      if (st === 'pending' || st === 'publishing') {
+        pe++;
+        byCh[ck].pe++;
+      } else if (st === 'approved') {
+        ap++;
+        byCh[ck].ap++;
+      } else if (st === 'rejected') {
+        rj++;
+        byCh[ck].rj++;
+      } else other++;
+    }
+    return { pe: pe, ap: ap, rj: rj, other: other, scanned: rows.length, byCh: byCh };
+  } catch (e) {
+    console.error('countRecentByStatus', e);
+    return { pe: 0, ap: 0, rj: 0, other: 0, scanned: 0, byCh: byCh };
+  }
+}
+
 
 
 /** ذخیره نگاشت دوطرفه message_id کانال ↔ آیدی داخلی */
@@ -1645,8 +1828,39 @@ export async function getStatsDashboardText() {
     rj = sRj;
   }
 
-  // شمارش دقیق‌تر pending با اسکن همان نمونه (صف واقعی اخیر)
-  // pe از بالا کافی است
+  // pending معمولاً در انتهای جدول است — اسکن عمیق‌تر بدون مقیاس اشتباه
+  try {
+    const deep = await countRecentByStatus(15000);
+    if (deep && deep.scanned > 0) {
+      pe = deep.pe;
+      // approved/rejected کل: اگر total داریم، باقی را تقریب بزن
+      if (total > 0) {
+        const rest = Math.max(0, total - pe);
+        // نسبت ap/rj از نمونه عمیق
+        const ar = (deep.ap + deep.rj) || 1;
+        ap = Math.round(rest * (deep.ap / ar));
+        rj = Math.max(0, rest - ap);
+      } else {
+        ap = deep.ap;
+        rj = deep.rj;
+      }
+      for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+        const d = deep.byCh[c.key] || { pe: 0, ap: 0, rj: 0, total: 0 };
+        byCh[c.key] = {
+          total: d.total,
+          pe: d.pe,
+          ap: d.ap,
+          rj: d.rj,
+          title: c.title,
+        };
+      }
+      note =
+        String.fromCharCode(10, 10) +
+        'ℹ️ صف انتظار از ' +
+        deep.scanned +
+        ' پیام انتهای جدول (بدون مقیاس نادرست).';
+    }
+  } catch (_e) {}
 
   let userCount = 0;
   try {

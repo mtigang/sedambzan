@@ -25,7 +25,9 @@ import {
   pruneOldestMessageIfOverBudget,
   FRIDAY_MODE_TEXT,
   QUEUE_BUSY_TEXT,
-  getUser, findBodyDuplicate } from 'lib/dbutil';
+  getUser, findBodyDuplicate,
+  rememberUserMessageId,
+} from 'lib/dbutil';
 
 function isOwner(uid) {
   return (OWNER_IDS || []).map(Number).includes(Number(uid));
@@ -293,6 +295,11 @@ export async function submitUserMessage(userId, text) {
     if (msgId != null && bodyKey) {
       try {
         await settingSet(bIdx, String(msgId) + '|pending');
+      } catch (_e) {}
+    }
+    if (msgId != null) {
+      try {
+        await rememberUserMessageId(uid, msgId);
       } catch (_e) {}
     }
 

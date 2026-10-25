@@ -132,6 +132,8 @@ import {
   checkInactiveShiftAndCancel,
   restoreMistakenlyCancelledShifts,
   getStatsDashboardText,
+  loadUserMessages,
+  rememberUserMessageId,
   findBodyDuplicate,
   loadWorkHoursFromSettings,
   saveWorkHours,
@@ -1055,26 +1057,7 @@ if (text === '📝 ارسال پیام') {
     if (text === '📊 وضعیت پیام من') {
       let list = [];
       try {
-        // بدون WHERE روی userId تا rows_read limit نخورد
-        const sample =
-          (await db
-            .select({
-              id: messages.id,
-              userId: messages.userId,
-              status: messages.status,
-              content: messages.content,
-              submittedAt: messages.submittedAt,
-            })
-            .from(messages)
-            .orderBy(desc(messages.id))
-            .limit(4000)
-            .all()) || [];
-        const uidN = Number(userId);
-        list = sample
-          .filter(function (r) {
-            return Number(r.userId ?? r.user_id) === uidN;
-          })
-          .slice(0, 15);
+        list = await loadUserMessages(userId, 15, { maxRounds: 30 });
       } catch (eSt) {
         console.error('status msgs', eSt);
         await api.sendMessage({
@@ -1461,6 +1444,7 @@ if (text === '📝 ارسال پیام') {
           if (msgId != null && bodyKey) {
             try {
               await settingSet(bodyIndexSettingKey(v.channelKey, bodyKey), String(msgId) + '|pending');
+              try { await rememberUserMessageId(userId, msgId); } catch (_e) {}
             } catch (_e) {}
           }
           try {
@@ -3507,10 +3491,16 @@ try {
         return;
       }
       const uu = await getUser(id);
-      const ms = (await db.select().from(messages).where(eq(messages.userId, id)).all()) || [];
-      const pe = ms.filter((x) => x.status === 'pending').length;
-      const ap = ms.filter((x) => x.status === 'approved').length;
-      const rj = ms.filter((x) => x.status === 'rejected').length;
+      let ms = [];
+      try {
+        ms = await loadUserMessages(id, 40, { maxRounds: 25 });
+      } catch (eLoad) {
+        console.error('search_user load', eLoad);
+        ms = [];
+      }
+      const pe = ms.filter(function (x) { return x.status === 'pending' || x.status === 'publishing'; }).length;
+      const ap = ms.filter(function (x) { return x.status === 'approved'; }).length;
+      const rj = ms.filter(function (x) { return x.status === 'rejected'; }).length;
       const map = { pending: '🟡', approved: '🟢', rejected: '🔴' };
       let photoMsg = null;
       try {
