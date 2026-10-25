@@ -1709,24 +1709,24 @@ export async function getStatsDashboardText() {
       b.ap +
       ' 🔴' +
       b.rj +
-      ')\\n';
+      ')\n';
   }
 
   let text =
-    '📊 داشبورد آماری\\n\\n' +
+    '📊 داشبورد آماری\n\n' +
     '📨 کل پیام‌ها: ' +
     total +
-    '\\n' +
+    '\n' +
     '🟡 در انتظار: ' +
     pe +
-    '\\n' +
+    '\n' +
     '🟢 تأیید شده: ' +
     ap +
-    '\\n' +
+    '\n' +
     '🔴 رد شده: ' +
     rj +
-    '\\n\\n' +
-    '📅 امروز (تهران)\\n' +
+    '\n\n' +
+    '📅 امروز (تهران)\n' +
     '📨 جدید: ' +
     todayNew +
     ' | 🟡 صف: ' +
@@ -1735,17 +1735,17 @@ export async function getStatsDashboardText() {
     todayAp +
     ' | 🔴' +
     todayRj +
-    '\\n\\n' +
+    '\n\n' +
     '👥 کاربران: ' +
     userCount +
-    '\\n' +
+    '\n' +
     '👮 ادمین‌ها (یکتا): ' +
     adminUnique +
-    '\\n' +
+    '\n' +
     '⏰ شیفت فعال امروز: ' +
     shToday +
-    '\\n\\n' +
-    '📺 تفکیک کانال:\\n' +
+    '\n\n' +
+    '📺 تفکیک کانال:\n' +
     by +
     note;
   return text;

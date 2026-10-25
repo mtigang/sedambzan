@@ -1053,13 +1053,30 @@ if (text === '📝 ارسال پیام') {
     }
 
     if (text === '📊 وضعیت پیام من') {
-      const rows =
-        (await db
-          .select()
-          .from(messages)
-          .where(eq(messages.userId, userId))
-          .all()) || [];
-      const list = rows.sort((a, b) => (b.id || 0) - (a.id || 0)).slice(0, 15);
+      let list = [];
+      try {
+        list =
+          (await db
+            .select({
+              id: messages.id,
+              status: messages.status,
+              content: messages.content,
+              submittedAt: messages.submittedAt,
+            })
+            .from(messages)
+            .where(eq(messages.userId, userId))
+            .orderBy(desc(messages.id))
+            .limit(15)
+            .all()) || [];
+      } catch (eSt) {
+        console.error('status msgs', eSt);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '⚠️ خطا در خواندن وضعیت پیام‌ها. چند ثانیه بعد دوباره بزنید.',
+          reply_markup: await roleKb(userId),
+        });
+        return;
+      }
       if (!list.length) {
         await api.sendMessage({
           chat_id: chatId,

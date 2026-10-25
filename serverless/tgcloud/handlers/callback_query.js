@@ -563,7 +563,6 @@ if (data.startsWith('ban_user:')) {
 
     
     if (data.startsWith('uv:')) {
-      // فقط مالک یا ادمین/ساب‌لیدر
       try {
         const roleUv = await getRole(userId);
         if (!isOwner(userId) && roleUv !== 'admin' && roleUv !== 'subleader' && roleUv !== 'sub_leader') {
@@ -577,69 +576,115 @@ if (data.startsWith('ban_user:')) {
         }
       }
       const uid = Number(data.slice(3));
+      if (!Number.isFinite(uid) || uid <= 0) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'آیدی نامعتبر', show_alert: true });
+        return;
+      }
       let u = null;
       try { u = await getUser(uid); } catch (_) {}
       const name = u
         ? [u.firstName, u.lastName].filter(Boolean).join(' ') || u.username || String(uid)
         : String(uid);
-      const un = u?.username ? '@' + u.username : '—';
+      const un = u && u.username ? '@' + u.username : '—';
       await api.answerCallbackQuery({ callback_query_id: cq.id });
 
-      // عملکرد ۷ روز گذشته به تفکیک روز
+      // پیام‌های کاربر (حداکثر ۲۰۰ اخیر) — بدون اسکن کل جدول
+      let pe = 0, ap = 0, rj = 0;
+      let lastLines = [];
+      try {
+        const ms =
+          (await db
+            .select({
+              id: messages.id,
+              status: messages.status,
+              content: messages.content,
+              submittedAt: messages.submittedAt,
+            })
+            .from(messages)
+            .where(eq(messages.userId, uid))
+            .orderBy(desc(messages.id))
+            .limit(200)
+            .all()) || [];
+        for (const m of ms) {
+          const st = String(m.status || '');
+          if (st === 'pending' || st === 'publishing') pe++;
+          else if (st === 'approved') ap++;
+          else if (st === 'rejected') rj++;
+        }
+        const map = { pending: '🟡', approved: '🟢', rejected: '🔴', publishing: '⏳' };
+        for (const row of ms.slice(0, 12)) {
+          const short = String(row.content || '').replace(/\n/g, ' ').slice(0, 60);
+          lastLines.push((map[row.status] || '•') + ' #' + row.id + ' | ' + short);
+        }
+      } catch (e) {
+        console.error('uv msgs', e);
+      }
+
+      // عملکرد بررسی‌کننده (اگر ادمین بوده) — فقط ۳۰۰ ردیف اخیر
       let perfLines = [];
       try {
-        const all =
-          (await db.select().from(messages).where(eq(messages.reviewedBy, uid)).all()) || [];
+        const revs =
+          (await db
+            .select({
+              status: messages.status,
+              reviewedAt: messages.reviewedAt,
+            })
+            .from(messages)
+            .where(eq(messages.reviewedBy, uid))
+            .orderBy(desc(messages.id))
+            .limit(300)
+            .all()) || [];
         const now = Date.now();
         const dayMs = 24 * 60 * 60 * 1000;
         const labels = ['امروز', 'دیروز', '۲ روز پیش', '۳ روز پیش', '۴ روز پیش', '۵ روز پیش', '۶ روز پیش'];
         for (let d = 0; d < 7; d++) {
           const start = now - (d + 1) * dayMs;
           const end = now - d * dayMs;
-          const dayRows = all.filter(function (m) {
-            if (!m.reviewedAt) return false;
+          let dayAp = 0, dayRj = 0;
+          for (const m of revs) {
+            if (!m.reviewedAt) continue;
             const t = new Date(m.reviewedAt).getTime();
-            return t >= start && t < end;
-          });
-          const ap = dayRows.filter(function (m) { return m.status === 'approved'; }).length;
-          const rj = dayRows.filter(function (m) { return m.status === 'rejected'; }).length;
-          perfLines.push(labels[d] + ': ' + ap + ' تأیید، ' + rj + ' رد');
+            if (t >= start && t < end) {
+              if (m.status === 'approved') dayAp++;
+              else if (m.status === 'rejected') dayRj++;
+            }
+          }
+          perfLines.push(labels[d] + ': ' + dayAp + ' تأیید، ' + dayRj + ' رد');
         }
       } catch (e) {
         console.error('uv perf', e);
       }
-      const caption =
+
+      let caption =
         '👤 ' + name +
         '\nیوزرنیم: ' + un +
         '\nآیدی: ' + uid +
-        (perfLines.length ? '\n\n📊 عملکرد ۷ روز گذشته:\n' + perfLines.join('\n') : '');
-
-      let sentPhoto = false;
+        '\nنقش: ' + ((u && u.role) || 'user') +
+        '\n📨 اخیر: 🟡' + pe + ' 🟢' + ap + ' 🔴' + rj;
       try {
-        const photos = await api.getUserProfilePhotos({ user_id: uid, limit: 1 });
-        const fileId = photos && photos.photos && photos.photos[0] && photos.photos[0][0] && photos.photos[0][0].file_id;
-        if (fileId) {
-          await api.sendPhoto({
-            chat_id: cq.message.chat.id,
-            photo: fileId,
-            caption: caption.slice(0, 1024),
-          });
-          sentPhoto = true;
-        }
-      } catch (e) {
-        console.error('uv photo', e);
-      }
-      if (!sentPhoto) {
+        if (u && u.createdAt) caption += '\n📅 عضویت: ' + formatTsJalali(u.createdAt);
+      } catch (_e) {}
+      if (perfLines.length) caption += '\n\n📊 عملکرد بررسی (نمونه اخیر):\n' + perfLines.join('\n');
+      if (lastLines.length) caption += '\n\nآخرین پیام‌ها:\n' + lastLines.join('\n');
+
+      try {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: caption,
+          text: caption.slice(0, 3900),
         });
+      } catch (e) {
+        console.error('uv send', e);
+        try {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: '👤 ' + name + '\nآیدی: ' + uid + '\n(جزئیات کامل در دسترس نبود)',
+          });
+        } catch (_e2) {}
       }
       return;
     }
 
-    
-    // فراخوان قوانین در کانال + سنجاق
+
     if (data.startsWith('callout:')) {
       const channelKey = data.split(':')[1];
       await api.answerCallbackQuery({ callback_query_id: cq.id });
@@ -1669,14 +1714,40 @@ const res = await createReviewBatch(userId);
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
-      const uid = Number(data.split(':')[1]);
+      const uid = Number(data.slice(8));
+      if (!Number.isFinite(uid) || uid <= 0) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'آیدی نامعتبر', show_alert: true });
+        return;
+      }
       await api.answerCallbackQuery({ callback_query_id: cq.id });
-      const uu = await getUser(uid);
-      const ms = (await db.select().from(messages).where(eq(messages.userId, uid)).all()) || [];
-      const pe = ms.filter(function (m) { return m.status === 'pending'; }).length;
-      const ap = ms.filter(function (m) { return m.status === 'approved'; }).length;
-      const rj = ms.filter(function (m) { return m.status === 'rejected'; }).length;
-      const map = { pending: '🟡', approved: '🟢', rejected: '🔴' };
+      let uu = null;
+      try { uu = await getUser(uid); } catch (_e) {}
+      let pe = 0, ap = 0, rj = 0;
+      let ms = [];
+      try {
+        ms =
+          (await db
+            .select({
+              id: messages.id,
+              status: messages.status,
+              content: messages.content,
+              submittedAt: messages.submittedAt,
+            })
+            .from(messages)
+            .where(eq(messages.userId, uid))
+            .orderBy(desc(messages.id))
+            .limit(200)
+            .all()) || [];
+        for (const m of ms) {
+          const st = String(m.status || '');
+          if (st === 'pending' || st === 'publishing') pe++;
+          else if (st === 'approved') ap++;
+          else if (st === 'rejected') rj++;
+        }
+      } catch (e) {
+        console.error('fb_user msgs', e);
+      }
+      const map = { pending: '🟡', approved: '🟢', rejected: '🔴', publishing: '⏳' };
       let body =
         '👤 ' +
         displayName(uu, uid) +
@@ -1685,9 +1756,7 @@ const res = await createReviewBatch(userId);
         (uu && uu.username ? '\n@' + uu.username : '') +
         '\nنقش: ' +
         ((uu && uu.role) || 'user') +
-        '\n📨 پیام‌ها: ' +
-        ms.length +
-        ' | 🟡' +
+        '\n📨 اخیر (حداکثر ۲۰۰): 🟡' +
         pe +
         ' 🟢' +
         ap +
@@ -1698,16 +1767,16 @@ const res = await createReviewBatch(userId);
       } catch (_e) {}
       await api.sendMessage({ chat_id: cq.message.chat.id, text: body });
       if (ms.length) {
-        const last = ms.sort(function (a, b) { return b.id - a.id; }).slice(0, 15);
         let list = 'آخرین پیام‌ها:\n';
-        for (const row of last) {
-          const short = (row.content || '').replace(/\n/g, ' ').slice(0, 70);
-          list += (map[row.status] || '•') + ' #' + row.id + ' | ' + row.status + '\n' + short + '\n\n';
+        for (const row of ms.slice(0, 15)) {
+          const short = String(row.content || '').replace(/\n/g, ' ').slice(0, 70);
+          list += (map[row.status] || '•') + ' #' + row.id + ' | ' + (row.status || '') + '\n' + short + '\n\n';
         }
         await api.sendMessage({ chat_id: cq.message.chat.id, text: list.slice(0, 3500) });
       }
       return;
     }
+
 
     if (data.startsWith('adel:')) {
       if (!isOwner(userId)) {
