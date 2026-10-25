@@ -1695,6 +1695,7 @@ export async function getStatsDashboardText() {
     }
   } catch (_e) {}
 
+  const _nl = String.fromCharCode(10);
   let by = '';
   for (const c of Object.values(DEFAULT_CHANNELS || {})) {
     const b = byCh[c.key] || { total: 0, pe: 0, ap: 0, rj: 0 };
@@ -1709,24 +1710,29 @@ export async function getStatsDashboardText() {
       b.ap +
       ' 🔴' +
       b.rj +
-      ')\n';
+      ')' +
+      _nl;
   }
 
   let text =
-    '📊 داشبورد آماری\n\n' +
+    '📊 داشبورد آماری' +
+    _nl +
+    _nl +
     '📨 کل پیام‌ها: ' +
     total +
-    '\n' +
+    _nl +
     '🟡 در انتظار: ' +
     pe +
-    '\n' +
+    _nl +
     '🟢 تأیید شده: ' +
     ap +
-    '\n' +
+    _nl +
     '🔴 رد شده: ' +
     rj +
-    '\n\n' +
-    '📅 امروز (تهران)\n' +
+    _nl +
+    _nl +
+    '📅 امروز (تهران)' +
+    _nl +
     '📨 جدید: ' +
     todayNew +
     ' | 🟡 صف: ' +
@@ -1735,19 +1741,25 @@ export async function getStatsDashboardText() {
     todayAp +
     ' | 🔴' +
     todayRj +
-    '\n\n' +
+    _nl +
+    _nl +
     '👥 کاربران: ' +
     userCount +
-    '\n' +
+    _nl +
     '👮 ادمین‌ها (یکتا): ' +
     adminUnique +
-    '\n' +
+    _nl +
     '⏰ شیفت فعال امروز: ' +
     shToday +
-    '\n\n' +
-    '📺 تفکیک کانال:\n' +
+    _nl +
+    _nl +
+    '📺 تفکیک کانال:' +
+    _nl +
     by +
     note;
+  if (text.indexOf('\n') >= 0) {
+    text = text.split('\n').join(_nl);
+  }
   return text;
 }
 

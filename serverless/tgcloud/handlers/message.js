@@ -1055,19 +1055,26 @@ if (text === '📝 ارسال پیام') {
     if (text === '📊 وضعیت پیام من') {
       let list = [];
       try {
-        list =
+        // بدون WHERE روی userId تا rows_read limit نخورد
+        const sample =
           (await db
             .select({
               id: messages.id,
+              userId: messages.userId,
               status: messages.status,
               content: messages.content,
               submittedAt: messages.submittedAt,
             })
             .from(messages)
-            .where(eq(messages.userId, userId))
             .orderBy(desc(messages.id))
-            .limit(15)
+            .limit(4000)
             .all()) || [];
+        const uidN = Number(userId);
+        list = sample
+          .filter(function (r) {
+            return Number(r.userId ?? r.user_id) === uidN;
+          })
+          .slice(0, 15);
       } catch (eSt) {
         console.error('status msgs', eSt);
         await api.sendMessage({
@@ -1106,7 +1113,7 @@ if (text === '📝 ارسال پیام') {
         if (st === 'pending') {
           cancelRows.push([
             {
-              text: 'لغو #' + row.id,
+              text: '#' + row.id,
               callback_data: 'ucancel:' + row.id,
               style: 'danger',
             },
@@ -1730,10 +1737,10 @@ let note =
           shiftHead += '────────────\n';
         } catch (_e) {}
 
-        // فقط پیام‌های بررسی‌شده توسط همین کاربر (نه کل جدول)
+        // اسکن PK نزولی — فیلتر reviewedBy در حافظه (بدون rows_read روی WHERE)
         let mine = [];
         try {
-          mine =
+          const sample =
             (await db
               .select({
                 id: messages.id,
@@ -1743,29 +1750,16 @@ let note =
                 reviewedBy: messages.reviewedBy,
               })
               .from(messages)
-              .where(eq(messages.reviewedBy, Number(userId)))
+              .orderBy(desc(messages.id))
+              .limit(8000)
               .all()) || [];
+          const uidN = Number(userId);
+          mine = sample.filter(function (x) {
+            return Number(x.reviewedBy ?? x.reviewed_by) === uidN;
+          });
         } catch (e1) {
           console.error('perf mine', e1);
-          try {
-            const light =
-              (await db
-                .select({
-                  id: messages.id,
-                  status: messages.status,
-                  channelKey: messages.channelKey,
-                  reviewedAt: messages.reviewedAt,
-                  reviewedBy: messages.reviewedBy,
-                })
-                .from(messages)
-                .all()) || [];
-            mine = light.filter(function (x) {
-              return Number(x.reviewedBy ?? x.reviewed_by) === Number(userId);
-            });
-          } catch (e2) {
-            console.error('perf mine fallback', e2);
-            mine = [];
-          }
+          mine = [];
         }
 
         function isToday(row) {
@@ -1870,6 +1864,7 @@ let note =
           }
         } catch (_e) {}
 
+        body = String(body || '').split('\n').join(String.fromCharCode(10));
         await api.sendMessage({
           chat_id: chatId,
           text: body.slice(0, 4000),
@@ -3102,7 +3097,8 @@ try {
 
     if (owner && text === '📊 آمار') {
       try {
-        const text = await getStatsDashboardText();
+        let text = await getStatsDashboardText();
+        text = String(text || '').split('\n').join(String.fromCharCode(10));
         await api.sendMessage({
           chat_id: chatId,
           text: text,
@@ -3152,7 +3148,7 @@ try {
           } catch (_e) {}
           const content = String(row.content || '');
           const delM = content.match(/DEL_REQ:(\d+)/);
-          let kb = feedbackInline(row.id, row.userId);
+          let kb = feedbackInline(row.id, Number(row.userId ?? row.user_id));
           if (delM) {
             const midDel = delM[1];
             kb = sanitizeMarkup({
@@ -3170,7 +3166,7 @@ try {
                   },
                 ],
                 [
-                  { text: 'مشاهده کاربر', callback_data: 'fb_user:' + row.userId },
+                  { text: 'مشاهده کاربر', callback_data: 'fb_user:' + (row.userId ?? row.user_id) },
                   { text: 'بسته شد', callback_data: 'fb_close:' + row.id, style: 'danger' },
                 ],
               ],
