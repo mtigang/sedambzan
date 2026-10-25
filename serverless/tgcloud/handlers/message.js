@@ -133,6 +133,7 @@ import {
   restoreMistakenlyCancelledShifts,
   getStatsDashboardText,
   loadUserMessages,
+  estimateQueueAhead,
   rememberUserMessageId,
   findBodyDuplicate,
   loadWorkHoursFromSettings,
@@ -928,56 +929,54 @@ export default async function (message) {
           await clearState(userId);
           return;
         }
-        await clearState(userId);
-        const preview = String(row.content || '').slice(0, 200);
-        const fbContent =
-          '🗑 درخواست حذف پیام\n' +
-          'DEL_REQ:' +
-          mid +
-          '\nکاربر: ' +
-          userId +
-          '\nپیام #' +
-          mid +
-          ' | ' +
-          (row.channelKey || '') +
-          '\n\n' +
-          preview;
-        // ثبت در جدول فیدبک تا در «پیام کاربران» همهٔ مالک‌ها ببینند
-        try {
-          await db.insert(feedback).values({ userId, content: fbContent, status: 'open' }).run();
-        } catch (eFb) {
-          console.error('user_del feedback insert', eFb);
-        }
-        const delKb = sanitizeMarkup({
-          inline_keyboard: [
-            [
-              { text: '✅ تأیید حذف از کانال', callback_data: 'udel_ok:' + mid + ':' + userId, style: 'success' },
-              { text: '❌ رد', callback_data: 'udel_no:' + mid + ':' + userId, style: 'danger' },
-            ],
-          ],
-        });
-        const owners = OWNER_IDS || [];
-        let notified = 0;
-        for (const oid of owners) {
+        // حذف مستقیم از کانال بدون تأیید مالک
+        let chatIdCh = null;
+        let chMid = channelMsgId;
+        const ck = String(row.channelKey || channelKey || '');
+        if (ck && CHANNEL_IDS[ck]) chatIdCh = CHANNEL_IDS[ck];
+        if (!chMid) {
           try {
-            await api.sendMessage({
-              chat_id: oid,
-              text: fbContent,
-              reply_markup: delKb,
-            });
-            notified++;
-          } catch (eOwn) {
-            console.error('user_del notify owner ' + oid, eOwn);
-          }
+            const rev = await settingGet('msgch:' + mid, '');
+            if (rev && String(rev).includes(':')) {
+              const p = String(rev).split(':');
+              chMid = Number(p[1]);
+              if (!chatIdCh && p[0] && CHANNEL_IDS[p[0]]) chatIdCh = CHANNEL_IDS[p[0]];
+            }
+          } catch (_e) {}
         }
+        if (!chatIdCh || !chMid) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'شناسه پیام در کانال پیدا نشد. لینک عمومی همان پیام را بفرستید.',
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        try {
+          await api.deleteMessage({ chat_id: chatIdCh, message_id: chMid });
+        } catch (eDel) {
+          console.error('user_del direct', eDel);
+          await api.sendMessage({
+            chat_id: chatId,
+            text:
+              'حذف از کانال ممکن نشد.\n' +
+              String((eDel && (eDel.description || eDel.message)) || eDel).slice(0, 150),
+            reply_markup: sanitizeMarkup(backKeyboard()),
+          });
+          return;
+        }
+        try {
+          await settingSet('user_del_ok:' + userId, String(delCount + 1));
+        } catch (_e) {}
+        await clearState(userId);
         await api.sendMessage({
           chat_id: chatId,
           text:
-            '✅ درخواست حذف #' +
+            '✅ پیام #' +
             mid +
-            ' ثبت شد و برای مالک ارسال گردید' +
-            (notified ? ' (' + notified + ' مالک).' : '.') +
-            '\nنتیجه به شما اعلام می‌شود. از «📬 پیام کاربران» نیز قابل پیگیری است.',
+            ' از کانال حذف شد.\nباقی‌مانده سهمیه: ' +
+            (5 - (delCount + 1)) +
+            ' از ۵',
           reply_markup: await roleKb(userId),
         });
       } catch (e) {
@@ -1466,19 +1465,12 @@ if (text === '📝 ارسال پیام') {
 
         // keep user_send state for continuous
         let ahead = 0;
+        let totalPendSeen = 0;
         try {
           if (msgId != null) {
-            const pendIds =
-              (await db
-                .select({ id: messages.id })
-                .from(messages)
-                .where(
-                  and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'pending'))
-                )
-                .all()) || [];
-            ahead = pendIds.filter(function (x) {
-              return Number(x.id) < Number(msgId);
-            }).length;
+            const qinfo = await estimateQueueAhead(v.channelKey, msgId, 15000);
+            ahead = Number(qinfo.ahead) || 0;
+            totalPendSeen = Number(qinfo.totalPendingSeen) || 0;
           }
         } catch (_e) {}
         
@@ -1541,15 +1533,27 @@ if (text === '📝 ارسال پیام') {
 
 let note =
           '✅ ثبت شد.\n🆔 #' + (msgId != null ? msgId : '?') + '\n🟡 در انتظار بررسی ادمین';
-        if (ahead > 0) {
-          note += '\n📋 حدود ' + toFaDigits(String(ahead)) + ' پیام جلوتر از شما در صف «' + ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || '') + '» است.';
-          if (ahead % 30 === 0) {
-            note += '\n⏳ هر ۳۰ پیام یک‌بار وضعیت صف به شما یادآوری می‌شود — الان دقیقاً روی مرز ' + toFaDigits(String(ahead)) + ' هستید.';
-          } else if (ahead <= 30) {
+                if (ahead > 0) {
+          const pos = ahead + 1;
+          note +=
+            '\n📋 جایگاه شما در صف «' +
+            ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || '') +
+            '»: نفر ' +
+            toFaDigits(String(pos)) +
+            ' (حدود ' +
+            toFaDigits(String(ahead)) +
+            ' پیام جلوتر)';
+          if (totalPendSeen > 0) {
+            note +=
+              '\n📊 حدود ' +
+              toFaDigits(String(totalPendSeen)) +
+              ' پیام در انتظار این کانال (نمونه اخیر).';
+          }
+          if (ahead <= 30) {
             note += '\n🔔 کمتر از ۳۰ پیام تا نوبت بررسی شما مانده.';
           }
         } else {
-          note += '\n🔔 پیام شما نزدیک ابتدای صف است.';
+          note += '\n🔔 پیام شما در ابتدای صف این کانال است.';
         }
         note += '\n\nپیام بعدی را بفرستید یا ◀️ بازگشت';
         if (v.autoFixed) note += '\n\nℹ️ متن کمی اصلاح شد و ارسال گردید.';
@@ -2127,9 +2131,7 @@ let note =
       try {
 try {
         try { await cancelInvalidShifts(); } catch (_e) {}
-        for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
-          try { await dedupeActiveShifts(ck); } catch (_e) {}
-        }
+        // dedupe فقط هنگام ثبت شیفت جدید (نه هنگام مشاهده لیست)
       } catch (_e) {}
       
         const now = tehranNow();
@@ -2142,7 +2144,7 @@ try {
         }
         const today = all.filter(function (s) {
           const st = String(s.status || 'active');
-          if (st !== 'active' && st !== 'cancelled') return false;
+          if (st !== 'active') return false;
           if (String(s.startHm) === String(s.endHm)) return false;
           const sd = String(s.shiftDate || '');
           if (sd === 'perm' || sd === 'permanent') return false;

@@ -3582,22 +3582,18 @@ if (data.startsWith('own_shift:')) {
           .replace(/>/g, '&gt;');
       }
 
-      for (const ch of payload.channels || []) {
-        await api.sendMessage({
-          chat_id: cq.message.chat.id,
-          text:
-            '━━━━━━━━━━━━\n📢 «' +
-            ch.title +
-            '»\nشیفت‌ها: ' +
-            ch.shiftCount +
-            ' · کل بررسی: ' +
-            ch.reviewTotal,
-        });
+            for (const ch of payload.channels || []) {
+        let body =
+          '📢 «' +
+          ch.title +
+          '»\nشیفت‌ها: ' +
+          ch.shiftCount +
+          ' · کل بررسی: ' +
+          ch.reviewTotal +
+          '\n────────────\n';
         if (!ch.admins || !ch.admins.length) {
-          await api.sendMessage({
-            chat_id: cq.message.chat.id,
-            text: 'بدون فعالیت ثبت‌شده در این روز.',
-          });
+          body += 'بدون فعالیت ثبت‌شده در این روز.';
+          await api.sendMessage({ chat_id: cq.message.chat.id, text: body });
           continue;
         }
         for (const sc of ch.admins) {
@@ -3606,39 +3602,31 @@ if (data.startsWith('own_shift:')) {
             name = displayName(await getUser(sc.aid), sc.aid);
           } catch (_e) {}
           const sh = sc.shifts && sc.shifts.length ? sc.shifts.join(' | ') : 'بدون شیفت';
-          const html =
-            '<blockquote>👤 ' +
-            esc(name) +
-            '\n🆔 <code>' +
+          const block =
+            '👤 ' +
+            name +
+            '\n🆔 ' +
             sc.aid +
-            '</code>\n⏰ ' +
-            esc(sh) +
+            '\n⏰ ' +
+            sh +
             '\n✅ تأیید ' +
             sc.ap +
             ' · ❌ رد ' +
             sc.rj +
             ' · جمع ' +
             sc.total +
-            '</blockquote>';
-          try {
-            await api.sendMessage({
-              chat_id: cq.message.chat.id,
-              text: html,
-              parse_mode: 'HTML',
-            });
-          } catch (_e) {
-            await api.sendMessage({
-              chat_id: cq.message.chat.id,
-              text:
-                '👤 ' + name + '\n⏰ ' + sh + '\n✅ ' + sc.ap + ' · ❌ ' + sc.rj + ' · جمع ' + sc.total,
-            });
+            '\n────────────\n';
+          if ((body + block).length > 3800) {
+            await api.sendMessage({ chat_id: cq.message.chat.id, text: body });
+            body = '📢 «' + ch.title + '» (ادامه)\n────────────\n' + block;
+          } else {
+            body += block;
           }
         }
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: body });
       }
       return;
     }
-
-
 
     // ========== Sub-Leader owner management ==========
     

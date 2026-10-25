@@ -9,7 +9,7 @@ export const CHANNEL_USERNAMES = {
   sadambazan: 'callMeAraIl',
   inkarbar: 'inKarbariral',
   zendegi: 'arialcuple',
-  fekrmikardam: '',
+  fekrmikardam: 'fekrmi',
 };
 
 export const CHANNEL_IDS = {

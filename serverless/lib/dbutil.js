@@ -297,6 +297,42 @@ export async function loadUserMessages(userId, limit, opts) {
 }
 
 /** شمارش امن pending — فقط از پیام‌های اخیر (pending تقریباً همیشه در انتهاست) */
+
+/** موقعیت در صف کانال — بدون WHERE سنگین (rows_read-safe) */
+export async function estimateQueueAhead(channelKey, msgId, maxScan) {
+  const ck = String(channelKey || '');
+  const mid = Number(msgId);
+  if (!ck || !Number.isFinite(mid)) return { ahead: 0, scanned: 0, totalPendingSeen: 0 };
+  const scan = Math.max(1000, Math.min(Number(maxScan) || 12000, 20000));
+  let ahead = 0;
+  let totalPendingSeen = 0;
+  try {
+    const rows =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(scan)
+        .all()) || [];
+    for (const r of rows) {
+      const rck = String((r.channelKey ?? r.channel_key) || '');
+      if (rck !== ck) continue;
+      const st = String(r.status || '');
+      if (st !== 'pending' && st !== 'publishing') continue;
+      totalPendingSeen++;
+      if (Number(r.id) < mid) ahead++;
+    }
+    return { ahead: ahead, scanned: rows.length, totalPendingSeen: totalPendingSeen };
+  } catch (e) {
+    console.error('estimateQueueAhead', e);
+    return { ahead: 0, scanned: 0, totalPendingSeen: 0 };
+  }
+}
+
 export async function countRecentByStatus(maxScan) {
   const scan = Math.max(500, Math.min(Number(maxScan) || 12000, 20000));
   const byCh = Object.create(null);
@@ -635,19 +671,17 @@ export const FRIDAY_MODE_TEXT =
  */
 export async function isQueueBusyMode(channelKey) {
   try {
+    // با channelKey: فقط همان کانال — هرگز به فلگ سراسری سقوط نکن
+    // (باگ قبلی: کانال بدون ch_queue از queue_busy_mode سراسری ارث می‌برد)
     if (channelKey) {
       const ck = String(channelKey);
-      const v = await settingGet('ch_queue:' + ck, '');
-      if (v === '1') return true;
-      if (v === '0') return false;
-      // سازگاری با فلگ سراسری قدیمی
-      return (await settingGet('queue_busy_mode', '0')) === '1';
+      return (await settingGet('ch_queue:' + ck, '0')) === '1';
     }
-    // خلاصه برای پنل
+    // بدون آرگومان: آیا حداقل یک کانال شلوغ است؟
     for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
       if ((await settingGet('ch_queue:' + ck, '0')) === '1') return true;
     }
-    return (await settingGet('queue_busy_mode', '0')) === '1';
+    return false;
   } catch (_e) {
     return false;
   }
