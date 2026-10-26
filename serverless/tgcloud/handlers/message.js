@@ -500,6 +500,37 @@ export default async function (message) {
     }
 
     if (text === '◀️ بازگشت') {
+      const sk = state && state.kind ? String(state.kind) : '';
+      // جستجو: یک مرحله عقب → منوی نوع جستجو (نه منوی اصلی)
+      if (
+        owner &&
+        (sk === 'search_msg' ||
+          sk === 'search_user' ||
+          sk === 'search_admin' ||
+          sk === 'search_msg_wait' ||
+          sk === 'search_user_wait')
+      ) {
+        try {
+          await clearState(userId);
+        } catch (_) {}
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'نوع جستجو:',
+          reply_markup: searchKeyboard(),
+        });
+        return;
+      }
+      if (owner && sk === 'announce_wait_text') {
+        try {
+          await clearState(userId);
+        } catch (_) {}
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'منوی اصلی',
+          reply_markup: await roleKb(userId),
+        });
+        return;
+      }
       try {
         await clearState(userId);
       } catch (_) {}
@@ -1088,10 +1119,35 @@ if (text === '📝 ارسال پیام') {
       return;
     }
 
+    if (text === '📢 لیست چنل‌های مجموعه آرال') {
+      const lines = [
+        '📢 چنل‌های مجموعه آرال',
+        '',
+        '• صدام بزن',
+        'https://t.me/callMeAraIl',
+        '',
+        '• این کاربر',
+        'https://t.me/inKarbariral',
+        '',
+        '• تو زندگی بعدی',
+        'https://t.me/arialcuple',
+        '',
+        '• من فکر میکردم',
+        'https://t.me/fekrmi',
+      ];
+      await api.sendMessage({
+        chat_id: chatId,
+        text: lines.join('\n'),
+        reply_markup: await roleKb(userId),
+        disable_web_page_preview: true,
+      });
+      return;
+    }
+
     if (text === '📊 وضعیت پیام من') {
       let list = [];
       try {
-        list = await loadUserMessages(userId, 15, { maxRounds: 30 });
+        list = await loadUserMessages(userId, 15, { maxScan: 20000, maxRounds: 25 });
       } catch (eSt) {
         console.error('status msgs', eSt);
         await api.sendMessage({
@@ -1597,6 +1653,11 @@ let note =
           text: note,
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
+
+        // پیشبرد صف اطلاعیه (سبک، non-blocking)
+        try {
+          drainAnnouncePiggyback(25).catch(function () {});
+        } catch (_e) {}
 
         // سوراخ پیام: فقط بعد از موفقیت ثبت کاربر
         try {
@@ -2208,7 +2269,7 @@ try {
               .replace(/</g, '&lt;')
               .replace(/>/g, '&gt;');
           }
-          for (const ck of order) {
+                    for (const ck of order) {
             const group = sortShiftsByPeriod(
               today.filter(function (s) {
                 return String(s.channelKey || s.channel_key) === ck;
@@ -2216,10 +2277,7 @@ try {
             );
             if (!group.length) continue;
             const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-            await api.sendMessage({
-              chat_id: chatId,
-              text: '📢 «' + title + '» — ' + group.length + ' شیفت',
-            });
+            let body = '📢 «' + title + '» — ' + group.length + ' شیفت\n';
             for (const s of group) {
               let name = String(s.adminId);
               try {
@@ -2227,7 +2285,7 @@ try {
               } catch (_e) {}
               const st = String(s.status || 'active');
               const mark = st === 'cancelled' ? '🔴 لغو شده' : '🟢 فعال';
-              const html =
+              body +=
                 '<blockquote>' +
                 mark +
                 '\n⏰ ' +
@@ -2236,21 +2294,52 @@ try {
                 escSh(name) +
                 '\n🆔 <code>' +
                 Number(s.adminId) +
-                '</code></blockquote>';
+                '</code></blockquote>\n';
+            }
+            // اگر خیلی بلند شد تکه‌تکه بفرست
+            if (body.length <= 3900) {
               try {
-                await api.sendMessage({ chat_id: chatId, text: html, parse_mode: 'HTML' });
+                await api.sendMessage({ chat_id: chatId, text: body, parse_mode: 'HTML' });
               } catch (_e) {
-                await api.sendMessage({
-                  chat_id: chatId,
-                  text:
-                    mark +
-                    ' ' +
-                    String(s.startHm).slice(0, 5) +
-                    '–' +
-                    String(s.endHm).slice(0, 5) +
-                    ' · ' +
-                    name,
-                });
+                await api.sendMessage({ chat_id: chatId, text: body.replace(/<[^>]+>/g, '') });
+              }
+            } else {
+              // هدر + چند blockquote در هر پیام
+              let chunk = '📢 «' + title + '»\n';
+              for (const s of group) {
+                let name = String(s.adminId);
+                try {
+                  name = displayName(await getUser(s.adminId), s.adminId);
+                } catch (_e) {}
+                const st = String(s.status || 'active');
+                const mark = st === 'cancelled' ? '🔴 لغو شده' : '🟢 فعال';
+                const piece =
+                  '<blockquote>' +
+                  mark +
+                  '\n⏰ ' +
+                  escSh(String(s.startHm).slice(0, 5) + '–' + String(s.endHm).slice(0, 5)) +
+                  '\n👤 ' +
+                  escSh(name) +
+                  '\n🆔 <code>' +
+                  Number(s.adminId) +
+                  '</code></blockquote>\n';
+                if ((chunk + piece).length > 3900) {
+                  try {
+                    await api.sendMessage({ chat_id: chatId, text: chunk, parse_mode: 'HTML' });
+                  } catch (_e) {
+                    await api.sendMessage({ chat_id: chatId, text: chunk.replace(/<[^>]+>/g, '') });
+                  }
+                  chunk = '📢 «' + title + '» (ادامه)\n' + piece;
+                } else {
+                  chunk += piece;
+                }
+              }
+              if (chunk.trim()) {
+                try {
+                  await api.sendMessage({ chat_id: chatId, text: chunk, parse_mode: 'HTML' });
+                } catch (_e) {
+                  await api.sendMessage({ chat_id: chatId, text: chunk.replace(/<[^>]+>/g, '') });
+                }
               }
             }
           }
@@ -5151,9 +5240,8 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
               .catch(function () {
                 return false;
               })));
-        if (staff) {
-          drainAnnouncePiggyback(20).catch(function () {});
-        }
+        // همه کاربران/ادمین‌ها: صف اطلاعیه را کمی جلو ببر
+        drainAnnouncePiggyback(staff ? 30 : 20).catch(function () {});
       }
     } catch (_d) {}
   }

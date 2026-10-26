@@ -594,7 +594,7 @@ if (data.startsWith('ban_user:')) {
       let pe = 0, ap = 0, rj = 0;
       let lastLines = [];
       try {
-        const ms = await loadUserMessages(uid, 40, { maxRounds: 25 });
+        const ms = await loadUserMessages(uid, 50, { maxScan: 10000, maxRounds: 15 });
         for (const m of ms) {
           const st = String(m.status || '');
           if (st === 'pending' || st === 'publishing') pe++;
@@ -1715,7 +1715,7 @@ const res = await createReviewBatch(userId);
       let pe = 0, ap = 0, rj = 0;
       let ms = [];
       try {
-        ms = await loadUserMessages(uid, 40, { maxRounds: 25 });
+        ms = await loadUserMessages(uid, 50, { maxScan: 10000, maxRounds: 15 });
         for (const m of ms) {
           const st = String(m.status || '');
           if (st === 'pending' || st === 'publishing') pe++;
@@ -3623,28 +3623,36 @@ if (data.startsWith('own_shift:')) {
             name = displayName(await getUser(sc.aid), sc.aid);
           } catch (_e) {}
           const sh = sc.shifts && sc.shifts.length ? sc.shifts.join(' | ') : 'بدون شیفت';
-          const block =
-            '👤 ' +
-            name +
-            '\n🆔 ' +
+                    const block =
+            '<blockquote>👤 ' +
+            esc(name) +
+            '\n🆔 <code>' +
             sc.aid +
-            '\n⏰ ' +
-            sh +
+            '</code>\n⏰ ' +
+            esc(sh) +
             '\n✅ تأیید ' +
             sc.ap +
             ' · ❌ رد ' +
             sc.rj +
             ' · جمع ' +
             sc.total +
-            '\n────────────\n';
+            '</blockquote>\n';
           if ((body + block).length > 3800) {
-            await api.sendMessage({ chat_id: cq.message.chat.id, text: body });
-            body = '📢 «' + ch.title + '» (ادامه)\n────────────\n' + block;
+            try {
+              await api.sendMessage({ chat_id: cq.message.chat.id, text: body, parse_mode: 'HTML' });
+            } catch (_e) {
+              await api.sendMessage({ chat_id: cq.message.chat.id, text: body.replace(/<[^>]+>/g, '') });
+            }
+            body = '📢 «' + ch.title + '» (ادامه)\n' + block;
           } else {
             body += block;
           }
         }
-        await api.sendMessage({ chat_id: cq.message.chat.id, text: body });
+        try {
+          await api.sendMessage({ chat_id: cq.message.chat.id, text: body, parse_mode: 'HTML' });
+        } catch (_e) {
+          await api.sendMessage({ chat_id: cq.message.chat.id, text: body.replace(/<[^>]+>/g, '') });
+        }
       }
       return;
     }
@@ -5168,10 +5176,11 @@ if (data === 'ann_continue') {
     // piggyback سبک و غیرمسدودکننده — روی approve/reject سنگین نکن
     try {
       const d = (cq && cq.data) || '';
+      // روی تایید/رد هم صف اطلاعیه را جلو ببر (سبک)
       if (d.startsWith('approve:') || d.startsWith('reject') || d.startsWith('search_approve:')) {
-        // skip heavy drain
+        drainAnnouncePiggyback(20).catch(function () {});
       } else {
-        drainAnnouncePiggyback(15).catch(function () {});
+        drainAnnouncePiggyback(25).catch(function () {});
       }
     } catch (_d) {}
   }

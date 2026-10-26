@@ -180,8 +180,13 @@ export async function rememberUserMessageId(userId, msgId) {
 export async function loadUserMessages(userId, limit, opts) {
   const uid = Number(userId);
   const lim = Math.max(1, Math.min(Number(limit) || 30, 80));
-  const maxRounds = (opts && opts.maxRounds) || 20;
-  const batchSize = 600;
+  // سقف اسکن: پیش‌فرض ۲۰ هزار ردیف اخیر (نه کل ۵۰ هزار)
+  const maxScan = Math.max(1000, Math.min(Number((opts && opts.maxScan) || 20000), 25000));
+  const batchSize = 800;
+  const maxRounds = Math.min(
+    Number((opts && opts.maxRounds) || Math.ceil(maxScan / batchSize)),
+    Math.ceil(maxScan / batchSize)
+  );
   const out = [];
   const seen = Object.create(null);
 

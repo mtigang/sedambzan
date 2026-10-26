@@ -116,6 +116,7 @@ export function userKeyboard() {
     keyboard: [
       [{ text: '📝 ارسال پیام' }],
       [{ text: '📊 وضعیت پیام من' }, { text: '🗑 حذف پیام‌های خودم' }],
+      [{ text: '📢 لیست چنل‌های مجموعه آرال' }],
       [{ text: '💬 انتقادات، پیشنهادات، گزارش مشکل' }],
     ],
     resize_keyboard: true,
@@ -390,6 +391,7 @@ export function searchKeyboard() {
   return sanitizeMarkup({
     keyboard: [
       [{ text: '🔎 جستجوی پیام' }, { text: '🔎 جستجوی کاربر' }],
+      [{ text: '👮 جستجوی ادمین' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,
