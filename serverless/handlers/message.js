@@ -1504,6 +1504,7 @@ if (text === '📝 ارسال پیام') {
 
         let msgId = null;
         try {
+          // submittedAt را به DB بسپار (default unixepoch) تا خطای timestamp ندهد
           await db
             .insert(messages)
             .values({
@@ -1511,26 +1512,48 @@ if (text === '📝 ارسال پیام') {
               content: v.content,
               channelKey: v.channelKey,
               status: 'pending',
-              submittedAt: new Date(),
             })
             .run();
-          const lastRows =
-            (await db
-              .select({ id: messages.id, content: messages.content, channelKey: messages.channelKey, status: messages.status })
-              .from(messages)
-              .where(eq(messages.userId, userId))
-              .orderBy(desc(messages.id))
-              .limit(5)
-              .all()) || [];
-          for (const row of lastRows) {
-            if (String(row.status) !== 'pending') continue;
-            if (String(row.channelKey || row.channel_key) !== String(v.channelKey)) continue;
-            if (String(row.content || '') === String(v.content)) {
-              msgId = row.id;
-              break;
+          // هرگز WHERE user_id روی جدول بزرگ نزن (rows_read limit → «خطا در ارسال»)
+          try {
+            const lastRows =
+              (await db
+                .select({
+                  id: messages.id,
+                  userId: messages.userId,
+                  content: messages.content,
+                  channelKey: messages.channelKey,
+                  status: messages.status,
+                })
+                .from(messages)
+                .orderBy(desc(messages.id))
+                .limit(20)
+                .all()) || [];
+            for (const row of lastRows) {
+              if (Number(row.userId ?? row.user_id) !== Number(userId)) continue;
+              if (String(row.status) !== 'pending') continue;
+              if (String(row.channelKey || row.channel_key) !== String(v.channelKey)) continue;
+              if (String(row.content || '') === String(v.content)) {
+                msgId = row.id;
+                break;
+              }
             }
+            if (msgId == null) {
+              for (const row of lastRows) {
+                if (
+                  Number(row.userId ?? row.user_id) === Number(userId) &&
+                  String(row.status) === 'pending'
+                ) {
+                  msgId = row.id;
+                  break;
+                }
+              }
+            }
+            if (msgId == null && lastRows[0]) msgId = lastRows[0].id;
+          } catch (eLookup) {
+            console.error('msgId lookup after insert', eLookup);
+            // insert موفق بوده؛ بدون id هم ادامه بده
           }
-          if (msgId == null && lastRows[0]) msgId = lastRows[0].id;
           if (msgId != null && bodyKey) {
             try {
               await settingSet(bodyIndexSettingKey(v.channelKey, bodyKey), String(msgId) + '|pending');
