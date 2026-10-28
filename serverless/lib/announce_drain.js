@@ -206,45 +206,52 @@ export async function fetchAnnounceBatchIds(job, limit) {
     }
   }
 
-  // همه کاربران — صفحه‌بندی با lastId
+  // همه کاربران — صفحه‌بندی پایدار بدون select کل جدول
   try {
     let rows = [];
+    // ۱) تلاش با فیلتر ستون ORM
     try {
       rows =
         (await db
           .select({ userId: users.userId, blocked: users.blocked })
           .from(users)
-          .where(sql`user_id > ${lastId}`)
+          .where(sql`${users.userId} > ${lastId}`)
           .orderBy(asc(users.userId))
-          .limit(n * 3)
+          .limit(Math.max(n * 4, 80))
           .all()) || [];
-    } catch (_e1) {
-      rows = (await db.select().from(users).all()) || [];
-      rows = rows
-        .map(function (u) {
-          return { userId: Number(u.userId || u.user_id), blocked: u.blocked };
-        })
-        .filter(function (u) {
-          return u.userId > lastId;
-        })
-        .sort(function (a, b) {
-          return a.userId - b.userId;
-        })
-        .slice(0, n * 3);
+    } catch (e1) {
+      console.error('fetchAnnounceBatchIds where col', e1);
+      try {
+        rows =
+          (await db
+            .select({ userId: users.userId, blocked: users.blocked })
+            .from(users)
+            .orderBy(asc(users.userId))
+            .limit(Math.max(n * 8, 120))
+            .all()) || [];
+        rows = rows.filter(function (u) {
+          return Number(u.userId || u.user_id) > lastId;
+        });
+      } catch (e2) {
+        console.error('fetchAnnounceBatchIds order only', e2);
+        rows = [];
+      }
     }
     const ids = [];
+    let nextLast = lastId;
     for (const u of rows) {
       const id = Number(u.userId || u.user_id);
-      if (!id) continue;
+      if (!id || id <= lastId) continue;
+      nextLast = id;
       if (Number(u.blocked) === 1) continue;
       ids.push(id);
       if (ids.length >= n) break;
     }
-    const nextLast = ids.length ? ids[ids.length - 1] : lastId;
-    return { ids: ids, nextLastId: nextLast, fromIndex: 0 };
+    // اگر هیچ ردیفی نیامد ولی lastId هنوز صفر است و total بزرگ → خطا نده done
+    return { ids: ids, nextLastId: ids.length ? ids[ids.length - 1] : nextLast, fromIndex: 0, emptyScan: rows.length === 0 };
   } catch (e) {
     console.error('fetchAnnounceBatchIds all', e);
-    return { ids: [], nextLastId: lastId, fromIndex: 0 };
+    return { ids: [], nextLastId: lastId, fromIndex: 0, emptyScan: true, error: true };
   }
 }
 
@@ -282,6 +289,20 @@ export async function drainAnnouncePiggyback(maxN) {
     const batch = await fetchAnnounceBatchIds(job, n);
     const ids = batch.ids || [];
     if (!ids.length) {
+      // فقط وقتی مطمئنیم به انتهای لیست رسیده‌ایم done کن
+      // emptyScan/error یعنی کوئری شکست خورده — job را زنده نگه دار
+      if (batch.error || batch.emptyScan) {
+        await settingSet('announce_lock', '0');
+        console.error('announce batch empty scan/error — keep running', batch);
+        return { did: false, error: true, keep: true };
+      }
+      // nextLastId جلو رفته ولی ids خالی (همه blocked در صفحه) → lastId را جلو ببر
+      if (batch.nextLastId && Number(batch.nextLastId) > lastId) {
+        job.lastId = Number(batch.nextLastId);
+        await saveAnnounceJob(job);
+        await settingSet('announce_lock', '0');
+        return { did: true, finished: false, ok: job.ok, fail: job.fail };
+      }
       job.status = 'done';
       job.cursor = total || cursor;
       await saveAnnounceJob(job);
@@ -377,9 +398,14 @@ export async function drainAnnounceOwnerBurst(chatId, progressMessageId, maxMs) 
   let last = null;
   while (Date.now() - started < budget) {
     last = await drainAnnouncePiggyback(CHUNK);
-    if (!last || !last.did) break;
+    if (!last) break;
     if (last.finished) break;
     if (last.locked) break;
+    if (last.error && last.keep) {
+      // کوئری کاربران موقتاً شکست — کمی بعد دوباره
+      break;
+    }
+    if (!last.did) break;
   }
   try {
     const job = await loadAnnounceJob();

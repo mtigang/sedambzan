@@ -391,7 +391,6 @@ export function searchKeyboard() {
   return sanitizeMarkup({
     keyboard: [
       [{ text: '🔎 جستجوی پیام' }, { text: '🔎 جستجوی کاربر' }],
-      [{ text: '👮 جستجوی ادمین' }],
       [{ text: '◀️ بازگشت' }],
     ],
     resize_keyboard: true,

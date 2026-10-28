@@ -506,7 +506,6 @@ export default async function (message) {
         owner &&
         (sk === 'search_msg' ||
           sk === 'search_user' ||
-          sk === 'search_admin' ||
           sk === 'search_msg_wait' ||
           sk === 'search_user_wait')
       ) {
@@ -1698,9 +1697,15 @@ let note =
         return;
       } catch (e) {
         console.error('user_send', e);
+        const errS = String((e && (e.message || e.description)) || e).slice(0, 120);
+        // اگر insert زده شده ولی بعدش ترکیده، پیام گیج‌کننده نده
         await api.sendMessage({
           chat_id: chatId,
-          text: '⚠️ خطا در ارسال. دوباره تلاش کنید.',
+          text:
+            '⚠️ خطا در ارسال. دوباره تلاش کنید.' +
+            (errS && errS.indexOf('rows_read') >= 0
+              ? '\n(مشکل موقت دیتابیس — چند ثانیه بعد دوباره بفرستید.)'
+              : ''),
           reply_markup: await roleKb(userId),
         });
         return;
@@ -3374,23 +3379,11 @@ try {
     }
 
     if (owner && text === '👮 جستجوی ادمین') {
-      try {
-        await setState(userId, 'search_admin');
-        await api.sendMessage({
-          chat_id: chatId,
-          text:
-            'آیدی عددی یا @username ادمین را بفرستید:\n' +
-            'گزارش شامل کانال‌ها، شیفت ۷ روز اخیر (به تفکیک روز و کانال) و تعداد بررسی پیام است.',
-          reply_markup: sanitizeMarkup(backKeyboard()),
-        });
-      } catch (e) {
-        console.error('search_admin', e);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: 'خطا: ' + (e && e.message ? e.message : String(e)),
-          reply_markup: ownerKeyboard(),
-        });
-      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'نوع جستجو:',
+        reply_markup: searchKeyboard(),
+      });
       return;
     }
 

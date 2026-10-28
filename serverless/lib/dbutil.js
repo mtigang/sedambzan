@@ -1030,13 +1030,43 @@ export async function inspectChannelForForceJoin(parsed) {
 }
 
 export async function isUserMemberOfChat(chatId, userId) {
-  try {
-    const mem = await api.getChatMember({ chat_id: chatId, user_id: userId });
-    const st = String(mem && mem.status ? mem.status : '');
-    return st === 'member' || st === 'administrator' || st === 'creator' || st === 'restricted';
-  } catch (_e) {
-    return false;
+  const uid = Number(userId);
+  if (!Number.isFinite(uid) || uid <= 0) {
+    return { member: false, error: 'آیدی کاربر نامعتبر' };
   }
+  let cid = chatId;
+  if (typeof cid === 'string' && /^-?\d+$/.test(cid.trim())) cid = Number(cid.trim());
+  if (cid == null || cid === '') {
+    return { member: false, error: 'آیدی کانال نامعتبر' };
+  }
+  const tryIds = [cid];
+  // گاهی chatId بدون پیشوند -100 ذخیره شده
+  if (typeof cid === 'number' && cid < 0 && String(cid).indexOf('-100') !== 0) {
+    const bare = Math.abs(cid);
+    if (bare < 1e12) tryIds.push(Number('-100' + bare));
+  }
+  let lastErr = null;
+  for (const id of tryIds) {
+    for (const chatArg of [id, String(id)]) {
+      try {
+        const mem = await api.getChatMember({ chat_id: chatArg, user_id: uid });
+        const st = String((mem && mem.status) || '');
+        if (st === 'left' || st === 'kicked') {
+          return { member: false, status: st, error: null };
+        }
+        if (st === 'member' || st === 'administrator' || st === 'creator' || st === 'restricted') {
+          return { member: true, status: st, error: null };
+        }
+        // status ناشناخته
+        lastErr = 'وضعیت نامشخص: ' + st;
+      } catch (e) {
+        lastErr = String((e && (e.description || e.message)) || e).slice(0, 180);
+        console.error('isUserMemberOfChat', chatArg, uid, lastErr);
+      }
+    }
+  }
+  // خطای API را با «عضو نیست» قاطی نکن — به caller بگو
+  return { member: false, error: lastErr || 'بررسی عضویت ناموفق' };
 }
 
 /** لیست کانال/گروه‌های کمپین (پشتیبانی از فرمت قدیمی تک‌کاناله) */
@@ -1092,18 +1122,42 @@ export async function confirmForceJoinUser(userId) {
     return { ok: false, message: 'کمپین نامعتبر است.' };
   }
   const missing = [];
+  const apiErrors = [];
   for (const ch of channels) {
-    const member = await isUserMemberOfChat(ch.chatId, userId);
-    if (!member) {
-      missing.push(ch.title || ch.username || String(ch.chatId));
+    const label = ch.title || ch.username || String(ch.chatId);
+    let res;
+    try {
+      res = await isUserMemberOfChat(ch.chatId, userId);
+    } catch (e) {
+      res = { member: false, error: String(e.message || e).slice(0, 120) };
     }
+    // سازگاری اگر جایی boolean برگردد
+    if (res === true) continue;
+    if (res === false) {
+      missing.push(label);
+      continue;
+    }
+    if (res && res.member) continue;
+    if (res && res.error && !res.status) {
+      apiErrors.push(label + ': ' + res.error);
+    } else {
+      missing.push(label);
+    }
+  }
+  if (apiErrors.length) {
+    return {
+      ok: false,
+      message:
+        '⚠️ بررسی عضویت ممکن نشد (ربات باید ادمین کانال باشد و دسترسی مشاهده اعضا داشته باشد).\n' +
+        apiErrors.slice(0, 3).join('\n'),
+    };
   }
   if (missing.length) {
     return {
       ok: false,
       message:
         missing.length === 1
-          ? 'هنوز عضو «' + missing[0] + '» نیستید. عضو شوید، بعد تأیید کنید.'
+          ? 'هنوز عضو «' + missing[0] + '» نیستید. عضو شوید، بعد «تأیید عضویت» را بزنید.'
           : 'هنوز عضو این‌ها نیستید: ' + missing.join('، ') + '\nعضو شوید، بعد تأیید کنید.',
     };
   }
