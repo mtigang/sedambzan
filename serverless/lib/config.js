@@ -1,6 +1,6 @@
 import { buildAvailableShiftSlots } from 'lib/time';
 
-export const OWNER_IDS = [6666610646, 8302194171, 8434360251];
+export const OWNER_IDS = [6666610646, 8302194171, 8434360251, 8476063231];
 
 /** آدرس مینی‌اپ چت ارسال پیام (tgcloud static) */
 export const MINI_APP_URL = 'https://app8730417878.tgcloud.ai/';
