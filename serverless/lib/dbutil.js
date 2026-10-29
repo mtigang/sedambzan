@@ -716,6 +716,7 @@ export const QUEUE_BUSY_TEXT =
 
 // ——— عضویت اجباری ———
 const FJ_ACTIVE_KEY = 'force_join_active';
+const FJ_QUEUE_KEY = 'force_join_queue';
 const FJ_HISTORY_KEY = 'force_join_history';
 
 export async function getForceJoinCampaign() {
@@ -736,6 +737,56 @@ export async function saveForceJoinCampaign(camp) {
     return;
   }
   await settingSet(FJ_ACTIVE_KEY, JSON.stringify(camp));
+}
+
+export async function getForceJoinQueue() {
+  try {
+    const raw = await settingGet(FJ_QUEUE_KEY, '[]');
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch (_e) {
+    return [];
+  }
+}
+
+export async function saveForceJoinQueue(arr) {
+  const list = Array.isArray(arr) ? arr : [];
+  if (list.length > 40) list.length = 40;
+  await settingSet(FJ_QUEUE_KEY, JSON.stringify(list));
+}
+
+/** افزودن کمپین به صف نوبتی (هنوز active نیست) */
+export async function enqueueForceJoinCampaign(camp) {
+  const q = await getForceJoinQueue();
+  const item = Object.assign({}, camp, { active: false, queuedAt: new Date().toISOString() });
+  q.push(item);
+  await saveForceJoinQueue(q);
+  return q.length;
+}
+
+/** بعد از پایان کمپین فعلی، نفر اول صف را فعال کن */
+export async function promoteNextForceJoinFromQueue() {
+  const q = await getForceJoinQueue();
+  if (!q.length) {
+    await saveForceJoinCampaign(null);
+    return null;
+  }
+  const next = q.shift();
+  await saveForceJoinQueue(q);
+  if (!next) {
+    await saveForceJoinCampaign(null);
+    return null;
+  }
+  next.active = true;
+  next.confirmedCount = Number(next.confirmedCount) || 0;
+  next.startedAt = new Date().toISOString();
+  delete next.queuedAt;
+  await saveForceJoinCampaign(next);
+  return next;
+}
+
+export async function clearForceJoinQueue() {
+  await saveForceJoinQueue([]);
 }
 
 export async function getForceJoinHistory() {
@@ -1032,41 +1083,75 @@ export async function inspectChannelForForceJoin(parsed) {
 export async function isUserMemberOfChat(chatId, userId) {
   const uid = Number(userId);
   if (!Number.isFinite(uid) || uid <= 0) {
-    return { member: false, error: 'آیدی کاربر نامعتبر' };
+    return { member: false, status: null, error: 'آیدی کاربر نامعتبر', checked: false };
   }
+  // فقط همان chatId ذخیره‌شده در کمپین — بدون حدس -100 (منبع false-positive)
   let cid = chatId;
-  if (typeof cid === 'string' && /^-?\d+$/.test(cid.trim())) cid = Number(cid.trim());
-  if (cid == null || cid === '') {
-    return { member: false, error: 'آیدی کانال نامعتبر' };
+  if (typeof cid === 'string' && /^-?\d+$/.test(String(cid).trim())) {
+    cid = Number(String(cid).trim());
   }
-  const tryIds = [cid];
-  // گاهی chatId بدون پیشوند -100 ذخیره شده
-  if (typeof cid === 'number' && cid < 0 && String(cid).indexOf('-100') !== 0) {
-    const bare = Math.abs(cid);
-    if (bare < 1e12) tryIds.push(Number('-100' + bare));
+  if (cid == null || cid === '' || (typeof cid === 'number' && !Number.isFinite(cid))) {
+    return { member: false, status: null, error: 'آیدی کانال نامعتبر', checked: false };
   }
+
+  const attempts = [cid];
+  if (String(cid) !== String(chatId)) attempts.push(String(chatId));
+  else attempts.push(String(cid));
+
   let lastErr = null;
-  for (const id of tryIds) {
-    for (const chatArg of [id, String(id)]) {
-      try {
-        const mem = await api.getChatMember({ chat_id: chatArg, user_id: uid });
-        const st = String((mem && mem.status) || '');
-        if (st === 'left' || st === 'kicked') {
-          return { member: false, status: st, error: null };
-        }
-        if (st === 'member' || st === 'administrator' || st === 'creator' || st === 'restricted') {
-          return { member: true, status: st, error: null };
-        }
-        // status ناشناخته
-        lastErr = 'وضعیت نامشخص: ' + st;
-      } catch (e) {
-        lastErr = String((e && (e.description || e.message)) || e).slice(0, 180);
-        console.error('isUserMemberOfChat', chatArg, uid, lastErr);
+  let sawLeft = false;
+  for (const chatArg of attempts) {
+    try {
+      const mem = await api.getChatMember({ chat_id: chatArg, user_id: uid });
+      if (!mem || typeof mem !== 'object') {
+        lastErr = 'پاسخ خالی از تلگرام';
+        continue;
       }
+      const st = String(mem.status || '').toLowerCase().trim();
+      if (!st) {
+        lastErr = 'وضعیت خالی';
+        continue;
+      }
+      if (st === 'left' || st === 'kicked') {
+        sawLeft = true;
+        return { member: false, status: st, error: null, checked: true };
+      }
+      // فقط وضعیت‌های قطعی عضویت
+      if (st === 'member' || st === 'administrator' || st === 'creator') {
+        return { member: true, status: st, error: null, checked: true };
+      }
+      // restricted = هنوز داخل چت است (گروه) — قبول
+      if (st === 'restricted') {
+        return { member: true, status: st, error: null, checked: true };
+      }
+      lastErr = 'وضعیت نامعتبر: ' + st;
+    } catch (e) {
+      const msg = String((e && (e.description || e.message)) || e);
+      lastErr = msg.slice(0, 180);
+      const low = msg.toLowerCase();
+      // تلگرام صریحاً می‌گوید عضو نیست
+      if (
+        low.includes('user_not_participant') ||
+        low.includes('member not found') ||
+        low.includes('user not found') ||
+        low.includes('chat not found') ||
+        low.includes('peer_id_invalid')
+      ) {
+        return { member: false, status: 'left', error: null, checked: true };
+      }
+      console.error('isUserMemberOfChat', chatArg, uid, lastErr);
     }
   }
-  // خطای API را با «عضو نیست» قاطی نکن — به caller بگو
-  return { member: false, error: lastErr || 'بررسی عضویت ناموفق' };
+  if (sawLeft) {
+    return { member: false, status: 'left', error: null, checked: true };
+  }
+  // خطای API ≠ عضو بودن
+  return {
+    member: false,
+    status: null,
+    error: lastErr || 'بررسی عضویت ناموفق',
+    checked: false,
+  };
 }
 
 /** لیست کانال/گروه‌های کمپین (پشتیبانی از فرمت قدیمی تک‌کاناله) */
@@ -1121,34 +1206,46 @@ export async function confirmForceJoinUser(userId) {
   if (!channels.length) {
     return { ok: false, message: 'کمپین نامعتبر است.' };
   }
+
+  // بررسی قطعی عضویت در همه کانال‌های کمپین — بدون حدس
   const missing = [];
   const apiErrors = [];
   for (const ch of channels) {
+    if (!ch || ch.chatId == null || ch.chatId === '') {
+      apiErrors.push('کانال بدون chatId در کمپین');
+      continue;
+    }
     const label = ch.title || ch.username || String(ch.chatId);
     let res;
     try {
       res = await isUserMemberOfChat(ch.chatId, userId);
     } catch (e) {
-      res = { member: false, error: String(e.message || e).slice(0, 120) };
+      res = { member: false, checked: false, error: String(e.message || e).slice(0, 120) };
     }
-    // سازگاری اگر جایی boolean برگردد
-    if (res === true) continue;
+    if (res === true) {
+      // فقط اگر صریحاً true بود (نباید از این مسیر بیاید)
+      continue;
+    }
     if (res === false) {
       missing.push(label);
       continue;
     }
-    if (res && res.member) continue;
-    if (res && res.error && !res.status) {
-      apiErrors.push(label + ': ' + res.error);
-    } else {
-      missing.push(label);
+    if (res && res.member === true && res.checked === true) {
+      continue;
     }
+    if (res && res.checked === true && res.member === false) {
+      missing.push(label);
+      continue;
+    }
+    // checked !== true → خطای API / عدم اطمینان → تأیید نکن
+    apiErrors.push(label + ': ' + ((res && res.error) || 'بررسی ناموفق'));
   }
   if (apiErrors.length) {
     return {
       ok: false,
       message:
-        '⚠️ بررسی عضویت ممکن نشد (ربات باید ادمین کانال باشد و دسترسی مشاهده اعضا داشته باشد).\n' +
+        '⚠️ عضویت تأیید نشد — بررسی API ناموفق بود.\n' +
+        'ربات باید ادمین باشد و دسترسی «مشاهده اعضا» داشته باشد.\n' +
         apiErrors.slice(0, 3).join('\n'),
     };
   }
@@ -1157,39 +1254,62 @@ export async function confirmForceJoinUser(userId) {
       ok: false,
       message:
         missing.length === 1
-          ? 'هنوز عضو «' + missing[0] + '» نیستید. عضو شوید، بعد «تأیید عضویت» را بزنید.'
-          : 'هنوز عضو این‌ها نیستید: ' + missing.join('، ') + '\nعضو شوید، بعد تأیید کنید.',
+          ? 'هنوز عضو «' + missing[0] + '» نیستید. اول عضو شوید، بعد «تأیید عضویت» را بزنید.'
+          : 'هنوز عضو این‌ها نیستید:\n• ' + missing.join('\n• ') + '\nعضو شوید، بعد تأیید کنید.',
     };
   }
-  await markForceJoinUserOk(camp.id, userId);
-  camp.confirmedCount = (Number(camp.confirmedCount) || 0) + 1;
-  if (camp.confirmedCount >= Number(camp.targetCount)) {
-    camp.active = false;
-    camp.endedAt = new Date().toISOString();
+
+  // قفل ساده ضد دابل‌کلیک
+  const lockKey = 'fj_lock:' + camp.id + ':' + userId;
+  const locked = await settingGet(lockKey, '');
+  if (locked === '1') {
+    return { ok: true, already: true, camp };
+  }
+  await settingSet(lockKey, '1');
+
+  // دوباره کمپین را بخوان (ممکن است هم‌زمان تمام شده باشد)
+  const camp2 = await getForceJoinCampaign();
+  if (!camp2 || !camp2.active || String(camp2.id) !== String(camp.id)) {
+    return { ok: true, done: true, message: 'عضویت اجباری فعال نیست.' };
+  }
+  if (await isForceJoinUserOk(camp2.id, userId)) {
+    return { ok: true, already: true, camp: camp2 };
+  }
+
+  await markForceJoinUserOk(camp2.id, userId);
+  camp2.confirmedCount = (Number(camp2.confirmedCount) || 0) + 1;
+
+  if (camp2.confirmedCount >= Number(camp2.targetCount)) {
+    camp2.active = false;
+    camp2.endedAt = new Date().toISOString();
+    const channels2 = forceJoinChannelList(camp2);
     await pushForceJoinHistory({
-      id: camp.id,
-      title: forceJoinTitlesText(camp),
-      channels: channels.map(function (c) {
+      id: camp2.id,
+      title: forceJoinTitlesText(camp2),
+      channels: channels2.map(function (c) {
         return { chatId: c.chatId, title: c.title, username: c.username };
       }),
-      chatId: channels[0] && channels[0].chatId,
-      targetCount: camp.targetCount,
-      confirmedCount: camp.confirmedCount,
-      startMembers: camp.startMembers,
-      endedAt: camp.endedAt,
+      chatId: channels2[0] && channels2[0].chatId,
+      targetCount: camp2.targetCount,
+      confirmedCount: camp2.confirmedCount,
+      startMembers: camp2.startMembers,
+      endedAt: camp2.endedAt,
     });
     await saveForceJoinCampaign(null);
+    const next = await promoteNextForceJoinFromQueue();
     return {
       ok: true,
       finished: true,
-      camp,
+      camp: camp2,
+      nextCamp: next || null,
       message: '✅ عضویت تأیید شد.',
     };
   }
-  await saveForceJoinCampaign(camp);
+
+  await saveForceJoinCampaign(camp2);
   return {
     ok: true,
-    camp,
+    camp: camp2,
     message: '✅ عضویت تأیید شد.',
   };
 }

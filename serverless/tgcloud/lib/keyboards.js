@@ -338,12 +338,16 @@ export function forceJoinInline(camp) {
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
-export function forceJoinOwnerInline(hasActive) {
+export function forceJoinOwnerInline(hasActive, queueLen) {
   const rows = [];
   if (hasActive) {
     rows.push([{ text: '⏹ لغو کمپین فعال', callback_data: 'fj_cancel', style: 'danger' }]);
   }
-  rows.push([{ text: '➕ شروع کمپین جدید', callback_data: 'fj_new', style: 'success' }]);
+  const qn = Number(queueLen) || 0;
+  if (qn > 0) {
+    rows.push([{ text: '🗑 خالی کردن صف (' + qn + ')', callback_data: 'fj_clear_queue', style: 'danger' }]);
+  }
+  rows.push([{ text: hasActive ? '➕ افزودن به صف نوبتی' : '➕ شروع کمپین جدید', callback_data: 'fj_new', style: 'success' }]);
   rows.push([{ text: 'بستن', callback_data: 'fj_close', style: 'danger' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }

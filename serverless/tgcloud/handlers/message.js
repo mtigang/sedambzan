@@ -100,6 +100,10 @@ import {
   forceJoinNeedGate,
   getForceJoinCampaign,
   getForceJoinHistory,
+  getForceJoinQueue,
+  enqueueForceJoinCampaign,
+  clearForceJoinQueue,
+  promoteNextForceJoinFromQueue,
   saveForceJoinCampaign,
   parseChannelLinkInput,
   inspectChannelForForceJoin,
@@ -4539,6 +4543,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
     if (owner && text === '🔐 عضویت اجباری') {
       try {
         const camp = await getForceJoinCampaign();
+        const queue = await getForceJoinQueue();
         const hist = await getForceJoinHistory();
         let t = '🔐 عضویت اجباری\n\n';
         if (camp && camp.active) {
@@ -4566,10 +4571,25 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
         } else {
           t += 'الان کمپین فعالی نیست.\n\n';
         }
+        if (queue && queue.length) {
+          t += '⏳ صف نوبتی (' + queue.length + ' کمپین):\n';
+          for (let qi = 0; qi < Math.min(queue.length, 12); qi++) {
+            const q = queue[qi];
+            t +=
+              qi +
+              1 +
+              ') «' +
+              (q.title || forceJoinTitlesText(q) || '') +
+              '» — هدف ' +
+              (q.targetCount || 0) +
+              '\n';
+          }
+          t += '\n';
+        }
         if (hist.length) {
           t += '📋 کمپین‌های قبلی (' + hist.length + '):\n';
-          for (let i = 0; i < Math.min(hist.length, 10); i++) {
-            const h = hist[i];
+          for (let hi = 0; hi < Math.min(hist.length, 8); hi++) {
+            const h = hist[hi];
             t +=
               '• «' +
               (h.title || '') +
@@ -4579,13 +4599,17 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
               (h.confirmedCount || 0) +
               '\n';
           }
-        } else {
+        } else if (!(queue && queue.length)) {
           t += 'هنوز کمپین قبلی ثبت نشده.';
         }
+        t +=
+          '\n💡 اگر کمپین فعال باشد، کمپین جدید به صف نوبتی می‌رود و بعد از رسیدن به هدف فعلی خودکار شروع می‌شود.';
         await api.sendMessage({
           chat_id: chatId,
           text: t,
-          reply_markup: sanitizeMarkup(forceJoinOwnerInline(!!(camp && camp.active))),
+          reply_markup: sanitizeMarkup(
+            forceJoinOwnerInline(!!(camp && camp.active), (queue && queue.length) || 0)
+          ),
         });
       } catch (e) {
         console.error('force join menu', e);
@@ -4739,26 +4763,50 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
             confirmedCount: 0,
             startedAt: new Date().toISOString(),
           };
-          await saveForceJoinCampaign(camp);
           await clearState(userId);
-          let body =
-            '🔐 عضویت اجباری شروع شد.\n\n' +
-            'کانال/گروه‌ها (' +
-            channels.length +
-            '):\n';
-          for (const c of channels) {
+          const existing = await getForceJoinCampaign();
+          let body = '';
+          if (existing && existing.active) {
+            const pos = await enqueueForceJoinCampaign(camp);
+            body =
+              '⏳ کمپین به صف نوبتی اضافه شد (نوبت ' +
+              pos +
+              ').\n\n' +
+              'تا وقتی کمپین فعلی به هدف برسد، این کمپین شروع نمی‌شود.\n' +
+              'کانال/گروه‌ها (' +
+              channels.length +
+              '):\n';
+            for (const c of channels) {
+              body +=
+                '• «' +
+                (c.title || c.username || c.chatId) +
+                '»' +
+                (c.startMembers != null ? ' — ' + c.startMembers + ' عضو' : '') +
+                '\n';
+            }
+            body += '\nهدف این نوبت: ' + n + ' تأیید';
+          } else {
+            await saveForceJoinCampaign(camp);
+            body =
+              '🔐 عضویت اجباری شروع شد.\n\n' +
+              'کانال/گروه‌ها (' +
+              channels.length +
+              '):\n';
+            for (const c of channels) {
+              body +=
+                '• «' +
+                (c.title || c.username || c.chatId) +
+                '»' +
+                (c.startMembers != null ? ' — ' + c.startMembers + ' عضو' : '') +
+                '\n';
+            }
             body +=
-              '• «' +
-              (c.title || c.username || c.chatId) +
-              '»' +
-              (c.startMembers != null ? ' — ' + c.startMembers + ' عضو' : '') +
-              '\n';
+              '\nهدف: ' +
+              n +
+              ' تأیید از طریق ربات\n' +
+              'کاربر باید در همهٔ موارد بالا عضو باشد.\n\n' +
+              'می‌توانید کمپین بعدی را هم بسازید تا بعد از اتمام این یکی، خودکار شروع شود.';
           }
-          body +=
-            '\nهدف: ' +
-            n +
-            ' تأیید از طریق ربات\n' +
-            'کاربر باید در همهٔ موارد بالا عضو باشد.';
           await api.sendMessage({
             chat_id: chatId,
             text: body,

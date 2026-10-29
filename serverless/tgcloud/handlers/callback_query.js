@@ -17,9 +17,13 @@ import {
   loadWorkHoursFromSettings,
   getForceJoinCampaign,
   getForceJoinHistory,
+  getForceJoinQueue,
+  clearForceJoinQueue,
+  promoteNextForceJoinFromQueue,
   saveForceJoinCampaign,
   pushForceJoinHistory,
   confirmForceJoinUser,
+  forceJoinTitlesText,
   getActiveSubLeaderChannel,
   removeChannelAdmin,
   listAdminsByChannel,
@@ -2135,17 +2139,25 @@ const res = await createReviewBatch(userId);
           reply_markup: replyKb,
         });
         if (res.finished) {
+          let ownerTxt =
+            '🔐 کمپین عضویت اجباری تمام شد.\n' +
+            'تأیید: ' +
+            ((res.camp && res.camp.confirmedCount) || '') +
+            ' / ' +
+            ((res.camp && res.camp.targetCount) || '');
+          if (res.nextCamp) {
+            ownerTxt +=
+              '\n\n▶️ کمپین بعدی از صف شروع شد:\n«' +
+              (res.nextCamp.title || forceJoinTitlesText(res.nextCamp) || '') +
+              '»\nهدف: ' +
+              (res.nextCamp.targetCount || '') +
+              ' نفر';
+          } else {
+            ownerTxt += '\nصف نوبتی خالی است — عضویت اجباری خاموش شد.';
+          }
           for (const oid of OWNER_IDS || []) {
             try {
-              await api.sendMessage({
-                chat_id: oid,
-                text:
-                  '🔐 عضویت اجباری به هدف رسید و خاموش شد.\n' +
-                  'تأیید: ' +
-                  ((res.camp && res.camp.confirmedCount) || '') +
-                  ' / ' +
-                  ((res.camp && res.camp.targetCount) || ''),
-              });
+              await api.sendMessage({ chat_id: oid, text: ownerTxt });
             } catch (_e) {}
           }
         }
@@ -2160,7 +2172,7 @@ const res = await createReviewBatch(userId);
       return;
     }
 
-    if (data === 'fj_new' || data === 'fj_cancel' || data === 'fj_close') {
+    if (data === 'fj_new' || data === 'fj_cancel' || data === 'fj_close' || data === 'fj_clear_queue') {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
@@ -2193,13 +2205,41 @@ const res = await createReviewBatch(userId);
           });
           await saveForceJoinCampaign(null);
         }
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کمپین لغو شد' });
+        const next = await promoteNextForceJoinFromQueue();
+        const qLeft = await getForceJoinQueue();
+        let txt = '⏹ کمپین فعال لغو شد.';
+        if (next) {
+          txt +=
+            '\n\n▶️ کمپین بعدی از صف شروع شد:\n«' +
+            (next.title || forceJoinTitlesText(next) || '') +
+            '» — هدف ' +
+            (next.targetCount || '') +
+            '\nباقی صف: ' +
+            ((qLeft && qLeft.length) || 0);
+        } else {
+          txt += '\nصف نوبتی خالی است.';
+        }
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو شد' });
         try {
           await api.editMessageText({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
-            text: '⏹ کمپین عضویت اجباری لغو شد.',
-            reply_markup: sanitizeMarkup(forceJoinOwnerInline(false)),
+            text: txt,
+            reply_markup: sanitizeMarkup(forceJoinOwnerInline(!!next, (qLeft && qLeft.length) || 0)),
+          });
+        } catch (_e) {}
+        return;
+      }
+      if (data === 'fj_clear_queue') {
+        await clearForceJoinQueue();
+        const camp = await getForceJoinCampaign();
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'صف خالی شد' });
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: '🗑 صف نوبتی عضویت اجباری خالی شد.\nکمپین فعال دست نخورده باقی ماند.',
+            reply_markup: sanitizeMarkup(forceJoinOwnerInline(!!(camp && camp.active), 0)),
           });
         } catch (_e) {}
         return;
@@ -2213,8 +2253,9 @@ const res = await createReviewBatch(userId);
             message_id: cq.message.message_id,
             text:
               '🔗 لینک کانال یا گروه را بفرستید.\n' +
-              'می‌توانید چند لینک پشت‌سرهم بفرستید.\n' +
+              'می‌توانید چند لینک پشت‌سرهم بفرستید (همزمان در یک کمپین).\n' +
               'وقتی تمام شد، عدد هدف را بفرستید (مثلاً 100).\n\n' +
+              'اگر کمپین دیگری فعال باشد، این یکی در صف نوبتی می‌ماند.\n' +
               'ربات باید در هر مورد ادمین باشد (مشاهده اعضا).',
           });
         } catch (_e) {}
