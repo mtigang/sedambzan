@@ -2272,7 +2272,8 @@ try {
         }
         const today = all.filter(function (s) {
           const st = String(s.status || 'active');
-          if (st !== 'active') return false;
+          // فعال و لغوشده: لغوشده برای شفافیت آمار (قبلاً فقط active بود و با بررسی‌ها تناقض می‌ساخت)
+          if (st !== 'active' && st !== 'cancelled') return false;
           if (String(s.startHm) === String(s.endHm)) return false;
           const sd = String(s.shiftDate || '');
           if (sd === 'perm' || sd === 'permanent') return false;
@@ -3142,7 +3143,11 @@ try {
               try {
                 name = displayName(await getUser(sc.aid), sc.aid);
               } catch (_e) {}
-              const sh = sc.shifts && sc.shifts.length ? sc.shifts.join(' | ') : 'بدون شیفت';
+              let shParts = [];
+              if (sc.shifts && sc.shifts.length) shParts.push('فعال: ' + sc.shifts.join(' | '));
+              if (sc.shiftsCancelled && sc.shiftsCancelled.length)
+                shParts.push('لغو: ' + sc.shiftsCancelled.join(' | '));
+              const sh = shParts.length ? shParts.join(' · ') : 'بدون شیفت ثبت‌شده';
               const html =
                 '<blockquote>👤 ' +
                 esc(name) +
@@ -3154,6 +3159,10 @@ try {
                 sc.rj +
                 ' · جمع ' +
                 sc.total +
+                '\n📍 در شیفت: ' +
+                (sc.inShift || 0) +
+                ' · خارج شیفت: ' +
+                (sc.outShift || 0) +
                 '</blockquote>';
               try {
                 await api.sendMessage({ chat_id: chatId, text: html, parse_mode: 'HTML' });

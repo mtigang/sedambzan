@@ -3832,7 +3832,8 @@ if (data.startsWith('own_shift:')) {
           ' (' +
           label +
           ')\n' +
-          'منبع: بررسی‌های واقعی + شیفت‌های همان روز (وقت تهران)',
+          'منبع: بررسی‌های واقعی + شیفت‌های همان روز (تهران)\n' +
+          '«خارج شیفت» = ساب‌لیدر بدون شیفت، پایان Batch، یا بررسی خارج بازهٔ شیفت ثبت‌شده',
       });
 
       function esc(s) {
@@ -3846,10 +3847,15 @@ if (data.startsWith('own_shift:')) {
         let body =
           '📢 «' +
           ch.title +
-          '»\nشیفت‌ها: ' +
+          '»\nشیفت فعال: ' +
           ch.shiftCount +
+          (ch.shiftCancelledCount ? ' · لغو: ' + ch.shiftCancelledCount : '') +
           ' · کل بررسی: ' +
           ch.reviewTotal +
+          '\nدر شیفت: ' +
+          (ch.reviewInShift || 0) +
+          ' · خارج شیفت: ' +
+          (ch.reviewOutShift || 0) +
           '\n────────────\n';
         if (!ch.admins || !ch.admins.length) {
           body += 'بدون فعالیت ثبت‌شده در این روز.';
@@ -3861,8 +3867,12 @@ if (data.startsWith('own_shift:')) {
           try {
             name = displayName(await getUser(sc.aid), sc.aid);
           } catch (_e) {}
-          const sh = sc.shifts && sc.shifts.length ? sc.shifts.join(' | ') : 'بدون شیفت';
-                    const block =
+          let shParts = [];
+          if (sc.shifts && sc.shifts.length) shParts.push('فعال: ' + sc.shifts.join(' | '));
+          if (sc.shiftsCancelled && sc.shiftsCancelled.length)
+            shParts.push('لغو: ' + sc.shiftsCancelled.join(' | '));
+          const sh = shParts.length ? shParts.join(' · ') : 'بدون شیفت ثبت‌شده';
+          const block =
             '<blockquote>👤 ' +
             esc(name) +
             '\n🆔 <code>' +
@@ -3875,6 +3885,10 @@ if (data.startsWith('own_shift:')) {
             sc.rj +
             ' · جمع ' +
             sc.total +
+            '\n📍 در شیفت: ' +
+            (sc.inShift || 0) +
+            ' · خارج شیفت: ' +
+            (sc.outShift || 0) +
             '</blockquote>\n';
           if ((body + block).length > 3800) {
             try {

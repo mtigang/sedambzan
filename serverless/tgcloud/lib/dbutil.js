@@ -1809,6 +1809,77 @@ export function tehranDateOfTs(ts) {
   }
 }
 
+
+/** ساعت:دقیقه تهران از timestamp بررسی */
+export function tehranHmOfTs(ts) {
+  if (ts == null || ts === '') return null;
+  try {
+    let v = ts;
+    if (v instanceof Date) {
+      /* ok */
+    } else if (typeof v === 'string' && /^\d+$/.test(v)) {
+      v = Number(v);
+    }
+    if (typeof v === 'number') {
+      if (v < 1e12) v = v * 1000;
+      v = new Date(v);
+    } else if (!(v instanceof Date)) {
+      v = new Date(v);
+    }
+    const ms = v.getTime();
+    if (!Number.isFinite(ms)) return null;
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Tehran',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = Object.fromEntries(fmt.formatToParts(new Date(ms)).map(function (p) {
+      return [p.type, p.value];
+    }));
+    const h = String(parts.hour || '0').padStart(2, '0');
+    const m = String(parts.minute || '0').padStart(2, '0');
+    return h + ':' + m;
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * آیا بررسی در بازهٔ یکی از شیفت‌های ثبت‌شده (فعال یا لغوشده) همان روز/کانال بوده؟
+ * شیفت لغوشده هم شمرده می‌شود چون در زمان بررسی ممکن است فعال بوده باشد.
+ */
+export function reviewMatchedShift(adminId, channelKey, reviewedAt, allShifts) {
+  const aid = Number(adminId);
+  const ck = normalizeChannelKey(channelKey) || String(channelKey || '');
+  if (!aid || !ck || reviewedAt == null) return false;
+  const day = tehranDateOfTs(reviewedAt);
+  const hm = tehranHmOfTs(reviewedAt);
+  if (!day || !hm) return false;
+  const list = allShifts || [];
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i];
+    if (Number(s.adminId ?? s.admin_id) !== aid) continue;
+    const sck = normalizeChannelKey(s.channelKey || s.channel_key) || String(s.channelKey || s.channel_key || '');
+    if (sck !== ck) continue;
+    const st = String(s.status || 'active');
+    if (st !== 'active' && st !== 'cancelled') continue;
+    const sd = String(s.shiftDate ?? s.shift_date ?? '');
+    if (sd === 'perm' || sd === 'permanent') {
+      // دائم حذف شده؛ نادیده
+      continue;
+    }
+    if (sd !== day) continue;
+    const sh = String(s.startHm ?? s.start_hm ?? '');
+    const eh = String(s.endHm ?? s.end_hm ?? '');
+    if (!sh || !eh || sh === eh) continue;
+    try {
+      if (inRange(hm, sh, eh)) return true;
+    } catch (_e) {}
+  }
+  return false;
+}
+
 function escHtml(s) {
   return String(s || '')
     .replace(/&/g, '&amp;')
@@ -1859,7 +1930,7 @@ export async function buildAdminStatsPayload(day, channelScope) {
     caRows = [];
   }
 
-  // فقط پیام‌های بررسی‌شده همان روز
+  // فقط پیام‌های بررسی‌شده همان روز (تقویم تهران)
   const dayMsg = allMsg.filter(function (m) {
     if (!m || !m.reviewedBy) return false;
     const st = String(m.status || '');
@@ -1872,30 +1943,40 @@ export async function buildAdminStatsPayload(day, channelScope) {
     const conf = DEFAULT_CHANNELS[key];
     if (!conf) continue;
 
-    // فقط ادمین‌های فعلی ثبت‌شده در channel_admins
     const validAdminIds = {};
     for (const ca of caRows) {
       if (String(ca.channelKey || ca.channel_key) !== key) continue;
       const aid = Number(ca.userId || ca.user_id);
-      if (aid && Number.isFinite(aid)) validAdminIds[aid] = true;
+      if (aid && Number.isFinite(aid) && !isOwner(aid)) validAdminIds[aid] = true;
     }
 
+    // شیفت‌های همان روز — فعال و لغوشده (برای شفافیت تاریخچه)
     const dayShifts = allSh.filter(function (s) {
-      const ck = String(s.channelKey || s.channel_key || '');
+      const ck = normalizeChannelKey(s.channelKey || s.channel_key) || String(s.channelKey || s.channel_key || '');
       const st = String(s.status || '');
       const sd = String(s.shiftDate || s.shift_date || '');
-      return ck === key && st === 'active' && sd === day;
+      if (ck !== key) return false;
+      if (st !== 'active' && st !== 'cancelled') return false;
+      if (sd === 'perm' || sd === 'permanent') return false;
+      return sd === day;
     });
 
     const byAdmin = {};
     function ensure(aid) {
       if (!byAdmin[aid]) {
-        byAdmin[aid] = { aid: Number(aid), ap: 0, rj: 0, shifts: [] };
+        byAdmin[aid] = {
+          aid: Number(aid),
+          ap: 0,
+          rj: 0,
+          inShift: 0,
+          outShift: 0,
+          shifts: [],
+          shiftsCancelled: [],
+        };
       }
       return byAdmin[aid];
     }
 
-    // فقط ادمین‌های معتبر را پایه قرار بده
     for (const aidStr of Object.keys(validAdminIds)) {
       ensure(Number(aidStr));
     }
@@ -1904,19 +1985,27 @@ export async function buildAdminStatsPayload(day, channelScope) {
       const aid = Number(s.adminId || s.admin_id);
       if (!aid || !validAdminIds[aid]) continue;
       const o = ensure(aid);
-      o.shifts.push(
+      const label =
         String(s.startHm || s.start_hm || '').slice(0, 5) +
-          '–' +
-          String(s.endHm || s.end_hm || '').slice(0, 5)
-      );
+        '–' +
+        String(s.endHm || s.end_hm || '').slice(0, 5);
+      if (String(s.status) === 'cancelled') {
+        o.shiftsCancelled.push(label);
+      } else {
+        o.shifts.push(label);
+      }
     }
+
     for (const m of dayMsg) {
-      if (String(m.channelKey || m.channel_key) !== key) continue;
+      const mck = normalizeChannelKey(m.channelKey || m.channel_key) || String(m.channelKey || '');
+      if (mck !== key) continue;
       const aid = Number(m.reviewedBy);
       if (!aid || !validAdminIds[aid]) continue;
       const o = ensure(aid);
       if (String(m.status) === 'approved') o.ap++;
       else if (String(m.status) === 'rejected') o.rj++;
+      if (reviewMatchedShift(aid, key, m.reviewedAt, allSh)) o.inShift++;
+      else o.outShift++;
     }
 
     const admins = Object.values(byAdmin)
@@ -1926,23 +2015,42 @@ export async function buildAdminStatsPayload(day, channelScope) {
           ap: o.ap,
           rj: o.rj,
           total: o.ap + o.rj,
+          inShift: o.inShift,
+          outShift: o.outShift,
           shifts: o.shifts,
+          shiftsCancelled: o.shiftsCancelled,
         };
+      })
+      .filter(function (o) {
+        // فقط کسانی که شیفت (فعال/لغو) یا بررسی دارند
+        return (
+          o.total > 0 ||
+          (o.shifts && o.shifts.length) ||
+          (o.shiftsCancelled && o.shiftsCancelled.length)
+        );
       })
       .sort(function (a, b) {
         return b.total - a.total || a.aid - b.aid;
       });
 
+    const activeShiftCount = dayShifts.filter(function (s) {
+      return String(s.status) === 'active';
+    }).length;
+
     channels.push({
       key: key,
       title: conf.title || key,
       admins: admins,
-      shiftCount: dayShifts.filter(function (s) {
-        const aid = Number(s.adminId || s.admin_id);
-        return aid && validAdminIds[aid];
-      }).length,
+      shiftCount: activeShiftCount,
+      shiftCancelledCount: dayShifts.length - activeShiftCount,
       reviewTotal: admins.reduce(function (s, a) {
         return s + a.total;
+      }, 0),
+      reviewInShift: admins.reduce(function (s, a) {
+        return s + (a.inShift || 0);
+      }, 0),
+      reviewOutShift: admins.reduce(function (s, a) {
+        return s + (a.outShift || 0);
       }, 0),
     });
   }
@@ -2694,6 +2802,7 @@ export async function hasActiveShift(adminId, channelKey) {
  * ساب‌لیدر «این کاربر» بود و شیفت «صدام بزن» داشت، پیام هر دو را می‌گرفت.
  */
 export async function allowedReviewChannels(userId) {
+  // مالک: همه کانال‌ها بدون نیاز به شیفت
   if (isOwner(userId)) return Object.keys(DEFAULT_CHANNELS || {});
   try {
     const keys = await activeShiftChannelKeys(userId);
@@ -2710,6 +2819,8 @@ export async function allowedReviewChannels(userId) {
       return out;
     }
   } catch (_e) {}
+  // ساب‌لیدر بدون شیفت فعال: دسترسی مدیریتی به کانال خودش (عمدی).
+  // این بررسی‌ها در آمار به‌عنوان «خارج شیفت» شمارش می‌شوند.
   try {
     const sl = await getActiveSubLeaderChannel(userId);
     if (sl) {
@@ -3998,12 +4109,17 @@ export async function buildDataAnalysisReport(scope, period, mode) {
       const aid = Number(aidStr);
       let a = 0,
         j = 0;
+      let inS = 0,
+        outS = 0;
       const durs = [];
       let lastAct = null;
       for (const m of reviewed) {
         if (Number(m.reviewedBy) !== aid) continue;
         if (String(m.status) === 'approved') a++;
         else if (String(m.status) === 'rejected') j++;
+        const ck = String(m.channelKey || '');
+        if (reviewMatchedShift(aid, ck, m.reviewedAt, allSh)) inS++;
+        else outS++;
         const sub = tsMs(m.submittedAt);
         const rev = tsMs(m.reviewedAt);
         if (sub != null && rev != null && rev >= sub) durs.push(rev - sub);
@@ -4029,6 +4145,8 @@ export async function buildDataAnalysisReport(scope, period, mode) {
         ap: a,
         rj: j,
         total: total,
+        inShift: inS,
+        outShift: outS,
         shifts: shiftsN,
         avgHandle: avg(durs),
         lastAct: lastAct,
@@ -4060,7 +4178,11 @@ export async function buildDataAnalysisReport(scope, period, mode) {
           st.total +
           ') · ٪رد ' +
           st.rejectPct +
-          '\n  ⏰ شیفت در بازه: ' +
+          '\n  📍 در شیفت: ' +
+          (st.inShift || 0) +
+          ' · خارج شیفت: ' +
+          (st.outShift || 0) +
+          '\n  ⏰ شیفت ثبت‌شده در بازه: ' +
           st.shifts +
           ' · میانگین رسیدگی: ' +
           fmtMins(st.avgHandle) +
@@ -4105,6 +4227,20 @@ export async function buildDataAnalysisReport(scope, period, mode) {
     const avgW = avg(handleSamples);
     if (avgW != null && avgW > 2 * 3600 * 1000) {
       tips.push('میانگین زمان رسیدگی بیش از ۲ ساعت است — پوشش شیفت را متراکم‌تر کنید.');
+    }
+    // نسبت خارج از شیفت
+    let totR = 0,
+      outR = 0;
+    for (const st of adminStats || []) {
+      totR += st.total || 0;
+      outR += st.outShift || 0;
+    }
+    if (totR > 20 && outR / totR > 0.4) {
+      tips.push(
+        'حدود ' +
+          Math.round((outR / totR) * 100) +
+          '٪ بررسی‌ها خارج از بازه شیفت ثبت‌شده است (ساب‌لیدر بدون شیفت، پایان Batch، یا مالک).'
+      );
     }
     if (!tips.length) {
       tips.push('شاخص‌های اصلی در محدوده قابل‌قبول نمونه هستند. روی کانال‌های با صف بالاتر تمرکز کنید.');
