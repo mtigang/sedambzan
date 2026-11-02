@@ -682,24 +682,34 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
 
 export function adminListInline(admins, channelKey) {
   const rows = [];
+  const ck = String(channelKey || '');
   for (const a of admins) {
     const name = String(a.display || a.userId || 'کاربر').slice(0, 40);
     rows.push([
       { text: btnText(name, 'کاربر'), callback_data: 'uv:' + a.userId, style: 'primary' },
       {
         text: 'حذف',
-        callback_data: 'adel:' + channelKey + ':' + a.userId,
+        callback_data: 'adel:' + ck + ':' + a.userId,
         style: 'danger',
       },
     ]);
   }
   rows.push([
-    { text: 'افزودن ادمین', callback_data: 'aadd:' + channelKey, style: 'success' },
-    { text: 'حذف دسته‌جمعی', callback_data: 'abulkdel:' + channelKey, style: 'danger' },
+    { text: 'افزودن ادمین', callback_data: 'aadd:' + ck, style: 'success' },
+    { text: 'حذف دسته‌جمعی', callback_data: 'abulkdel:' + ck, style: 'danger' },
   ]);
   rows.push([
-    { text: 'افزودن دسته‌جمعی', callback_data: 'abulk:' + channelKey, style: 'primary' },
+    { text: 'افزودن دسته‌جمعی', callback_data: 'abulk:' + ck, style: 'primary' },
   ]);
+  if (admins && admins.length) {
+    rows.push([
+      {
+        text: '🗑 حذف همه ادمین‌های این کانال',
+        callback_data: 'adel_all_ask:' + ck,
+        style: 'danger',
+      },
+    ]);
+  }
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 

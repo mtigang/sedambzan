@@ -528,6 +528,150 @@ if (data.startsWith('ban_user:')) {
     }
 
     // —— حذف دسته‌جمعی ادمین ——
+    // —— حذف یک‌جا همه ادمین‌های یک کانال ——
+    if (data.startsWith('adel_all_ask:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const ck = data.split(':')[1] || '';
+      if (!ck || !DEFAULT_CHANNELS[ck]) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
+        return;
+      }
+      let ads = [];
+      try {
+        ads = await listAdminsByChannel(ck);
+      } catch (_e) {
+        ads = [];
+      }
+      const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '⚠️ حذف همه ادمین‌های «' +
+          title +
+          '»\n\n' +
+          'تعداد فعلی: ' +
+          ads.length +
+          '\nاین کار همه را از لیست ادمین این کانال برمی‌دارد (شیفت‌های فعالشان هم لغو می‌شود).\n\n' +
+          'مطمئن هستید؟',
+        reply_markup: sanitizeMarkup({
+          inline_keyboard: [
+            [
+              {
+                text: 'بله، همه حذف شوند',
+                callback_data: 'adel_all_yes:' + ck,
+                style: 'danger',
+              },
+            ],
+            [{ text: 'انصراف', callback_data: 'adel_all_no:' + ck, style: 'primary' }],
+          ],
+        }),
+      });
+      return;
+    }
+
+    if (data.startsWith('adel_all_no:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const ck = data.split(':')[1] || '';
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: 'حذف همه لغو شد.',
+        });
+      } catch (_e) {}
+      if (ck && DEFAULT_CHANNELS[ck]) {
+        try {
+          const ads = await listAdminsByChannel(ck);
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text:
+              '👮 ادمین‌های «' +
+              ((DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck) +
+              '»\nتعداد: ' +
+              ads.length,
+            reply_markup: sanitizeMarkup(adminListInline(ads, ck)),
+          });
+        } catch (_e) {}
+      }
+      return;
+    }
+
+    if (data.startsWith('adel_all_yes:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const ck = data.split(':')[1] || '';
+      if (!ck || !DEFAULT_CHANNELS[ck]) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'در حال حذف…' });
+      let ads = [];
+      try {
+        ads = await listAdminsByChannel(ck);
+      } catch (_e) {
+        ads = [];
+      }
+      let ok = 0;
+      let fail = 0;
+      for (const a of ads) {
+        const uid = Number(a.userId || a.user_id);
+        if (!uid) {
+          fail++;
+          continue;
+        }
+        try {
+          await removeChannelAdmin(uid, ck);
+          ok++;
+        } catch (e) {
+          console.error('adel_all_yes', uid, e);
+          fail++;
+        }
+      }
+      let left = [];
+      try {
+        left = await listAdminsByChannel(ck);
+      } catch (_e) {
+        left = [];
+      }
+      const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+      const body =
+        '🗑 حذف همه ادمین‌های «' +
+        title +
+        '»\n' +
+        '✅ حذف‌شده: ' +
+        ok +
+        (fail ? '\n❌ خطا: ' + fail : '') +
+        '\nباقی‌مانده: ' +
+        left.length;
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: body,
+        });
+      } catch (_e) {
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: body });
+      }
+      try {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '👮 ادمین‌های «' + title + '»\nتعداد: ' + left.length,
+          reply_markup: sanitizeMarkup(adminListInline(left, ck)),
+        });
+      } catch (_e) {}
+      return;
+    }
+
     if (data.startsWith('abulkdel:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
