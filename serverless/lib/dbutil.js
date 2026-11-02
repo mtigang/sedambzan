@@ -1871,6 +1871,15 @@ export async function buildAdminStatsPayload(day, channelScope) {
   for (const key of scopeKeys) {
     const conf = DEFAULT_CHANNELS[key];
     if (!conf) continue;
+
+    // فقط ادمین‌های فعلی ثبت‌شده در channel_admins
+    const validAdminIds = {};
+    for (const ca of caRows) {
+      if (String(ca.channelKey || ca.channel_key) !== key) continue;
+      const aid = Number(ca.userId || ca.user_id);
+      if (aid && Number.isFinite(aid)) validAdminIds[aid] = true;
+    }
+
     const dayShifts = allSh.filter(function (s) {
       const ck = String(s.channelKey || s.channel_key || '');
       const st = String(s.status || '');
@@ -1886,14 +1895,14 @@ export async function buildAdminStatsPayload(day, channelScope) {
       return byAdmin[aid];
     }
 
-    for (const ca of caRows) {
-      if (String(ca.channelKey || ca.channel_key) !== key) continue;
-      const aid = Number(ca.userId || ca.user_id);
-      if (aid) ensure(aid);
+    // فقط ادمین‌های معتبر را پایه قرار بده
+    for (const aidStr of Object.keys(validAdminIds)) {
+      ensure(Number(aidStr));
     }
+
     for (const s of dayShifts) {
       const aid = Number(s.adminId || s.admin_id);
-      if (!aid) continue;
+      if (!aid || !validAdminIds[aid]) continue;
       const o = ensure(aid);
       o.shifts.push(
         String(s.startHm || s.start_hm || '').slice(0, 5) +
@@ -1904,7 +1913,7 @@ export async function buildAdminStatsPayload(day, channelScope) {
     for (const m of dayMsg) {
       if (String(m.channelKey || m.channel_key) !== key) continue;
       const aid = Number(m.reviewedBy);
-      if (!aid) continue;
+      if (!aid || !validAdminIds[aid]) continue;
       const o = ensure(aid);
       if (String(m.status) === 'approved') o.ap++;
       else if (String(m.status) === 'rejected') o.rj++;
@@ -1920,18 +1929,18 @@ export async function buildAdminStatsPayload(day, channelScope) {
           shifts: o.shifts,
         };
       })
-      .filter(function (o) {
-        return o.total > 0 || (o.shifts && o.shifts.length);
-      })
       .sort(function (a, b) {
-        return b.total - a.total;
+        return b.total - a.total || a.aid - b.aid;
       });
 
     channels.push({
       key: key,
       title: conf.title || key,
       admins: admins,
-      shiftCount: dayShifts.length,
+      shiftCount: dayShifts.filter(function (s) {
+        const aid = Number(s.adminId || s.admin_id);
+        return aid && validAdminIds[aid];
+      }).length,
       reviewTotal: admins.reduce(function (s, a) {
         return s + a.total;
       }, 0),
@@ -3726,7 +3735,9 @@ export async function pendingForViewer(userId) {
  * گزارش تحلیل داده برای مالک — سبک و بدون content پیام‌ها
  * scope: sadambazan | inkarbar | zendegi | all
  */
-export async function buildDataAnalysisReport(scope) {
+export async function buildDataAnalysisReport(scope, period, mode) {
+  period = period || 'week';
+  mode = mode || 'full';
   const now = tehranNow();
   const channelKeys =
     scope === 'all'
@@ -3736,7 +3747,6 @@ export async function buildDataAnalysisReport(scope) {
         });
   if (!channelKeys.length) return 'کانال نامعتبر.';
 
-  // تقویم ۷ و ۱۴ روز اخیر (تهران تقریبی از UTC+3:30)
   function dayOffset(baseDateStr, offset) {
     const parts = String(baseDateStr).split('-').map(Number);
     const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
@@ -3749,19 +3759,26 @@ export async function buildDataAnalysisReport(scope) {
       String(dt.getUTCDate()).padStart(2, '0')
     );
   }
-  const days7 = [];
-  const days14 = [];
-  for (let i = 0; i < 14; i++) {
-    const d = dayOffset(now.date, -i);
-    days14.push(d);
-    if (i < 7) days7.push(d);
-  }
-  const weekThis = days7.slice(); // امروز تا ۶ روز قبل
-  const weekPrev = days14.slice(7, 14); // ۷ تا ۱۳ روز قبل
 
-  function tehranDay(ts) {
-    return tehranDateOfTs(ts);
+  const allowedDays = {};
+  let periodLabel = '';
+  if (period === 'today') {
+    allowedDays[now.date] = true;
+    periodLabel = 'امروز (' + now.date + ')';
+  } else if (period === 'yesterday') {
+    const y = dayOffset(now.date, -1);
+    allowedDays[y] = true;
+    periodLabel = 'دیروز (' + y + ')';
+  } else if (period === 'week') {
+    for (let i = 0; i < 7; i++) allowedDays[dayOffset(now.date, -i)] = true;
+    periodLabel = '۷ روز اخیر';
+  } else if (period === 'month') {
+    for (let i = 0; i < 30; i++) allowedDays[dayOffset(now.date, -i)] = true;
+    periodLabel = '۳۰ روز اخیر';
+  } else {
+    periodLabel = 'کل نمونهٔ اخیر';
   }
+  const filterByDay = period !== 'all';
 
   function tsMs(ts) {
     if (ts == null) return null;
@@ -3776,23 +3793,25 @@ export async function buildDataAnalysisReport(scope) {
     }
   }
 
-  function shiftHours(s) {
-    try {
-      const a = periodOrd(normHm(s.startHm));
-      let b = periodOrd(normHm(s.endHm));
-      if (b <= a) b += 24 * 60;
-      const mins = b - a;
-      if (mins <= 0 || mins > 15 * 60) return 0;
-      return mins / 60;
-    } catch (_e) {
-      return 0;
-    }
+  function fmtMins(ms) {
+    if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
+    const m = Math.round(ms / 60000);
+    if (m < 60) return m + ' دقیقه';
+    const h = Math.floor(m / 60);
+    const r = m % 60;
+    return h + 'س ' + r + 'د';
   }
 
-  // —— بارگذاری داده (محدود برای Serverless) ——
+  function avg(arr) {
+    if (!arr || !arr.length) return null;
+    let s = 0;
+    for (const x of arr) s += x;
+    return s / arr.length;
+  }
+
   let allSh = [];
   try {
-    allSh = (await db.select().from(shifts).limit(3000).all()) || [];
+    allSh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(4000).all()) || [];
   } catch (e) {
     console.error('da shifts', e);
   }
@@ -3810,7 +3829,6 @@ export async function buildDataAnalysisReport(scope) {
       (await db
         .select({
           id: messages.id,
-          userId: messages.userId,
           status: messages.status,
           channelKey: messages.channelKey,
           reviewedBy: messages.reviewedBy,
@@ -3820,418 +3838,286 @@ export async function buildDataAnalysisReport(scope) {
         })
         .from(messages)
         .orderBy(desc(messages.id))
-        .limit(5000)
+        .limit(8000)
         .all()) || [];
   } catch (e) {
-    console.error('da messages', e);
-    // fallback بدون orderBy
-    try {
-      allMsg = (await db.select().from(messages).limit(4000).all()) || [];
-    } catch (e2) {
-      console.error('da messages fallback', e2);
-    }
+    console.error('da msgs', e);
   }
 
   const scopeSet = {};
   for (const k of channelKeys) scopeSet[k] = true;
 
-  // فیلتر پیام‌های محدوده
-  const msgScope = allMsg.filter(function (m) {
-    return m && scopeSet[String(m.channelKey)];
-  });
-
-  // —— آمار سراسری صف ——
-  const pendingAll = msgScope.filter(function (m) {
-    return String(m.status) === 'pending';
-  });
-  const pendingByCh = {};
-  let oldestPendingMs = null;
-  const waitSamples = [];
-  const nowMs = Date.now();
-  for (const m of pendingAll) {
-    const ck = String(m.channelKey);
-    pendingByCh[ck] = (pendingByCh[ck] || 0) + 1;
-    const sub = tsMs(m.submittedAt);
-    if (sub != null) {
-      const age = nowMs - sub;
-      if (age >= 0 && age < 30 * 24 * 3600 * 1000) {
-        waitSamples.push(age);
-        if (oldestPendingMs == null || sub < oldestPendingMs) oldestPendingMs = sub;
-      }
-    }
-  }
-  function avg(arr) {
-    if (!arr || !arr.length) return 0;
-    let s = 0;
-    for (const x of arr) s += x;
-    return s / arr.length;
-  }
-  function fmtMins(ms) {
-    if (ms == null || !Number.isFinite(ms)) return '—';
-    const m = Math.round(ms / 60000);
-    if (m < 60) return m + ' دقیقه';
-    const h = Math.floor(m / 60);
-    const mm = m % 60;
-    if (h < 48) return h + 'س ' + mm + 'د';
-    return Math.floor(h / 24) + ' روز و ' + (h % 24) + 'س';
-  }
-
-  let body = '📈 تحلیل داده دقیق\n';
-  body += '📅 امروز تهران: ' + now.date + ' ' + now.hm + '\n';
-  body +=
-    '🔎 محدوده: ' +
-    (scope === 'all'
-      ? 'همه کانال‌ها'
-      : (DEFAULT_CHANNELS[scope] && DEFAULT_CHANNELS[scope].title) || scope) +
-    '\n';
-  body += '📦 نمونه پیام: ' + msgScope.length + ' از حداکثر ۵۰۰۰ اخیر\n';
-
-  // —— ۳) تحلیل صف انتظار ——
-  body += '\n════════════\n⏳ تحلیل صف انتظار و تأخیر\n════════════\n';
-  body += '🟡 در انتظار الان: ' + pendingAll.length + '\n';
-  body += '⏱ میانگین سن صف: ' + fmtMins(avg(waitSamples)) + '\n';
-  if (oldestPendingMs != null) {
-    body += '🕰 قدیمی‌ترین pending: ' + fmtMins(nowMs - oldestPendingMs) + '\n';
-  }
-  const pendRank = Object.keys(pendingByCh)
-    .map(function (k) {
-      return { k: k, n: pendingByCh[k] };
-    })
-    .sort(function (a, b) {
-      return b.n - a.n;
-    });
-  if (pendRank.length) {
-    body += '\nصف به تفکیک کانال:\n';
-    for (const r of pendRank) {
-      const t = (DEFAULT_CHANNELS[r.k] && DEFAULT_CHANNELS[r.k].title) || r.k;
-      body += '• «' + t + '»: ' + r.n + '\n';
-    }
-  }
-
-  // —— ۲) آمار کانال‌ها ——
-  body += '\n════════════\n📢 آمار جامع کانال‌ها (۷ روز)\n════════════\n';
-
-  const channelSummary = [];
-
-  for (const ck of channelKeys) {
-    const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-    const chMsg = msgScope.filter(function (m) {
-      return String(m.channelKey) === ck;
-    });
-
-    let recv7 = 0;
-    let ap7 = 0;
-    let rj7 = 0;
-    let pend = 0;
-    let waitCh = [];
-    let reviewWaits = [];
-    const activeUsers = {};
-    let deleted = 0;
-
-    for (const m of chMsg) {
-      const st = String(m.status || '');
-      const subDay = tehranDay(m.submittedAt);
-      const revDay = tehranDay(m.reviewedAt);
-      if (st === 'pending') pend++;
-      if (st === 'rejected' && String(m.rejectReason || '').indexOf('پاک') >= 0) deleted++;
-      if (subDay && weekThis.indexOf(subDay) >= 0) {
-        recv7++;
-        if (m.userId) activeUsers[m.userId] = true;
-      }
-      if (revDay && weekThis.indexOf(revDay) >= 0) {
-        if (st === 'approved') ap7++;
-        if (st === 'rejected') rj7++;
-        const sub = tsMs(m.submittedAt);
-        const rev = tsMs(m.reviewedAt);
-        if (sub != null && rev != null && rev >= sub) {
-          const d = rev - sub;
-          if (d < 14 * 24 * 3600 * 1000) reviewWaits.push(d);
-        }
-      }
-      if (st === 'pending') {
-        const sub = tsMs(m.submittedAt);
-        if (sub != null) waitCh.push(nowMs - sub);
-      }
-    }
-
-    const totalDec = ap7 + rj7;
-    const rejectPct = totalDec ? Math.round((rj7 / totalDec) * 100) : 0;
-    const avgWait = avg(waitCh);
-    const avgReviewWait = avg(reviewWaits);
-
-    // شیفت‌های ۷ روز
-    const chShifts = allSh.filter(function (s) {
-      if (String(s.channelKey) !== ck) return false;
-      if (String(s.status) === 'cancelled') return false;
-      if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') return true;
-      return weekThis.indexOf(String(s.shiftDate)) >= 0;
-    });
-    const shiftAdminSet = {};
-    let shiftHoursTot = 0;
-    for (const s of chShifts) {
-      shiftAdminSet[s.adminId] = true;
-      shiftHoursTot += shiftHours(s);
-    }
-
-    const ads = allAdmins.filter(function (a) {
-      return String(a.channelKey || a.channel_key) === ck;
-    });
-
-    channelSummary.push({
-      ck: ck,
-      title: title,
-      recv7: recv7,
-      ap7: ap7,
-      rj7: rj7,
-      pend: pend,
-      rejectPct: rejectPct,
-      avgWait: avgWait,
-      avgReviewWait: avgReviewWait,
-      activeUsers: Object.keys(activeUsers).length,
-      deleted: deleted,
-      shiftHours: shiftHoursTot,
-      shiftAdmins: Object.keys(shiftAdminSet).length,
-      registeredAdmins: ads.length,
-      needScore: pend + Math.round(avgWait / 60000) + rejectPct,
-    });
-
-    body += '\n━━━━━━━━━━━━\n📢 «' + title + '»\n';
-    body += '📥 دریافتی ۷روز: ' + recv7 + '\n';
-    body += '✅ تأیید ۷روز: ' + ap7 + '\n';
-    body += '❌ رد ۷روز: ' + rj7 + (totalDec ? ' (' + rejectPct + '٪)' : '') + '\n';
-    body += '🟡 در انتظار الان: ' + pend + '\n';
-    body += '⏱ میانگین سن صف: ' + fmtMins(avgWait) + '\n';
-    body += '⚡️ میانگین زمان بررسی: ' + fmtMins(avgReviewWait) + '\n';
-    body += '👤 کاربران فعال ۷روز: ' + Object.keys(activeUsers).length + '\n';
-    body += '🗑 حذف/پاک‌سازی (نمونه): ' + deleted + '\n';
-    body += '⏰ ساعات شیفت ۷روز: ' + Math.round(shiftHoursTot * 10) / 10 + '\n';
-    body += '👮 ادمین ثبت‌شده: ' + ads.length + ' | شیفت‌دار: ' + Object.keys(shiftAdminSet).length + '\n';
-  }
-
-  // رتبه‌بندی کانال‌ها
-  if (channelSummary.length > 1) {
-    body += '\n────────────\n📊 مقایسه کانال‌ها\n';
-    const byRecv = channelSummary.slice().sort(function (a, b) {
-      return b.recv7 - a.recv7;
-    });
-    const byDelay = channelSummary.slice().sort(function (a, b) {
-      return b.avgWait - a.avgWait;
-    });
-    const byRej = channelSummary.slice().sort(function (a, b) {
-      return b.rejectPct - a.rejectPct;
-    });
-    const byNeed = channelSummary.slice().sort(function (a, b) {
-      return b.needScore - a.needScore;
-    });
-    if (byRecv[0]) body += '🥇 بیشترین ورودی: «' + byRecv[0].title + '» (' + byRecv[0].recv7 + ')\n';
-    if (byDelay[0]) body += '🐢 بیشترین تأخیر صف: «' + byDelay[0].title + '» (' + fmtMins(byDelay[0].avgWait) + ')\n';
-    if (byRej[0]) body += '🔴 بیشترین ٪ رد: «' + byRej[0].title + '» (' + byRej[0].rejectPct + '٪)\n';
-    if (byNeed[0])
-      body += '🆘 نیاز بیشتر به ادمین: «' + byNeed[0].title + '» (امتیاز ' + byNeed[0].needScore + ')\n';
-  }
-
-  // —— ۱) آمار عملکرد ادمین‌ها ——
-  body += '\n════════════\n👮 آمار عملکرد ادمین‌ها (۷ روز)\n════════════\n';
-
-  // جمع‌آوری ادمین‌های مرتبط با scope
-  const adminIdsSet = {};
+  // ادمین‌های معتبر فقط از جدول channel_admins
+  const validAdminByCh = {};
+  const validAdminAll = {};
   for (const a of allAdmins) {
     const ck = String(a.channelKey || a.channel_key || '');
-    if (scopeSet[ck]) {
-      const uid = Number(a.userId != null ? a.userId : a.user_id);
-      if (uid) adminIdsSet[uid] = true;
-    }
-  }
-  for (const s of allSh) {
-    if (!scopeSet[String(s.channelKey)]) continue;
-    if (String(s.status) === 'cancelled') continue;
-    const uid = Number(s.adminId);
-    if (uid) adminIdsSet[uid] = true;
-  }
-  for (const m of msgScope) {
-    if (m.reviewedBy) adminIdsSet[Number(m.reviewedBy)] = true;
+    const uid = Number(a.userId != null ? a.userId : a.user_id);
+    if (!uid || !scopeSet[ck]) continue;
+    if (!validAdminByCh[ck]) validAdminByCh[ck] = {};
+    validAdminByCh[ck][uid] = true;
+    validAdminAll[uid] = true;
   }
 
-  const adminStats = [];
-  for (const aidStr of Object.keys(adminIdsSet)) {
-    const aid = Number(aidStr);
-    if (!aid) continue;
-
-    // شیفت‌ها این هفته / هفته قبل
-    let shiftsThis = 0;
-    let hoursThis = 0;
-    let shiftsPrev = 0;
-    let hoursPrev = 0;
-    const activeShiftDays = {};
-    for (const s of allSh) {
-      if (Number(s.adminId) !== aid) continue;
-      if (String(s.status) === 'cancelled') continue;
-      if (scope !== 'all' && String(s.channelKey) !== scope) continue;
-      const sd = String(s.shiftDate || '');
-      const hrs = shiftHours(s);
-      if (sd === 'perm' || sd === 'permanent') {
-        shiftsThis++;
-        hoursThis += hrs;
-        continue;
-      }
-      if (weekThis.indexOf(sd) >= 0) {
-        shiftsThis++;
-        hoursThis += hrs;
-        activeShiftDays[sd] = true;
-      } else if (weekPrev.indexOf(sd) >= 0) {
-        shiftsPrev++;
-        hoursPrev += hrs;
-      }
-    }
-
-    // بررسی‌ها
-    let ap = 0;
-    let rj = 0;
-    let apPrev = 0;
-    let rjPrev = 0;
-    const reviewDurations = [];
-    const reviewDays = {};
-    let lastAct = null;
-    for (const m of msgScope) {
-      if (Number(m.reviewedBy) !== aid) continue;
-      const st = String(m.status || '');
-      if (st !== 'approved' && st !== 'rejected') continue;
-      const rd = tehranDay(m.reviewedAt);
-      const rev = tsMs(m.reviewedAt);
-      if (rev != null && (lastAct == null || rev > lastAct)) lastAct = rev;
-      if (rd && weekThis.indexOf(rd) >= 0) {
-        if (st === 'approved') ap++;
-        else rj++;
-        reviewDays[rd] = true;
-        const sub = tsMs(m.submittedAt);
-        if (sub != null && rev != null && rev >= sub) {
-          const d = rev - sub;
-          if (d < 14 * 24 * 3600 * 1000) reviewDurations.push(d);
-        }
-      } else if (rd && weekPrev.indexOf(rd) >= 0) {
-        if (st === 'approved') apPrev++;
-        else rjPrev++;
-      }
-    }
-
-    const reviewed = ap + rj;
-    const reviewedPrev = apPrev + rjPrev;
-    const avgReviewMs = avg(reviewDurations);
-    const perHour = hoursThis > 0.25 ? Math.round((reviewed / hoursThis) * 10) / 10 : reviewed;
-    // تعهد شیفت: روزهایی که هم شیفت داشته و هم حداقل یک بررسی
-    const shiftDayCount = Object.keys(activeShiftDays).length;
-    let fulfilledDays = 0;
-    for (const d of Object.keys(activeShiftDays)) {
-      if (reviewDays[d]) fulfilledDays++;
-    }
-    // اگر شیفت دائمی/بدون تاریخ مشخص: بر اساس داشتن بررسی در برابر گرفتن شیفت
-    let commitPct = 0;
-    if (shiftDayCount > 0) {
-      commitPct = Math.round((fulfilledDays / shiftDayCount) * 100);
-    } else if (shiftsThis > 0) {
-      commitPct = reviewed > 0 ? Math.min(100, Math.round((reviewed / Math.max(shiftsThis * 5, 1)) * 100)) : 0;
-    } else {
-      commitPct = reviewed > 0 ? 50 : 0;
-    }
-
-    // روزهای فعالیت / عدم فعالیت در ۷ روز
-    const activeDaysN = Object.keys(reviewDays).length;
-    const inactiveDaysN = 7 - activeDaysN;
-
-    // باقی‌مانده صف در کانال‌های این ادمین (تقریبی — snapshot فعلی)
-    let remainHint = 0;
-    for (const a of allAdmins) {
-      const uid = Number(a.userId != null ? a.userId : a.user_id);
-      if (uid !== aid) continue;
-      const ck = String(a.channelKey || a.channel_key || '');
-      if (scopeSet[ck]) remainHint += pendingByCh[ck] || 0;
-    }
-
-    const delta = reviewed - reviewedPrev;
-
-    adminStats.push({
-      id: aid,
-      shiftsThis: shiftsThis,
-      hoursThis: hoursThis,
-      reviewed: reviewed,
-      ap: ap,
-      rj: rj,
-      avgReviewMs: avgReviewMs,
-      perHour: perHour,
-      activeDaysN: activeDaysN,
-      inactiveDaysN: inactiveDaysN,
-      commitPct: commitPct,
-      lastAct: lastAct,
-      remainHint: remainHint,
-      reviewedPrev: reviewedPrev,
-      delta: delta,
-    });
+  function inPeriodSub(m) {
+    if (!filterByDay) return true;
+    const d = tehranDateOfTs(m.submittedAt);
+    return d && allowedDays[d];
+  }
+  function inPeriodRev(m) {
+    if (!filterByDay) return true;
+    const d = tehranDateOfTs(m.reviewedAt);
+    return d && allowedDays[d];
   }
 
-  adminStats.sort(function (a, b) {
-    return b.reviewed - a.reviewed || b.shiftsThis - a.shiftsThis;
+  const msgScope = allMsg.filter(function (m) {
+    return scopeSet[String(m.channelKey || m.channel_key || '')];
   });
 
-  // حداکثر ۱۵ ادمین برتر + همه کسانی که شیفت داشتند
-  const shown = adminStats.slice(0, 18);
-  if (!shown.length) {
-    body += '— ادمینی در این محدوده یافت نشد.\n';
-  } else {
-    for (const st of shown) {
-      let name = String(st.id);
-      try {
-        name = displayName(await getUser(st.id), st.id);
-      } catch (_e) {}
-      body += '\n👤 ' + name + ' | ' + st.id + '\n';
-      body += '  ⏰ شیفت: ' + st.shiftsThis + ' (' + Math.round(st.hoursThis * 10) / 10 + 'س)\n';
-      body += '  🔍 بررسی: ' + st.reviewed + ' | ✅' + st.ap + ' ❌' + st.rj + '\n';
-      body += '  ⏱ میانگین زمان بررسی: ' + fmtMins(st.avgReviewMs) + '\n';
-      body += '  🚀 میانگین در ساعت شیفت: ' + st.perHour + '\n';
-      body += '  📅 فعالیت: ' + st.activeDaysN + ' روز | عدم‌فعالیت: ' + st.inactiveDaysN + ' روز\n';
-      body += '  📐 انجام تعهد شیفت: ' + st.commitPct + '٪\n';
-      body += '  🟡 صف مرتبط (الان): ~' + st.remainHint + '\n';
-      body +=
-        '  🕰 آخرین فعالیت: ' +
-        (st.lastAct ? fmtMins(nowMs - st.lastAct) + ' پیش' : '—') +
-        '\n';
-      const arrow = st.delta > 0 ? '▲' : st.delta < 0 ? '▼' : '＝';
-      body +=
-        '  📊 نسبت به هفته قبل: ' +
-        arrow +
-        ' ' +
-        (st.delta >= 0 ? '+' : '') +
-        st.delta +
-        ' بررسی (قبل: ' +
-        st.reviewedPrev +
-        ')\n';
+  const received = msgScope.filter(inPeriodSub);
+  const reviewed = msgScope.filter(function (m) {
+    const st = String(m.status || '');
+    return (st === 'approved' || st === 'rejected') && inPeriodRev(m);
+  });
+  const pendingNow = msgScope.filter(function (m) {
+    return String(m.status) === 'pending';
+  });
+
+  let ap = 0;
+  let rj = 0;
+  const waitSamples = [];
+  const handleSamples = [];
+  const nowMs = Date.now();
+  for (const m of reviewed) {
+    if (String(m.status) === 'approved') ap++;
+    else rj++;
+    const sub = tsMs(m.submittedAt);
+    const rev = tsMs(m.reviewedAt);
+    if (sub != null && rev != null && rev >= sub) {
+      waitSamples.push(rev - sub);
+      handleSamples.push(rev - sub);
     }
-    if (adminStats.length > shown.length) {
-      body += '\n… و ' + (adminStats.length - shown.length) + ' ادمین دیگر در نمونه\n';
+  }
+  for (const m of pendingNow) {
+    const sub = tsMs(m.submittedAt);
+    if (sub != null) waitSamples.push(nowMs - sub);
+  }
+
+  const scopeTitle =
+    scope === 'all'
+      ? 'همه کانال‌ها'
+      : (DEFAULT_CHANNELS[scope] && DEFAULT_CHANNELS[scope].title) || scope;
+
+  let body = '';
+  body += '📈 تحلیل داده — «' + scopeTitle + '»\n';
+  body += '🗓 بازه: ' + periodLabel + '\n';
+  body += 'نمونهٔ پیام: ' + allMsg.length + ' ردیف اخیر\n';
+
+  // —— چرخه پیام ——
+  if (mode === 'msg' || mode === 'full') {
+    body += '\n════════════\n📨 چرخه پیام‌ها\n════════════\n';
+    body += '📥 دریافتی (بازه): ' + received.length + '\n';
+    body += '🟢 تأیید: ' + ap + '\n';
+    body += '🔴 رد: ' + rj + '\n';
+    body += '🟡 در انتظار الان: ' + pendingNow.length + '\n';
+    const done = ap + rj;
+    if (done > 0) {
+      body += '٪ تأیید: ' + Math.round((ap / done) * 100) + '٪\n';
+      body += '٪ رد: ' + Math.round((rj / done) * 100) + '٪\n';
+    }
+    body += '⏱ میانگین انتظار تا رسیدگی: ' + fmtMins(avg(handleSamples)) + '\n';
+    if (pendingNow.length) {
+      const ages = [];
+      for (const m of pendingNow) {
+        const sub = tsMs(m.submittedAt);
+        if (sub != null) ages.push(nowMs - sub);
+      }
+      body += '⏳ میانگین سن صف فعلی: ' + fmtMins(avg(ages)) + '\n';
+      body += '🕰 قدیمی‌ترین pending: ' + fmtMins(ages.length ? Math.max.apply(null, ages) : null) + '\n';
+    }
+
+    // تفکیک کانال
+    body += '\n📺 تفکیک کانال (بازه):\n';
+    for (const ck of channelKeys) {
+      const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+      let r = 0,
+        a = 0,
+        j = 0,
+        p = 0;
+      for (const m of msgScope) {
+        if (String(m.channelKey) !== ck) continue;
+        if (String(m.status) === 'pending') p++;
+        if (inPeriodSub(m)) r++;
+        if (inPeriodRev(m)) {
+          if (String(m.status) === 'approved') a++;
+          if (String(m.status) === 'rejected') j++;
+        }
+      }
+      body +=
+        '• «' +
+        title +
+        '» 📥' +
+        r +
+        ' 🟢' +
+        a +
+        ' 🔴' +
+        j +
+        ' 🟡' +
+        p +
+        '\n';
+    }
+
+    // دلایل رد
+    const reasons = {};
+    for (const m of reviewed) {
+      if (String(m.status) !== 'rejected') continue;
+      const rr = String(m.rejectReason || 'نامشخص').slice(0, 40);
+      reasons[rr] = (reasons[rr] || 0) + 1;
+    }
+    const reasonList = Object.keys(reasons)
+      .map(function (k) {
+        return { k: k, n: reasons[k] };
+      })
+      .sort(function (a, b) {
+        return b.n - a.n;
+      })
+      .slice(0, 8);
+    if (reasonList.length) {
+      body += '\n📌 دلایل رد پرتکرار:\n';
+      for (const x of reasonList) body += '• ' + x.k + ': ' + x.n + '\n';
     }
   }
 
-  // هشدار عملکرد پایین
-  const low = adminStats
-    .filter(function (s) {
-      return s.shiftsThis >= 1 && s.reviewed < Math.max(3, s.shiftsThis * 2);
-    })
-    .slice(0, 8);
-  if (low.length) {
-    body += '\n⚠️ شیفت گرفته ولی بررسی کم:\n';
-    for (const s of low) {
-      let name = String(s.id);
-      try {
-        name = displayName(await getUser(s.id), s.id);
-      } catch (_e) {}
-      body += '• ' + name + ' | شیفت ' + s.shiftsThis + ' | بررسی ' + s.reviewed + '\n';
+  // —— ادمین‌ها ——
+  if (mode === 'adm' || mode === 'full') {
+    body += '\n════════════\n👮 عملکرد ادمین‌ها\n════════════\n';
+    body += '(فقط ادمین‌های فعلی هر کانال)\n';
+
+    const adminStats = [];
+    for (const aidStr of Object.keys(validAdminAll)) {
+      const aid = Number(aidStr);
+      let a = 0,
+        j = 0;
+      const durs = [];
+      let lastAct = null;
+      for (const m of reviewed) {
+        if (Number(m.reviewedBy) !== aid) continue;
+        if (String(m.status) === 'approved') a++;
+        else if (String(m.status) === 'rejected') j++;
+        const sub = tsMs(m.submittedAt);
+        const rev = tsMs(m.reviewedAt);
+        if (sub != null && rev != null && rev >= sub) durs.push(rev - sub);
+        if (rev != null && (lastAct == null || rev > lastAct)) lastAct = rev;
+      }
+      let shiftsN = 0;
+      for (const s of allSh) {
+        if (Number(s.adminId || s.admin_id) !== aid) continue;
+        if (String(s.status) === 'cancelled') continue;
+        const ck = String(s.channelKey || s.channel_key || '');
+        if (!scopeSet[ck]) continue;
+        if (!validAdminByCh[ck] || !validAdminByCh[ck][aid]) continue;
+        const sd = String(s.shiftDate || s.shift_date || '');
+        if (filterByDay) {
+          if (sd === 'perm' || sd === 'permanent') continue;
+          if (!allowedDays[sd]) continue;
+        }
+        shiftsN++;
+      }
+      const total = a + j;
+      adminStats.push({
+        id: aid,
+        ap: a,
+        rj: j,
+        total: total,
+        shifts: shiftsN,
+        avgHandle: avg(durs),
+        lastAct: lastAct,
+        rejectPct: total ? Math.round((j / total) * 100) : 0,
+      });
+    }
+
+    adminStats.sort(function (x, y) {
+      return y.total - x.total || y.shifts - x.shifts;
+    });
+
+    const shown = adminStats.slice(0, 25);
+    if (!shown.length) {
+      body += 'ادمینی در محدوده ثبت نشده.\n';
+    } else {
+      for (const st of shown) {
+        let name = String(st.id);
+        try {
+          name = displayName(await getUser(st.id), st.id);
+        } catch (_e) {}
+        body +=
+          '\n👤 ' +
+          name +
+          '\n  ✅' +
+          st.ap +
+          ' ❌' +
+          st.rj +
+          ' (جمع ' +
+          st.total +
+          ') · ٪رد ' +
+          st.rejectPct +
+          '\n  ⏰ شیفت در بازه: ' +
+          st.shifts +
+          ' · میانگین رسیدگی: ' +
+          fmtMins(st.avgHandle) +
+          '\n';
+        if (st.lastAct) {
+          body += '  🕰 آخرین فعالیت: ' + fmtMins(nowMs - st.lastAct) + ' پیش\n';
+        }
+      }
+      if (adminStats.length > shown.length) {
+        body += '\n… و ' + (adminStats.length - shown.length) + ' ادمین دیگر\n';
+      }
+    }
+
+    // ضعیف‌ها: شیفت داشته بررسی کم
+    const low = adminStats
+      .filter(function (s) {
+        return s.shifts >= 1 && s.total < Math.max(2, s.shifts);
+      })
+      .slice(0, 6);
+    if (low.length) {
+      body += '\n⚠️ شیفت گرفته ولی بررسی کم:\n';
+      for (const s of low) {
+        let name = String(s.id);
+        try {
+          name = displayName(await getUser(s.id), s.id);
+        } catch (_e) {}
+        body += '• ' + name + ' | شیفت ' + s.shifts + ' | بررسی ' + s.total + '\n';
+      }
+    }
+  }
+
+  // —— نتیجه مدیریتی ——
+  if (mode === 'full' || mode === 'msg') {
+    body += '\n════════════\n🧠 جمع‌بندی مدیریتی\n════════════\n';
+    const tips = [];
+    if (pendingNow.length > 50) {
+      tips.push('صف انتظار بالاست (' + pendingNow.length + '). نیاز به ادمین/شیفت بیشتر در ساعات پیک.');
+    }
+    if (ap + rj > 0 && rj / (ap + rj) > 0.35) {
+      tips.push('نسبت رد بالاست (' + Math.round((rj / (ap + rj)) * 100) + '٪). قوانین ارسال یا آموزش کاربران را بررسی کنید.');
+    }
+    const avgW = avg(handleSamples);
+    if (avgW != null && avgW > 2 * 3600 * 1000) {
+      tips.push('میانگین زمان رسیدگی بیش از ۲ ساعت است — پوشش شیفت را متراکم‌تر کنید.');
+    }
+    if (!tips.length) {
+      tips.push('شاخص‌های اصلی در محدوده قابل‌قبول نمونه هستند. روی کانال‌های با صف بالاتر تمرکز کنید.');
+    }
+    for (let i = 0; i < tips.length; i++) {
+      body += i + 1 + ') ' + tips[i] + '\n';
     }
   }
 
   body +=
     '\n────────────\n' +
-    'ℹ️ محاسبات از نمونهٔ حداکثر ۵۰۰۰ پیام اخیر و جداول شیفت/ادمین است.\n' +
-    '«باقی‌مانده پایان شیفت» به‌صورت snapshot صف فعلی کانال‌های مرتبط تقریب زده شده (لاگ تاریخی صف ذخیره نمی‌شود).\n' +
-    'تعهد شیفت ≈ نسبت روزهای دارای بررسی به روزهای دارای شیفت.';
+    'ℹ️ آمار از نمونهٔ حداکثر ۸۰۰۰ پیام اخیر + جداول شیفت و ادمین فعلی است.\n' +
+    'افراد خارج از لیست ادمین کانال در گزارش ادمین نمی‌آیند.';
 
   return body;
 }

@@ -208,10 +208,11 @@ export function subLeaderKeyboard() {
     keyboard: [
       [{ text: '📥 پیام‌های در انتظار' }, { text: '⏰ شیفت من' }],
       [{ text: '👥 ادمین‌های من' }, { text: '➕ افزودن ادمین' }],
-      [{ text: '📋 شیفت‌های کانال' }, { text: '🔎 جستجوی پیام' }],
+      [{ text: '🆘 درخواست کمک' }, { text: '📝 ارسال پیام به صورت کاربر عادی' }],
       [{ text: '📊 آمار کانال' }, { text: '👮 آمار ادمین‌ها' }],
-      [{ text: '📢 اطلاعیه برای ادمین‌ها' }, { text: '📌 فراخوان کانال' }],
-      [{ text: 'ℹ️ اطلاعات کانال' }, { text: '🗑 حذف پیام کانال' }],
+      [{ text: '📋 شیفت‌های کانال' }, { text: '📢 اطلاعیه برای ادمین‌ها' }],
+      [{ text: '🔎 جستجوی پیام' }, { text: '📌 فراخوان کانال' }],
+      [{ text: '🗑 حذف پیام کانال' }],
     ],
     resize_keyboard: true,
   });
@@ -258,6 +259,39 @@ export function dataAnalysisChannelInline() {
   }
   rows.push([{ text: 'همه کانال‌ها', callback_data: 'da:ch:all', style: 'success' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
+}
+
+/** انتخاب بازه زمانی تحلیل */
+export function dataAnalysisPeriodInline(scope) {
+  const s = String(scope || 'all');
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [
+        { text: '📅 امروز', callback_data: 'da:p:' + s + ':today', style: 'primary' },
+        { text: '📅 دیروز', callback_data: 'da:p:' + s + ':yesterday', style: 'primary' },
+      ],
+      [
+        { text: '📅 ۷ روز', callback_data: 'da:p:' + s + ':week', style: 'primary' },
+        { text: '📅 ۳۰ روز', callback_data: 'da:p:' + s + ':month', style: 'primary' },
+      ],
+      [{ text: '📅 کل نمونه', callback_data: 'da:p:' + s + ':all', style: 'success' }],
+      [{ text: '◀️ کانال', callback_data: 'da:back', style: 'danger' }],
+    ],
+  });
+}
+
+/** انتخاب نوع تحلیل */
+export function dataAnalysisModeInline(scope, period) {
+  const s = String(scope || 'all');
+  const p = String(period || 'week');
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: '📨 چرخه پیام‌ها', callback_data: 'da:m:' + s + ':' + p + ':msg', style: 'primary' }],
+      [{ text: '👮 عملکرد ادمین‌ها', callback_data: 'da:m:' + s + ':' + p + ':adm', style: 'primary' }],
+      [{ text: '📊 گزارش کامل', callback_data: 'da:m:' + s + ':' + p + ':full', style: 'success' }],
+      [{ text: '◀️ بازه', callback_data: 'da:ch:' + s, style: 'danger' }],
+    ],
+  });
 }
 
 /**

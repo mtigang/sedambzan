@@ -129,6 +129,9 @@ import {
   channelPickFlagsInline,
   forceJoinInline,
   forceJoinOwnerInline,
+  dataAnalysisChannelInline,
+  dataAnalysisPeriodInline,
+  dataAnalysisModeInline,
   ownerKeyboard,
   userKeyboard,
   adminKeyboard,
@@ -3498,15 +3501,116 @@ if (data.startsWith('own_shift:')) {
     }
 
     // —— تحلیل داده ——
+    if (data === 'da:back') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: '📈 تحلیل داده\nکانال را انتخاب کنید:',
+          reply_markup: sanitizeMarkup(dataAnalysisChannelInline()),
+        });
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '📈 تحلیل داده\nکانال را انتخاب کنید:',
+          reply_markup: sanitizeMarkup(dataAnalysisChannelInline()),
+        });
+      }
+      return;
+    }
+
     if (data.startsWith('da:ch:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'در حال تحلیل…' });
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
       const scope = data.split(':')[2] || 'all';
+      const title =
+        scope === 'all'
+          ? 'همه کانال‌ها'
+          : (DEFAULT_CHANNELS[scope] && DEFAULT_CHANNELS[scope].title) || scope;
       try {
-        const report = await buildDataAnalysisReport(scope);
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: '📈 تحلیل «' + title + '»\nبازه زمانی را انتخاب کنید:',
+          reply_markup: sanitizeMarkup(dataAnalysisPeriodInline(scope)),
+        });
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '📈 تحلیل «' + title + '»\nبازه زمانی را انتخاب کنید:',
+          reply_markup: sanitizeMarkup(dataAnalysisPeriodInline(scope)),
+        });
+      }
+      return;
+    }
+
+    if (data.startsWith('da:p:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      const parts = data.split(':');
+      const scope = parts[2] || 'all';
+      const period = parts[3] || 'week';
+      const title =
+        scope === 'all'
+          ? 'همه کانال‌ها'
+          : (DEFAULT_CHANNELS[scope] && DEFAULT_CHANNELS[scope].title) || scope;
+      const periodMap = {
+        today: 'امروز',
+        yesterday: 'دیروز',
+        week: '۷ روز',
+        month: '۳۰ روز',
+        all: 'کل نمونه',
+      };
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text:
+            '📈 تحلیل «' +
+            title +
+            '»\nبازه: ' +
+            (periodMap[period] || period) +
+            '\nنوع گزارش را انتخاب کنید:',
+          reply_markup: sanitizeMarkup(dataAnalysisModeInline(scope, period)),
+        });
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text:
+            '📈 تحلیل «' +
+            title +
+            '»\nبازه: ' +
+            (periodMap[period] || period) +
+            '\nنوع گزارش را انتخاب کنید:',
+          reply_markup: sanitizeMarkup(dataAnalysisModeInline(scope, period)),
+        });
+      }
+      return;
+    }
+
+    if (data.startsWith('da:m:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'در حال تحلیل…' });
+      const parts = data.split(':');
+      const scope = parts[2] || 'all';
+      const period = parts[3] || 'week';
+      const mode = parts[4] || 'full';
+      try {
+        const report = await buildDataAnalysisReport(scope, period, mode);
         const chunks = [];
         let cur = String(report || '');
         while (cur.length > 3500) {
@@ -3523,66 +3627,16 @@ if (data.startsWith('own_shift:')) {
             text: prefix + chunks[i],
           });
         }
-        // خلاصه ادمین‌های امروز با Quote جدا
-        try {
-          const day = tehranNow().date;
-          const sc = scope === 'all' ? null : scope;
-          const payload = await buildAdminStatsPayload(day, sc);
-          await api.sendMessage({
-            chat_id: cq.message.chat.id,
-            text: '👮 عملکرد ادمین‌ها — امروز ' + day + '\n(هر ادمین در Quote جدا)',
-          });
-          function esc(s) {
-            return String(s || '')
-              .replace(/&/g, '&amp;')
-              .replace(/</g, '&lt;')
-              .replace(/>/g, '&gt;');
-          }
-          for (const ch of payload.channels || []) {
-            if (!ch.admins || !ch.admins.length) continue;
-            await api.sendMessage({
-              chat_id: cq.message.chat.id,
-              text: '📢 «' + ch.title + '» — بررسی امروز: ' + ch.reviewTotal,
-            });
-            for (const sca of ch.admins.slice(0, 25)) {
-              let name = String(sca.aid);
-              try {
-                name = displayName(await getUser(sca.aid), sca.aid);
-              } catch (_e) {}
-              const sh = sca.shifts && sca.shifts.length ? sca.shifts.join(' | ') : '—';
-              const html =
-                '<blockquote>👤 ' +
-                esc(name) +
-                '\n⏰ ' +
-                esc(sh) +
-                '\n✅ ' +
-                sca.ap +
-                ' · ❌ ' +
-                sca.rj +
-                ' · جمع ' +
-                sca.total +
-                '</blockquote>';
-              try {
-                await api.sendMessage({
-                  chat_id: cq.message.chat.id,
-                  text: html,
-                  parse_mode: 'HTML',
-                });
-              } catch (_e) {}
-            }
-          }
-        } catch (e2) {
-          console.error('da admin quotes', e2);
-        }
       } catch (e) {
-        console.error('data analysis', e);
+        console.error('da:m', e);
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: '⚠️ خطا در تحلیل: ' + String(e.message || e).slice(0, 200),
+          text: '⚠️ خطا در تحلیل داده: ' + String((e && e.message) || e).slice(0, 200),
         });
       }
       return;
     }
+
 
     if (data.startsWith('admin_stats:')) {
       let slScope = null;

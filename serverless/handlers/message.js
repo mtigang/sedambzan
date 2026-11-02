@@ -1057,7 +1057,7 @@ export default async function (message) {
 
 
     // ادمین: ارسال مثل کاربر عادی — مستقیم در کانال، بدون نیاز به شیفت
-        if (role === 'admin' && text === '📝 ارسال پیام به صورت کاربر عادی') {
+        if ((role === 'admin' || role === 'subleader') && text === '📝 ارسال پیام به صورت کاربر عادی') {
       if (!(await isBotOn())) {
         await api.sendMessage({ chat_id: chatId, text: BOT_DISABLED_TEXT, reply_markup: await roleKb(userId) });
         return;
