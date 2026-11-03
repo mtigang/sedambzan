@@ -94,6 +94,14 @@ import {
 } from 'lib/subleader';
 import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod, toJalaliDisplay, periodOrd, isWorkHours, normHm } from 'lib/time';
 import { DEFAULT_CHANNELS, OWNER_IDS, CHANNEL_IDS } from 'lib/config';
+import {
+  buildAnalytics,
+  formatAnalyticsMessages,
+  formatAdminDetail,
+  buildShiftBoard,
+  formatShiftBoardMessages,
+  classifyShiftStatus,
+} from 'lib/owner_analytics';
 import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
 import { DB_EXPORT_OWNER_ID, processDbExportBatch, clearDbExportJob, getDbExportJob } from 'lib/db_export';
 import {
@@ -3136,8 +3144,18 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
               .trim()
               .slice(0, 40);
             if (!name) name = String(s.adminId ?? '');
+            const logical = classifyShiftStatus(s, now);
+            const markMap = {
+              cancelled: '🔴لغو #',
+              running: '🟢اجرا #',
+              completed: '✅تمام #',
+              upcoming: '🟡آینده #',
+              invalid: '⚠️ #',
+              legacy_perm: '⚠️ #',
+              other: '▫️ #',
+            };
+            const mark = markMap[logical] || '▫️ #';
             const st = String(s.status || 'active');
-            const mark = st === 'cancelled' ? '🔴لغو #' : '▫️ #';
             const line =
               mark +
               s.id +
@@ -3752,30 +3770,78 @@ if (data.startsWith('own_shift:')) {
       const parts = data.split(':');
       const scope = parts[2] || 'all';
       const period = parts[3] || 'week';
-      const mode = parts[4] || 'full';
+      // mode ignored — full analytics always (جدول + خلاصه)
       try {
-        const report = await buildDataAnalysisReport(scope, period, mode);
-        const chunks = [];
-        let cur = String(report || '');
-        while (cur.length > 3500) {
-          let cut = cur.lastIndexOf('\n', 3500);
-          if (cut < 2000) cut = 3500;
-          chunks.push(cur.slice(0, cut));
-          cur = cur.slice(cut).replace(/^\n+/, '');
+        const dataAn = await buildAnalytics(scope, period);
+        const texts = await formatAnalyticsMessages(dataAn);
+        for (let i = 0; i < texts.length; i++) {
+          const t = texts[i];
+          const prefix = texts.length > 1 ? '(' + (i + 1) + '/' + texts.length + ')\n' : '';
+          try {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: prefix + t,
+              parse_mode: t.indexOf('<blockquote>') >= 0 ? 'HTML' : undefined,
+            });
+          } catch (_e) {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: prefix + String(t).replace(/<[^>]+>/g, ''),
+            });
+          }
         }
-        if (cur) chunks.push(cur);
-        for (let i = 0; i < chunks.length; i++) {
-          const prefix = chunks.length > 1 ? '(' + (i + 1) + '/' + chunks.length + ')\n' : '';
+        // دکمه‌های جزئیات — حداکثر ۲۰ ادمین برتر با بررسی
+        const rows = [];
+        const list = (dataAn.admins || []).filter(function (a) {
+          return a.total > 0 || a.shiftsReg > 0;
+        }).slice(0, 20);
+        for (const a of list) {
+          rows.push([
+            {
+              text: '#' + a.rank + ' · ' + String(a.aid),
+              callback_data: 'oa:d:' + a.aid + ':' + scope + ':' + period,
+              style: 'primary',
+            },
+          ]);
+        }
+        if (rows.length) {
+          rows.push([{ text: 'بستن', callback_data: 'da:back', style: 'danger' }]);
           await api.sendMessage({
             chat_id: cq.message.chat.id,
-            text: prefix + chunks[i],
+            text: 'جزئیات ادمین را انتخاب کنید:',
+            reply_markup: sanitizeMarkup({ inline_keyboard: rows }),
           });
         }
       } catch (e) {
-        console.error('da:m', e);
+        console.error('da:m analytics', e);
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: '⚠️ خطا در تحلیل داده: ' + String((e && e.message) || e).slice(0, 200),
+          text: '⚠️ خطا در تحلیل: ' + String((e && e.message) || e).slice(0, 200),
+        });
+      }
+      return;
+    }
+
+    if (data.startsWith('oa:d:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'جزئیات…' });
+      const parts = data.split(':');
+      const aid = Number(parts[2]);
+      const scope = parts[3] || 'all';
+      const period = parts[4] || 'week';
+      try {
+        const texts = await formatAdminDetail(aid, scope, period);
+        for (const t of texts) {
+          await api.sendMessage({ chat_id: cq.message.chat.id, text: t });
+        }
+      } catch (e) {
+        console.error('oa:d', e);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'خطا در جزئیات: ' + String((e && e.message) || e).slice(0, 150),
         });
       }
       return;

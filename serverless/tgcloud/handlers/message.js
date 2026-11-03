@@ -71,6 +71,7 @@ import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali
 // work hours: setWorkHoursConfig/getWorkHoursConfig exported from same module
 // normHm via time
 import { resolveUserId, channelMessageLink, channelPublicBase } from 'lib/resolve';
+import { buildShiftBoard, formatShiftBoardMessages } from 'lib/owner_analytics';
 import { setBlocked } from 'lib/users';
 import { DB_EXPORT_OWNER_ID, initDbExportJob, processDbExportBatch } from 'lib/db_export';
 import {
@@ -2257,219 +2258,42 @@ let note =
 
     if (owner && text === '⏰ شیفت‌ها') {
       try {
-try {
-        try { await cancelInvalidShifts(); } catch (_e) {}
-        // dedupe فقط هنگام ثبت شیفت جدید (نه هنگام مشاهده لیست)
-      } catch (_e) {}
-      
-        const now = tehranNow();
-        const pdate = periodDateStr(now);
-        let all = [];
         try {
-          all = (await db.select().from(shifts).all()) || [];
-        } catch (e) {
-          console.error('shifts all', e);
+          await cancelInvalidShifts();
+        } catch (_e) {}
+        const board = await buildShiftBoard(null, null);
+        const parts = await formatShiftBoardMessages(board);
+        for (const part of parts) {
+          try {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: part,
+              parse_mode: part.indexOf('<blockquote>') >= 0 ? 'HTML' : undefined,
+            });
+          } catch (_e) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: String(part).replace(/<[^>]+>/g, ''),
+            });
+          }
         }
-        const today = all.filter(function (s) {
-          const st = String(s.status || 'active');
-          // فعال و لغوشده: لغوشده برای شفافیت آمار (قبلاً فقط active بود و با بررسی‌ها تناقض می‌ساخت)
-          if (st !== 'active' && st !== 'cancelled') return false;
-          if (String(s.startHm) === String(s.endHm)) return false;
-          const sd = String(s.shiftDate || '');
-          if (sd === 'perm' || sd === 'permanent') return false;
-          return sd === pdate || sd === now.date;
-        });
-        const activeN = today.filter(function (s) { return String(s.status || 'active') === 'active'; }).length;
         await api.sendMessage({
           chat_id: chatId,
           text:
-            '⏰ شیفت‌های دوره فعلی\n📅 ' +
-            pdate +
-            '\nکل: ' +
-            today.length +
-            ' (فعال: ' +
-            activeN +
-            ')\n\nاز دکمه‌های زیر:\n• تخصیص این دوره\n• لیست و لغو\n• لغو همه',
+            'از دکمه‌های زیر:\n• تخصیص این دوره\n• لیست و لغو\n• لغو همه شیفت‌های دوره',
           reply_markup: sanitizeMarkup(ownerShiftMenuInline()),
         });
-        if (!today.length) {
-          await api.sendMessage({ chat_id: chatId, text: 'هنوز شیفتی برای این دوره ثبت نشده.' });
-        } else {
-          const order = Object.keys(DEFAULT_CHANNELS);
-          function escSh(s) {
-            return String(s || '')
-              .replace(/&/g, '&amp;')
-              .replace(/</g, '&lt;')
-              .replace(/>/g, '&gt;');
-          }
-                    for (const ck of order) {
-            const group = sortShiftsByPeriod(
-              today.filter(function (s) {
-                return String(s.channelKey || s.channel_key) === ck;
-              })
-            );
-            if (!group.length) continue;
-            const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-            let body = '📢 «' + title + '» — ' + group.length + ' شیفت\n';
-            for (const s of group) {
-              let name = String(s.adminId);
-              try {
-                name = displayName(await getUser(s.adminId), s.adminId);
-              } catch (_e) {}
-              const st = String(s.status || 'active');
-              const mark = st === 'cancelled' ? '🔴 لغو شده' : '🟢 فعال';
-              body +=
-                '<blockquote>' +
-                mark +
-                '\n⏰ ' +
-                escSh(String(s.startHm).slice(0, 5) + '–' + String(s.endHm).slice(0, 5)) +
-                '\n👤 ' +
-                escSh(name) +
-                '\n🆔 <code>' +
-                Number(s.adminId) +
-                '</code></blockquote>\n';
-            }
-            // اگر خیلی بلند شد تکه‌تکه بفرست
-            if (body.length <= 3900) {
-              try {
-                await api.sendMessage({ chat_id: chatId, text: body, parse_mode: 'HTML' });
-              } catch (_e) {
-                await api.sendMessage({ chat_id: chatId, text: body.replace(/<[^>]+>/g, '') });
-              }
-            } else {
-              // هدر + چند blockquote در هر پیام
-              let chunk = '📢 «' + title + '»\n';
-              for (const s of group) {
-                let name = String(s.adminId);
-                try {
-                  name = displayName(await getUser(s.adminId), s.adminId);
-                } catch (_e) {}
-                const st = String(s.status || 'active');
-                const mark = st === 'cancelled' ? '🔴 لغو شده' : '🟢 فعال';
-                const piece =
-                  '<blockquote>' +
-                  mark +
-                  '\n⏰ ' +
-                  escSh(String(s.startHm).slice(0, 5) + '–' + String(s.endHm).slice(0, 5)) +
-                  '\n👤 ' +
-                  escSh(name) +
-                  '\n🆔 <code>' +
-                  Number(s.adminId) +
-                  '</code></blockquote>\n';
-                if ((chunk + piece).length > 3900) {
-                  try {
-                    await api.sendMessage({ chat_id: chatId, text: chunk, parse_mode: 'HTML' });
-                  } catch (_e) {
-                    await api.sendMessage({ chat_id: chatId, text: chunk.replace(/<[^>]+>/g, '') });
-                  }
-                  chunk = '📢 «' + title + '» (ادامه)\n' + piece;
-                } else {
-                  chunk += piece;
-                }
-              }
-              if (chunk.trim()) {
-                try {
-                  await api.sendMessage({ chat_id: chatId, text: chunk, parse_mode: 'HTML' });
-                } catch (_e) {
-                  await api.sendMessage({ chat_id: chatId, text: chunk.replace(/<[^>]+>/g, '') });
-                }
-              }
-            }
-          }
-        }
       } catch (e) {
-        console.error('owner shifts', e);
+        console.error('owner shifts board', e);
         await api.sendMessage({
           chat_id: chatId,
-          text: 'خطا در شیفت‌ها: ' + (e && e.message ? e.message : String(e)),
-          reply_markup: ownerKeyboard(),
+          text: 'خطا در خواندن شیفت‌ها: ' + String((e && e.message) || e).slice(0, 150),
+          reply_markup: ownerKeyboard(userId),
         });
       }
       return;
     }
 
-
-    if (owner && state?.kind === 'own_assign' && text.startsWith('شیفت: ')) {
-      const title = text.replace('شیفت: ', '');
-      const entry = Object.values(DEFAULT_CHANNELS).find((c) => c.title === title);
-      if (!entry) {
-        await api.sendMessage({ chat_id: chatId, text: 'کانال نامعتبر', reply_markup: ownerKeyboard() });
-        return;
-      }
-      await setState(userId, 'own_assign_admin', { mode: state.mode, channelKey: entry.key });
-      await api.sendMessage({
-        chat_id: chatId,
-        text: 'آیدی عددی یا @username ادمین را بفرستید:',
-        reply_markup: sanitizeMarkup(backKeyboard()),
-      });
-      return;
-    }
-    if (owner && state?.kind === 'own_assign_admin' && text) {
-      let adminId = await resolveUserId(text);
-      if (!adminId) adminId = Number(String(text).replace(/\D/g, ''));
-      if (!adminId) {
-        await api.sendMessage({ chat_id: chatId, text: 'آیدی یا یوزرنیم نامعتبر', reply_markup: sanitizeMarkup(backKeyboard()) });
-        return;
-      }
-      const mode = 'daily';
-      const channelKey = state.channelKey;
-      await setState(userId, 'own_assign_slot', { mode, channelKey, adminId });
-      const now = tehranNow();
-      const pdate = periodDateStr(now);
-      const dayShifts =
-        (await db
-          .select()
-          .from(shifts)
-          .where(eq(shifts.channelKey, channelKey))
-          .all()) || [];
-      const takenMap = {};
-      for (const s of dayShifts) {
-        if (s.status !== 'active') continue;
-        {
-          const _sd = String(s.shiftDate || '');
-          if (_sd === 'perm' || _sd === 'permanent') continue;
-          if (!(_sd === pdate || _sd === now.date)) continue;
-        }
-        takenMap[s.startHm] = s.adminId;
-      }
-      const ownerSlots = buildOwnerShiftSlots(now);
-      await api.sendMessage({
-        chat_id: chatId,
-        text:
-          'ساعت را انتخاب کنید (۲۴ ساعت کامل — بدون محدودیت ساعت کاری):\n' +
-          'فقط همین دوره ثبت می‌شود.',
-        reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, new Set(), ownerSlots, true)),
-      });
-      // reuse shift_pick won't know admin - use special callbacks
-      // store and intercept - for simplicity owner uses same shift_pick but we need different insert
-      return;
-    }
-
-    if (owner && text === '👑 مقامداران') {
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '👑 مقامداران\nیکی را انتخاب کنید:',
-        reply_markup: sanitizeMarkup(staffPickInline()),
-      });
-      return;
-    }
-
-    if (owner && text === '👥 ادمین‌ها') {
-      await api.sendMessage({
-        chat_id: chatId,
-        text: 'کانال ادمین‌ها را انتخاب کنید:',
-        reply_markup: {
-          keyboard: [
-            ...Object.values(DEFAULT_CHANNELS).map(function (c) {
-              return [{ text: 'ادمین‌های ' + (c.title || c.key) }];
-            }),
-            [{ text: '◀️ بازگشت' }],
-          ],
-          resize_keyboard: true,
-        },
-      });
-      return;
-    }
 
     if (owner && text.startsWith('ادمین‌های ')) {
       try {

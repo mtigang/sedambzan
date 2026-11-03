@@ -286,9 +286,9 @@ export function dataAnalysisModeInline(scope, period) {
   const p = String(period || 'week');
   return sanitizeMarkup({
     inline_keyboard: [
-      [{ text: '📨 چرخه پیام‌ها', callback_data: 'da:m:' + s + ':' + p + ':msg', style: 'primary' }],
-      [{ text: '👮 عملکرد ادمین‌ها', callback_data: 'da:m:' + s + ':' + p + ':adm', style: 'primary' }],
-      [{ text: '📊 گزارش کامل', callback_data: 'da:m:' + s + ':' + p + ':full', style: 'success' }],
+      [{ text: '📊 گزارش کامل مدیریتی', callback_data: 'da:m:' + s + ':' + p + ':full', style: 'success' }],
+      [{ text: '👮 تمرکز عملکرد ادمین', callback_data: 'da:m:' + s + ':' + p + ':adm', style: 'primary' }],
+      [{ text: '📨 تمرکز چرخه پیام', callback_data: 'da:m:' + s + ':' + p + ':msg', style: 'primary' }],
       [{ text: '◀️ بازه', callback_data: 'da:ch:' + s, style: 'danger' }],
     ],
   });
