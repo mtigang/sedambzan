@@ -219,6 +219,38 @@ async function editReviewResult(cq, text, fin) {
 }
 
 
+
+const PUBLISH_STICKER_ID = 'AgADFhYAAhh7EVM';
+
+async function notifyOwnersStickerFail(userId, err) {
+  const detail = String((err && (err.message || err.description)) || err || 'unknown').slice(0, 300);
+  const text =
+    '⚠️ استیکر بعد از انتشار ارسال نشد\n' +
+    'کاربر: ' +
+    userId +
+    '\nfile_id: ' +
+    PUBLISH_STICKER_ID +
+    '\nخطا: ' +
+    detail;
+  for (const oid of OWNER_IDS || []) {
+    try {
+      await api.sendMessage({ chat_id: Number(oid), text: text });
+    } catch (_e) {}
+  }
+}
+
+async function sendPublishStickerToUser(uid) {
+  if (!uid) return;
+  try {
+    await api.sendSticker({ chat_id: Number(uid), sticker: PUBLISH_STICKER_ID });
+  } catch (e) {
+    console.error('publish sticker fail', e);
+    try {
+      await notifyOwnersStickerFail(uid, e);
+    } catch (_e) {}
+  }
+}
+
 export default async function (cq) {
   try {
     const data = cq.data || '';
@@ -1359,9 +1391,7 @@ if (data.startsWith('ban_user:')) {
           text: txt,
           link_preview_options: link ? { is_disabled: false, url: link } : undefined,
         });
-        try {
-          await api.sendSticker({ chat_id: row.userId, sticker: 'AgADFhYAAhh7EVM' });
-        } catch (_st) {}
+        await sendPublishStickerToUser(row.userId);
       } catch (_e) {}
       return;
     }
@@ -1550,7 +1580,7 @@ if (data.startsWith('ban_user:')) {
               link_preview_options: link ? { is_disabled: false, url: link } : undefined,
             })
             .then(function () {
-              return api.sendSticker({ chat_id: uidNotify, sticker: 'AgADFhYAAhh7EVM' });
+              return sendPublishStickerToUser(uidNotify);
             })
             .catch(function () {});
         }
@@ -3775,9 +3805,7 @@ if (data.startsWith('own_shift:')) {
               text: txt,
               link_preview_options: link ? { is_disabled: false, url: link } : undefined,
             });
-            try {
-              await api.sendSticker({ chat_id: row.userId, sticker: 'AgADFhYAAhh7EVM' });
-            } catch (_st) {}
+            await sendPublishStickerToUser(row.userId);
           } catch (_e) {}
         } catch (e) {
           console.error('flush one', row.id, e);
