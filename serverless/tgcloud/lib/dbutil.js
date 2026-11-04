@@ -166,7 +166,7 @@ export async function rememberUserMessageId(userId, msgId) {
     const parsed = JSON.parse(String(raw || '[]'));
     if (Array.isArray(parsed)) ids = parsed.map(Number).filter(function (x) { return Number.isFinite(x) && x > 0; });
   } catch (_e) {}
-  ids = [mid].concat(ids.filter(function (x) { return x !== mid; })).slice(0, 50);
+  ids = [mid].concat(ids.filter(function (x) { return x !== mid; })).slice(0, 400);
   try {
     await settingSet(key, JSON.stringify(ids));
   } catch (_e) {}
@@ -177,30 +177,43 @@ export async function rememberUserMessageId(userId, msgId) {
  * (جلوگیری از Sqlite rows_read limit exceeded)
  * @returns {Promise<Array>}
  */
-export async function loadUserMessages(userId, limit, opts) {
+export async function loadUserMessagesPage(userId, limit, opts) {
   const uid = Number(userId);
-  const lim = Math.max(1, Math.min(Number(limit) || 30, 80));
-  // سقف اسکن: پیش‌فرض ۲۰ هزار ردیف اخیر (نه کل ۵۰ هزار)
-  const maxScan = Math.max(1000, Math.min(Number((opts && opts.maxScan) || 20000), 25000));
-  const batchSize = 800;
+  const lim = Math.max(1, Math.min(Number(limit) || 30, 50));
+  const beforeId =
+    opts && opts.beforeId != null && Number.isFinite(Number(opts.beforeId))
+      ? Number(opts.beforeId)
+      : null;
+  const maxScan = Math.max(800, Math.min(Number((opts && opts.maxScan) || 4000), 8000));
+  const batchSize = 500;
   const maxRounds = Math.min(
     Number((opts && opts.maxRounds) || Math.ceil(maxScan / batchSize)),
     Math.ceil(maxScan / batchSize)
   );
   const out = [];
   const seen = Object.create(null);
+  let indexTotal = 0;
 
-  if (!Number.isFinite(uid) || uid <= 0) return out;
+  if (!Number.isFinite(uid) || uid <= 0) {
+    return { rows: out, hasMore: false, indexTotal: 0 };
+  }
 
-  // ۱) ایندکس settings
   try {
     const raw = await settingGet('umsg:' + uid, '');
     if (raw) {
       const ids = JSON.parse(String(raw));
       if (Array.isArray(ids)) {
-        for (const id0 of ids) {
-          const id = Number(id0);
-          if (!Number.isFinite(id) || seen[id]) continue;
+        indexTotal = ids.length;
+        const sorted = ids
+          .map(Number)
+          .filter(function (x) {
+            return Number.isFinite(x) && x > 0 && (beforeId == null || x < beforeId);
+          })
+          .sort(function (a, b) {
+            return b - a;
+          });
+        for (const id of sorted) {
+          if (seen[id]) continue;
           try {
             const rows =
               (await db
@@ -213,12 +226,13 @@ export async function loadUserMessages(userId, limit, opts) {
                   submittedAt: messages.submittedAt,
                   reviewedAt: messages.reviewedAt,
                   reviewedBy: messages.reviewedBy,
+                  rejectReason: messages.rejectReason,
                 })
                 .from(messages)
                 .where(eq(messages.id, id))
                 .limit(1)
                 .all()) || [];
-            if (rows[0]) {
+            if (rows[0] && Number(rows[0].userId ?? rows[0].user_id) === uid) {
               seen[id] = 1;
               out.push(rows[0]);
             }
@@ -230,15 +244,26 @@ export async function loadUserMessages(userId, limit, opts) {
   } catch (_e) {}
 
   if (out.length >= lim) {
-    return out.sort(function (a, b) { return Number(b.id) - Number(a.id); }).slice(0, lim);
+    const rows = out
+      .sort(function (a, b) {
+        return Number(b.id) - Number(a.id);
+      })
+      .slice(0, lim);
+    return { rows: rows, hasMore: true, indexTotal: indexTotal };
   }
 
-  // ۲) اسکن دسته‌ای روی PK (id نزولی) با cursor — هر دسته فقط batchSize ردیف می‌خواند
-  let cursor = Number.MAX_SAFE_INTEGER;
-  if (out.length) {
-    // ادامه زیر کوچک‌ترین id دیده‌شده
-    cursor = Math.min.apply(null, out.map(function (r) { return Number(r.id); }));
-  }
+  let cursor =
+    beforeId != null && Number.isFinite(beforeId)
+      ? beforeId
+      : out.length
+        ? Math.min.apply(
+            null,
+            out.map(function (r) {
+              return Number(r.id);
+            })
+          )
+        : Number.MAX_SAFE_INTEGER;
+
   for (let round = 0; round < maxRounds && out.length < lim; round++) {
     let batch = [];
     try {
@@ -254,6 +279,7 @@ export async function loadUserMessages(userId, limit, opts) {
               submittedAt: messages.submittedAt,
               reviewedAt: messages.reviewedAt,
               reviewedBy: messages.reviewedBy,
+              rejectReason: messages.rejectReason,
             })
             .from(messages)
             .where(sql`${messages.id} < ${cursor}`)
@@ -272,6 +298,7 @@ export async function loadUserMessages(userId, limit, opts) {
               submittedAt: messages.submittedAt,
               reviewedAt: messages.reviewedAt,
               reviewedBy: messages.reviewedBy,
+              rejectReason: messages.rejectReason,
             })
             .from(messages)
             .orderBy(desc(messages.id))
@@ -279,7 +306,7 @@ export async function loadUserMessages(userId, limit, opts) {
             .all()) || [];
       }
     } catch (e) {
-      console.error('loadUserMessages batch', round, e);
+      console.error('loadUserMessagesPage batch', round, e);
       break;
     }
     if (!batch.length) break;
@@ -298,12 +325,21 @@ export async function loadUserMessages(userId, limit, opts) {
     if (batch.length < batchSize) break;
   }
 
-  return out.sort(function (a, b) { return Number(b.id) - Number(a.id); }).slice(0, lim);
+  const rows = out
+    .sort(function (a, b) {
+      return Number(b.id) - Number(a.id);
+    })
+    .slice(0, lim);
+  return { rows: rows, hasMore: rows.length >= lim, indexTotal: indexTotal };
 }
 
-/** شمارش امن pending — فقط از پیام‌های اخیر (pending تقریباً همیشه در انتهاست) */
+/** سازگاری با فراخوانی‌های قدیمی — فقط آرایه ردیف‌ها */
+export async function loadUserMessages(userId, limit, opts) {
+  const page = await loadUserMessagesPage(userId, limit, opts);
+  return page.rows || [];
+}
 
-/** موقعیت در صف کانال — بدون WHERE سنگین (rows_read-safe) */
+
 export async function estimateQueueAhead(channelKey, msgId, maxScan) {
   const ck = String(channelKey || '');
   const mid = Number(msgId);
