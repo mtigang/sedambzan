@@ -96,7 +96,7 @@ import {
   subLeaderAdmins,
   listActiveSubLeaders,
 } from 'lib/subleader';
-import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod, toJalaliDisplay, periodOrd, isWorkHours, normHm } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod, toJalaliDisplay, periodOrd, isWorkHours, normHm, getWorkHoursConfig } from 'lib/time';
 import { DEFAULT_CHANNELS, OWNER_IDS, CHANNEL_IDS } from 'lib/config';
 import {
   buildWeeklyHrReport,
@@ -5163,8 +5163,7 @@ if (data === 'ann_continue') {
         const sd = String(s.shiftDate || '');
         if (sd === 'perm' || sd === 'permanent') return false;
         if (sd !== date) return false;
-        const sh = Number(String(s.startHm || '0').split(':')[0]) || 0;
-        return sh >= 12;
+        return true;
       });
       const takenMap = {};
       const myStarts = new Set();
@@ -5182,7 +5181,11 @@ if (data === 'ann_continue') {
         title +
         '»\nدوره: ' +
         (toJalaliDisplay(date) || date) +
-        ' (یک‌بارمصرف)\nساعت کاری: ۱۲:۰۰ تا ۰۰:۰۰\n' +
+        ' (یک‌بارمصرف)\nساعت کاری: ' +
+        ((getWorkHoursConfig && getWorkHoursConfig().start) || '12:00') +
+        ' تا ' +
+        ((getWorkHoursConfig && getWorkHoursConfig().end) || '00:00') +
+        '\n' +
         (isOwner(userId) ? 'مالک: بدون سقف شیفت\n' : 'حداکثر ۳ شیفت\n') +
         '🟢 خالی  ·  🔴 پر\n\n';
       if (occupied.length) {

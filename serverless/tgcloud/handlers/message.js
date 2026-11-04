@@ -2279,8 +2279,7 @@ let note =
           const sd = String(s.shiftDate || '');
           if (sd === 'perm' || sd === 'permanent') return false;
           if (sd !== date) return false;
-          const sh = Number(String(s.startHm || '0').split(':')[0]) || 0;
-          return sh >= 12;
+          return true;
         });
         const takenMap = {};
         const myStarts = new Set();

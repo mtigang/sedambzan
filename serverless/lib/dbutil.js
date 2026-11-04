@@ -102,12 +102,19 @@ export async function getChannels() {
 }
 
 export async function getChannel(key) {
+  let globalWh = null;
+  try {
+    const { getWorkHoursConfig } = await import('lib/time');
+    globalWh = getWorkHoursConfig();
+  } catch (_e) {}
   try {
     const rows = await db.select().from(channels).where(eq(channels.key, key)).all();
     if (rows?.[0]) {
       const r = rows[0];
       return {
         ...r,
+        workStart: (globalWh && globalWh.start) || r.workStart || '12:00',
+        workEnd: (globalWh && globalWh.end) || r.workEnd || '00:00',
         chatId: CHANNEL_IDS[key] || Number(r.link) || null,
         adminGroupId: ADMIN_GROUP_IDS[key] || null,
       };
@@ -122,8 +129,8 @@ export async function getChannel(key) {
     title: d.title,
     link: String(d.chatId),
     enabled: 1,
-    workStart: d.workStart,
-    workEnd: d.workEnd,
+    workStart: (globalWh && globalWh.start) || d.workStart,
+    workEnd: (globalWh && globalWh.end) || d.workEnd,
     chatId: d.chatId,
     adminGroupId: d.adminGroupId,
   };
@@ -650,6 +657,14 @@ export async function loadWorkHoursFromSettings() {
     const s = (await settingGet('work_start_hm', '12:00')) || '12:00';
     const e = (await settingGet('work_end_hm', '00:00')) || '00:00';
     setWorkHoursConfig(s, e);
+    try {
+      for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+        if (DEFAULT_CHANNELS[k]) {
+          DEFAULT_CHANNELS[k].workStart = s;
+          DEFAULT_CHANNELS[k].workEnd = e;
+        }
+      }
+    } catch (_e) {}
     return { start: s, end: e };
   } catch (e) {
     console.error('loadWorkHoursFromSettings', e);
@@ -658,12 +673,38 @@ export async function loadWorkHoursFromSettings() {
 }
 
 export async function saveWorkHours(startHm, endHm) {
-  await settingSet('work_start_hm', String(startHm));
-  await settingSet('work_end_hm', String(endHm));
+  const s = String(startHm || '12:00');
+  const e = String(endHm || '00:00');
+  await settingSet('work_start_hm', s);
+  await settingSet('work_end_hm', e);
   try {
     const { setWorkHoursConfig } = await import('lib/time');
-    setWorkHoursConfig(startHm, endHm);
+    setWorkHoursConfig(s, e);
   } catch (_e) {}
+  // همگام‌سازی ساعت کاری هر کانال (لیست شیفت + پیام‌های ساعت کاری)
+  try {
+    for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+      if (DEFAULT_CHANNELS[k]) {
+        DEFAULT_CHANNELS[k].workStart = s;
+        DEFAULT_CHANNELS[k].workEnd = e;
+      }
+    }
+  } catch (_e) {}
+  try {
+    const rows = (await db.select().from(channels).all()) || [];
+    for (const row of rows) {
+      const key = row.key || row.channelKey;
+      if (!key) continue;
+      try {
+        await db
+          .update(channels)
+          .set({ workStart: s, workEnd: e })
+          .where(eq(channels.key, key));
+      } catch (_e) {}
+    }
+  } catch (e) {
+    console.error('saveWorkHours channel sync', e);
+  }
 }
 
 

@@ -1,10 +1,9 @@
-/** زمان تهران — دوره شیفت ۱۲:۰۰ تا ۰۰:۰۰ (نیمه‌شب) + شمسی */
+/** زمان تهران — دوره شیفت بر اساس ساعت کاری مالک + شمسی */
 
 // پیش‌فرض؛ با setWorkHoursConfig از settings به‌روز می‌شود
 let WORK_START_HM = '12:00';
 let WORK_END_HM = '00:00';
-const PERIOD_START_MIN = 12 * 60;
-const PERIOD_END_MIN = 0 * 60;
+let PERIOD_START_MIN = 12 * 60;
 
 function _padHm(hm) {
   const p = String(hm || '0:0').split(':');
@@ -17,6 +16,8 @@ function _padHm(hm) {
 export function setWorkHoursConfig(startHm, endHm) {
   if (startHm) WORK_START_HM = _padHm(startHm);
   if (endHm) WORK_END_HM = _padHm(endHm);
+  // مبدأ ترتیب دوره = شروع ساعت کاری (نه همیشه ۱۲)
+  PERIOD_START_MIN = hmToMin(WORK_START_HM);
 }
 
 export function getWorkHoursConfig() {
@@ -124,7 +125,8 @@ export function isWorkHours(now) {
 }
 
 /**
- * شیفت‌های قابل انتخاب: ۱۲:۰۰–۱۳:۰۰ … ۲۳:۰۰–۰۰:۰۰
+ * شیفت‌های قابل انتخاب ادمین — دقیقاً داخل بازه ساعت کاری مالک (WORK_START → WORK_END)
+ * هر اسلات یک‌ساعته؛ اسلات‌های گذشتهٔ همان دوره حذف می‌شوند.
  */
 export function buildAvailableShiftSlots(now) {
   if (!now) now = tehranNow();
