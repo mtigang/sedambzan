@@ -2404,6 +2404,20 @@ let note =
 
     // ========== OWNER: stats / feedback / search / announce / settings ==========
 
+    if (owner && text === '👑 مقامداران') {
+      try {
+        await clearState(userId);
+      } catch (_e) {}
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '👑 مقامداران\nیکی را انتخاب کنید:',
+        reply_markup: sanitizeMarkup(staffPickInline()),
+      });
+      return;
+    }
+
+
+
     // ========== OWNER: Sub-Leaders ==========
     
     if (role === 'subleader' && text === '➕ افزودن ادمین') {

@@ -691,13 +691,34 @@ if (data.startsWith('ban_user:')) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'آیدی نامعتبر', show_alert: true });
         return;
       }
-      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'در حال بارگذاری…' });
       let u = null;
       try {
         u = await getUser(uid);
       } catch (_e) {}
       const name = displayName(u, uid);
       const uname = u && u.username ? String(u.username).replace(/^@/, '') : '';
+
+      // سریع: ایندکس umsg + حداکثر ~۳۰ پیام اخیر (بدون اسکن سنگین)
+      let list = [];
+      try {
+        list = await loadUserMessages(uid, 30, { maxScan: 2500, maxRounds: 4 });
+      } catch (e) {
+        console.error('smsg_user msgs', e);
+        list = [];
+      }
+      let pe = 0,
+        ap = 0,
+        rj = 0,
+        other = 0;
+      for (const m of list) {
+        const st = String(m.status || '');
+        if (st === 'pending' || st === 'publishing') pe++;
+        else if (st === 'approved') ap++;
+        else if (st === 'rejected') rj++;
+        else other++;
+      }
+
       let text =
         '👤 ' +
         name +
@@ -706,11 +727,54 @@ if (data.startsWith('ban_user:')) {
         '</code>\n' +
         (uname ? 'یوزرنیم: @' + uname + '\n' : 'یوزرنیم: ندارد\n') +
         'نقش: ' +
-        ((u && u.role) || 'user');
+        ((u && u.role) || 'user') +
+        '\n────────────\n' +
+        '📨 پیام‌های اخیر یافت‌شده: ' +
+        list.length +
+        '\n🟡' +
+        pe +
+        ' 🟢' +
+        ap +
+        ' 🔴' +
+        rj +
+        (other ? ' · سایر ' + other : '') +
+        '\n';
+
+      if (list.length) {
+        text += '────────────\nآخرین پیام‌ها:\n';
+        for (const m of list.slice(0, 20)) {
+          const st = String(m.status || '');
+          const icon =
+            st === 'approved' ? '🟢' : st === 'rejected' ? '🔴' : st === 'pending' || st === 'publishing' ? '🟡' : '⚪';
+          const short = String(m.content || '')
+            .replace(/\n/g, ' ')
+            .slice(0, 60);
+          const ck = String(m.channelKey || m.channel_key || '');
+          const title =
+            (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck || '—';
+          text +=
+            icon +
+            ' #' +
+            m.id +
+            ' · ' +
+            title +
+            '\n' +
+            short +
+            (short.length >= 60 ? '…' : '') +
+            '\n';
+          if (text.length > 3500) {
+            text += '…\n';
+            break;
+          }
+        }
+      } else {
+        text += '\n(در ایندکس/نمونهٔ اخیر پیامی پیدا نشد)';
+      }
+
       const kb = { inline_keyboard: [] };
       if (uname) {
         kb.inline_keyboard.push([
-          { text: '💬 باز کردن پیوی', url: 'https://t.me/' + uname, style: 'primary' },
+          { text: '💬 باز کردن پیوی', url: 'https://t.me/' + uname },
         ]);
       }
       try {
