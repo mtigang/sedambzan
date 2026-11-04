@@ -903,7 +903,7 @@ export default async function (message) {
         try {
           await api.sendMessage({
             chat_id: row.userId,
-            text: '✅ پیام شما پس از ویرایش تأیید و منتشر شد.' + (link ? '\n' + link : ''),
+            text: 'پیامت بعد ویرایش رفت رو کانال 🎉' + (link ? '\n\nببینش:\n' + link : ''),
           });
         } catch (_e) {}
       } catch (e) {
@@ -1112,12 +1112,13 @@ if (text === '📝 ارسال پیام') {
       await api.sendMessage({
         chat_id: chatId,
         text:
-          'پیام خودتو بفرست.\n\n' +
-          'پیامتون با «صدام بزن / این کاربر / تو زندگی بعدی / من فکر میکردم» شروع بشه.\n\n' +
-          'سیاسی و بی‌احترامی و حاوی کلمات ناسزا نباشه.\n\n' +
-          'می‌تونید چند پیام پشت‌سرهم بفرستید.\n' +
-          'حداکثر ۶ پیام در ۱۰ دقیقه.\n\n' +
-          'با تشکر مدیریت مجموعه آرال',
+          'خب بفرست پیامتو ✨\n\n' +
+          'با یکی از اینا شروع کن:\n' +
+          '«صدام بزن / این کاربر / تو زندگی بعدی / من فکر میکردم»\n\n' +
+          'سیاسی و توهین و فحش ممنوعه ها 🙏\n\n' +
+          'چند تا پشت‌سرهم هم می‌تونی بفرستی.\n' +
+          'سقف: ۶ پیام تو ۱۰ دقیقه.\n\n' +
+          'منتظرتم 👇',
         reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
@@ -1156,7 +1157,7 @@ if (text === '📝 ارسال پیام') {
         console.error('status msgs', eSt);
         await api.sendMessage({
           chat_id: chatId,
-          text: '⚠️ خطا در خواندن وضعیت پیام‌ها. چند ثانیه بعد دوباره بزنید.',
+          text: 'اوه، وضعیت الان بالا نیومد 🙈 یه لحظه بعد دوباره بزن.',
           reply_markup: await roleKb(userId),
         });
         return;
@@ -1164,23 +1165,60 @@ if (text === '📝 ارسال پیام') {
       if (!list.length) {
         await api.sendMessage({
           chat_id: chatId,
-          text: 'پیامی ثبت نکرده‌اید.',
+          text: 'هنوز چیزی نفرستادی که پیگیری کنیم 😅\nاول از «📝 ارسال پیام» یکی بفرست.',
           reply_markup: await roleKb(userId),
         });
         return;
       }
-      const map = { pending: '🟡 در انتظار', approved: '🟢 تأیید', rejected: '🔴 رد شده', publishing: '⏳ در حال انتشار' };
-      let body = '📊 پیام‌های شما (' + list.length + ' مورد اخیر)\n\n';
+      function statusTimeline(st, id) {
+        const s = String(st || '');
+        if (s === 'rejected') {
+          return (
+            '📍 #' +
+            id +
+            '\n● ثبت شد' +
+            '\n● رفت برای بررسی' +
+            '\n✗ رد شد' +
+            '\n○ انتشار'
+          );
+        }
+        let step = 1;
+        if (s === 'pending') step = 2;
+        else if (s === 'publishing') step = 3;
+        else if (s === 'approved') step = 5;
+        const labels = [
+          'ثبت شد',
+          'تو صف بررسیه',
+          'ادمین داره می‌بینه',
+          'تأیید شد',
+          'منتشر شد روی کانال',
+        ];
+        let t = '📍 #' + id + '\n';
+        for (let i = 0; i < labels.length; i++) {
+          const mark = i < step ? '●' : '○';
+          const tail = i < labels.length - 1 ? '\n│' : '';
+          t += mark + ' ' + labels[i] + tail + '\n';
+        }
+        return t.replace(/\n\|\n/g, '\n│\n');
+      }
+      let body = '📊 پیگیری پیام‌هات (' + list.length + ' تای اخیر)\n\n';
       const cancelRows = [];
       for (const row of list) {
         const st = String(row.status || '');
         const short = (row.content || '').replace(/\n/g, ' ').slice(0, 70);
         const when = formatTsJalali(row.submittedAt);
+        const badge =
+          st === 'approved'
+            ? '🟢 منتشر شده'
+            : st === 'rejected'
+              ? '🔴 رد شده'
+              : st === 'publishing'
+                ? '⏳ در حال انتشار'
+                : '🟡 تو صف';
         body +=
-          '#' +
-          row.id +
-          ' | ' +
-          (map[st] || st) +
+          badge +
+          '\n' +
+          statusTimeline(st, row.id) +
           '\n' +
           short +
           (short.length >= 70 ? '…' : '') +
@@ -1198,7 +1236,7 @@ if (text === '📝 ارسال پیام') {
         }
       }
       if (cancelRows.length) {
-        body += '\nبرای لغو پیام در انتظار، روی شماره آن بزنید:';
+        body += '\nاگه منصرف شدی، روی شماره پیام بزن تا از صف بیاد بیرون:';
       }
       const markup = cancelRows.length
         ? sanitizeMarkup({ inline_keyboard: cancelRows.concat([[{ text: 'بستن', callback_data: 'ucancel_close', style: 'primary' }]]) })
@@ -1650,31 +1688,45 @@ if (text === '📝 ارسال پیام') {
         }
 
 let note =
-          '✅ ثبت شد.\n🆔 #' + (msgId != null ? msgId : '?') + '\n🟡 در انتظار بررسی ادمین';
-                if (ahead > 0) {
+          'گرفتمش 🫶 ثبت شد!\n' +
+          'شناسه پیگیری: #' +
+          (msgId != null ? msgId : '?') +
+          '\n\n' +
+          '📍 مسیر پیام از اینجا به بعد:\n' +
+          '● ثبت شد\n' +
+          '│\n' +
+          '● رفت تو صف بررسی\n' +
+          '│\n' +
+          '○ نوبت ادمین\n' +
+          '│\n' +
+          '○ تأیید\n' +
+          '│\n' +
+          '○ انتشار روی کانال';
+        if (ahead > 0) {
           const pos = ahead + 1;
           note +=
-            '\n📋 جایگاه شما در صف «' +
+            '\n\n📋 تو صف «' +
             ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || '') +
-            '»: نفر ' +
+            '» حدوداً نفر ' +
             toFaDigits(String(pos)) +
+            ' هستی' +
             ' (حدود ' +
             toFaDigits(String(ahead)) +
-            ' پیام جلوتر)';
+            ' تا جلوتر از توست).';
           if (totalPendSeen > 0) {
             note +=
-              '\n📊 حدود ' +
+              '\nالان حدود ' +
               toFaDigits(String(totalPendSeen)) +
-              ' پیام در انتظار این کانال (نمونه اخیر).';
+              ' پیام تو صف این کاناله.';
           }
           if (ahead <= 30) {
-            note += '\n🔔 کمتر از ۳۰ پیام تا نوبت بررسی شما مانده.';
+            note += '\nنزدیکه! کمتر از ۳۰ تا مونده تا نوبتت 👀';
           }
         } else {
-          note += '\n🔔 پیام شما در ابتدای صف این کانال است.';
+          note += '\n\nتقریباً اول صفی — زود نوبتت می‌رسه ✨';
         }
-        note += '\n\nپیام بعدی را بفرستید یا ◀️ بازگشت';
-        if (v.autoFixed) note += '\n\nℹ️ متن کمی اصلاح شد و ارسال گردید.';
+        note += '\n\nیکی دیگه هم می‌تونی بفرستی، یا ◀️ بازگشت';
+        if (v.autoFixed) note += '\n\nیه کم متنت رو مرتب کردم و فرستادم ✨';
         await api.sendMessage({
           chat_id: chatId,
           text: note,
