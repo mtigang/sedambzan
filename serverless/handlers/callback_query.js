@@ -41,6 +41,9 @@ import {
   getRole,
   decideMessage,
   loadUserMessages,
+  sendPublishStickerToUser,
+  setPublishStickerFileId,
+  getPublishStickerFileId,
   loadUserMessagesPage,
   rememberUserMessageId,
   reserveMessageForPublish,
@@ -219,37 +222,6 @@ async function editReviewResult(cq, text, fin) {
 }
 
 
-
-const PUBLISH_STICKER_ID = 'AgADFhYAAhh7EVM';
-
-async function notifyOwnersStickerFail(userId, err) {
-  const detail = String((err && (err.message || err.description)) || err || 'unknown').slice(0, 300);
-  const text =
-    '⚠️ استیکر بعد از انتشار ارسال نشد\n' +
-    'کاربر: ' +
-    userId +
-    '\nfile_id: ' +
-    PUBLISH_STICKER_ID +
-    '\nخطا: ' +
-    detail;
-  for (const oid of OWNER_IDS || []) {
-    try {
-      await api.sendMessage({ chat_id: Number(oid), text: text });
-    } catch (_e) {}
-  }
-}
-
-async function sendPublishStickerToUser(uid) {
-  if (!uid) return;
-  try {
-    await api.sendSticker({ chat_id: Number(uid), sticker: PUBLISH_STICKER_ID });
-  } catch (e) {
-    console.error('publish sticker fail', e);
-    try {
-      await notifyOwnersStickerFail(uid, e);
-    } catch (_e) {}
-  }
-}
 
 export default async function (cq) {
   try {

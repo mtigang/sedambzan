@@ -140,6 +140,8 @@ import {
   loadUserMessages,
   estimateQueueAhead,
   rememberUserMessageId,
+  setPublishStickerFileId,
+  getPublishStickerFileId,
   findBodyDuplicate,
   loadWorkHoursFromSettings,
   saveWorkHours,
@@ -441,6 +443,53 @@ export default async function (message) {
         }
       } catch (e) {
         console.error('forceJoin gate', e);
+      }
+    }
+
+    // مالک: تنظیم استیکر انتشار — استیکر را با کپشن/متن «ستیکر انتشار» بفرست
+    if (owner && (text === 'ستیکر انتشار' || text === '/sticker_publish')) {
+      await setState(userId, 'set_publish_sticker', {});
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          'الان همان استیکری که بعد از انتشار برای کاربر می‌رود را بفرست.\n' +
+          '(Document ID کلاینت کافی نیست — باید خود استیکر را برای همین ربات بفرستی.)',
+        reply_markup: await roleKb(userId),
+      });
+      return;
+    }
+
+    // مالک: تنظیم استیکر انتشار — استیکر را با کپشن/متن «ستیکر انتشار» بفرست
+    if (owner && message.sticker && message.sticker.file_id) {
+      const cap = String(message.caption || text || '').trim();
+      const want =
+        cap === 'ستیکر انتشار' ||
+        cap === '/sticker_publish' ||
+        cap === 'set_publish_sticker' ||
+        (state && state.kind === 'set_publish_sticker');
+      if (want) {
+        try {
+          await setPublishStickerFileId(message.sticker.file_id);
+          await clearState(userId);
+          await api.sendMessage({
+            chat_id: chatId,
+            text:
+              '✅ استیکر انتشار ذخیره شد.\n' +
+              'از این به بعد بعد از تأیید پیام، همین استیکر برای کاربر ارسال می‌شود.\n' +
+              'file_id:\n<code>' +
+              String(message.sticker.file_id).replace(/</g, '') +
+              '</code>',
+            parse_mode: 'HTML',
+            reply_markup: await roleKb(userId),
+          });
+        } catch (e) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'خطا در ذخیره استیکر: ' + String((e && e.message) || e).slice(0, 120),
+            reply_markup: await roleKb(userId),
+          });
+        }
+        return;
       }
     }
 

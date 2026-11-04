@@ -666,6 +666,71 @@ export async function saveWorkHours(startHm, endHm) {
   } catch (_e) {}
 }
 
+
+const PUBLISH_STICKER_SETTING = 'publish_sticker_file_id';
+/** fallback قدیمی — معمولاً نامعتبر است تا مالک یک‌بار استیکر را برای ربات بفرستد */
+const PUBLISH_STICKER_FALLBACK = '';
+
+export async function getPublishStickerFileId() {
+  try {
+    const v = await settingGet(PUBLISH_STICKER_SETTING, '');
+    if (v && String(v).trim()) return String(v).trim();
+  } catch (_e) {}
+  return PUBLISH_STICKER_FALLBACK || '';
+}
+
+export async function setPublishStickerFileId(fileId) {
+  const id = String(fileId || '').trim();
+  if (!id) return false;
+  await settingSet(PUBLISH_STICKER_SETTING, id);
+  return true;
+}
+
+/** ارسال استیکر بعد از انتشار؛ در صورت خطا به مالک‌ها گزارش می‌دهد */
+export async function sendPublishStickerToUser(uid) {
+  if (!uid) return { ok: false, error: 'no uid' };
+  const fileId = await getPublishStickerFileId();
+  if (!fileId) {
+    const err =
+      'file_id استیکر تنظیم نشده. یک مالک باید استیکر را با متن «ستیکر انتشار» برای ربات بفرستد.';
+    try {
+      for (const oid of OWNER_IDS || []) {
+        await api.sendMessage({
+          chat_id: Number(oid),
+          text:
+            '⚠️ استیکر بعد از انتشار ارسال نشد\nکاربر: ' +
+            uid +
+            '\nخطا: ' +
+            err,
+        });
+      }
+    } catch (_e) {}
+    return { ok: false, error: err };
+  }
+  try {
+    await api.sendSticker({ chat_id: Number(uid), sticker: fileId });
+    return { ok: true };
+  } catch (e) {
+    const detail = String((e && (e.message || e.description)) || e || 'unknown').slice(0, 300);
+    console.error('publish sticker fail', detail);
+    try {
+      for (const oid of OWNER_IDS || []) {
+        await api.sendMessage({
+          chat_id: Number(oid),
+          text:
+            '⚠️ استیکر بعد از انتشار ارسال نشد\nکاربر: ' +
+            uid +
+            '\nfile_id: ' +
+            String(fileId).slice(0, 80) +
+            '\nخطا: ' +
+            detail,
+        });
+      }
+    } catch (_e) {}
+    return { ok: false, error: detail };
+  }
+}
+
 export async function isBotOn() {
   return (await settingGet('bot_enabled', '1')) !== '0';
 }
