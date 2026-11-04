@@ -95,8 +95,8 @@ import {
 import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod, toJalaliDisplay, periodOrd, isWorkHours, normHm } from 'lib/time';
 import { DEFAULT_CHANNELS, OWNER_IDS, CHANNEL_IDS } from 'lib/config';
 import {
-  buildAnalytics,
-  formatAnalyticsMessages,
+  buildWeeklyHrReport,
+  formatWeeklyHrMessages,
   formatAdminDetail,
   buildShiftBoard,
   formatShiftBoardMessages,
@@ -677,6 +677,55 @@ if (data.startsWith('ban_user:')) {
           reply_markup: sanitizeMarkup(adminListInline(left, ck)),
         });
       } catch (_e) {}
+      return;
+    }
+
+    // مشاهده کاربر از نتیجه جستجوی پیام
+    if (data.startsWith('smsg_user:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const uid = Number(data.split(':')[1]);
+      if (!uid) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'آیدی نامعتبر', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      let u = null;
+      try {
+        u = await getUser(uid);
+      } catch (_e) {}
+      const name = displayName(u, uid);
+      const uname = u && u.username ? String(u.username).replace(/^@/, '') : '';
+      let text =
+        '👤 ' +
+        name +
+        '\n🆔 <code>' +
+        uid +
+        '</code>\n' +
+        (uname ? 'یوزرنیم: @' + uname + '\n' : 'یوزرنیم: ندارد\n') +
+        'نقش: ' +
+        ((u && u.role) || 'user');
+      const kb = { inline_keyboard: [] };
+      if (uname) {
+        kb.inline_keyboard.push([
+          { text: '💬 باز کردن پیوی', url: 'https://t.me/' + uname, style: 'primary' },
+        ]);
+      }
+      try {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: text,
+          parse_mode: 'HTML',
+          reply_markup: kb.inline_keyboard.length ? sanitizeMarkup(kb) : undefined,
+        });
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: text.replace(/<[^>]+>/g, ''),
+        });
+      }
       return;
     }
 
@@ -3691,89 +3740,11 @@ if (data.startsWith('own_shift:')) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
       }
-      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'گزارش ۷روز…' });
       const scope = data.split(':')[2] || 'all';
-      const title =
-        scope === 'all'
-          ? 'همه کانال‌ها'
-          : (DEFAULT_CHANNELS[scope] && DEFAULT_CHANNELS[scope].title) || scope;
       try {
-        await api.editMessageText({
-          chat_id: cq.message.chat.id,
-          message_id: cq.message.message_id,
-          text: '📈 تحلیل «' + title + '»\nبازه زمانی را انتخاب کنید:',
-          reply_markup: sanitizeMarkup(dataAnalysisPeriodInline(scope)),
-        });
-      } catch (_e) {
-        await api.sendMessage({
-          chat_id: cq.message.chat.id,
-          text: '📈 تحلیل «' + title + '»\nبازه زمانی را انتخاب کنید:',
-          reply_markup: sanitizeMarkup(dataAnalysisPeriodInline(scope)),
-        });
-      }
-      return;
-    }
-
-    if (data.startsWith('da:p:')) {
-      if (!isOwner(userId)) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
-        return;
-      }
-      await api.answerCallbackQuery({ callback_query_id: cq.id });
-      const parts = data.split(':');
-      const scope = parts[2] || 'all';
-      const period = parts[3] || 'week';
-      const title =
-        scope === 'all'
-          ? 'همه کانال‌ها'
-          : (DEFAULT_CHANNELS[scope] && DEFAULT_CHANNELS[scope].title) || scope;
-      const periodMap = {
-        today: 'امروز',
-        yesterday: 'دیروز',
-        week: '۷ روز',
-        month: '۳۰ روز',
-        all: 'کل نمونه',
-      };
-      try {
-        await api.editMessageText({
-          chat_id: cq.message.chat.id,
-          message_id: cq.message.message_id,
-          text:
-            '📈 تحلیل «' +
-            title +
-            '»\nبازه: ' +
-            (periodMap[period] || period) +
-            '\nنوع گزارش را انتخاب کنید:',
-          reply_markup: sanitizeMarkup(dataAnalysisModeInline(scope, period)),
-        });
-      } catch (_e) {
-        await api.sendMessage({
-          chat_id: cq.message.chat.id,
-          text:
-            '📈 تحلیل «' +
-            title +
-            '»\nبازه: ' +
-            (periodMap[period] || period) +
-            '\nنوع گزارش را انتخاب کنید:',
-          reply_markup: sanitizeMarkup(dataAnalysisModeInline(scope, period)),
-        });
-      }
-      return;
-    }
-
-    if (data.startsWith('da:m:')) {
-      if (!isOwner(userId)) {
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
-        return;
-      }
-      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'در حال تحلیل…' });
-      const parts = data.split(':');
-      const scope = parts[2] || 'all';
-      const period = parts[3] || 'week';
-      // mode ignored — full analytics always (جدول + خلاصه)
-      try {
-        const dataAn = await buildAnalytics(scope, period);
-        const texts = await formatAnalyticsMessages(dataAn);
+        const dataAn = await buildWeeklyHrReport(scope);
+        const texts = await formatWeeklyHrMessages(dataAn);
         for (let i = 0; i < texts.length; i++) {
           const t = texts[i];
           const prefix = texts.length > 1 ? '(' + (i + 1) + '/' + texts.length + ')\n' : '';
@@ -3790,37 +3761,93 @@ if (data.startsWith('own_shift:')) {
             });
           }
         }
-        // دکمه‌های جزئیات — حداکثر ۲۰ ادمین برتر با بررسی
-        const rows = [];
-        const list = (dataAn.admins || []).filter(function (a) {
-          return a.total > 0 || a.shiftsReg > 0;
-        }).slice(0, 20);
-        for (const a of list) {
-          rows.push([
-            {
-              text: '#' + a.rank + ' · ' + String(a.aid),
-              callback_data: 'oa:d:' + a.aid + ':' + scope + ':' + period,
-              style: 'primary',
-            },
-          ]);
-        }
-        if (rows.length) {
-          rows.push([{ text: 'بستن', callback_data: 'da:back', style: 'danger' }]);
-          await api.sendMessage({
-            chat_id: cq.message.chat.id,
-            text: 'جزئیات ادمین را انتخاب کنید:',
-            reply_markup: sanitizeMarkup({ inline_keyboard: rows }),
-          });
-        }
       } catch (e) {
-        console.error('da:m analytics', e);
+        console.error('da:ch weekly', e);
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: '⚠️ خطا در تحلیل: ' + String((e && e.message) || e).slice(0, 200),
+          text: '⚠️ خطا در گزارش: ' + String((e && e.message) || e).slice(0, 200),
         });
       }
       return;
     }
+
+
+    if (data.startsWith('da:p:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      // بازه هرچه باشد، گزارش عملیاتی همیشه ۷ روز اخیر است (سریع و کاربردی)
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'گزارش ۷روز…' });
+      const parts = data.split(':');
+      const scope = parts[2] || 'all';
+      try {
+        const dataAn = await buildWeeklyHrReport(scope);
+        const texts = await formatWeeklyHrMessages(dataAn);
+        for (let i = 0; i < texts.length; i++) {
+          const t = texts[i];
+          const prefix = texts.length > 1 ? '(' + (i + 1) + '/' + texts.length + ')\n' : '';
+          try {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: prefix + t,
+              parse_mode: t.indexOf('<blockquote>') >= 0 ? 'HTML' : undefined,
+            });
+          } catch (_e) {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: prefix + String(t).replace(/<[^>]+>/g, ''),
+            });
+          }
+        }
+      } catch (e) {
+        console.error('da:p weekly', e);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '⚠️ خطا در گزارش: ' + String((e && e.message) || e).slice(0, 200),
+        });
+      }
+      return;
+    }
+
+
+    if (data.startsWith('da:m:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'در حال تهیه گزارش…' });
+      const parts = data.split(':');
+      const scope = parts[2] || 'all';
+      try {
+        const dataAn = await buildWeeklyHrReport(scope);
+        const texts = await formatWeeklyHrMessages(dataAn);
+        for (let i = 0; i < texts.length; i++) {
+          const t = texts[i];
+          const prefix = texts.length > 1 ? '(' + (i + 1) + '/' + texts.length + ')\n' : '';
+          try {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: prefix + t,
+              parse_mode: t.indexOf('<blockquote>') >= 0 ? 'HTML' : undefined,
+            });
+          } catch (_e) {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: prefix + String(t).replace(/<[^>]+>/g, ''),
+            });
+          }
+        }
+      } catch (e) {
+        console.error('da:m weekly', e);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '⚠️ خطا در گزارش: ' + String((e && e.message) || e).slice(0, 200),
+        });
+      }
+      return;
+    }
+
 
     if (data.startsWith('oa:d:')) {
       if (!isOwner(userId)) {
@@ -5497,9 +5524,9 @@ if (data === 'ann_continue') {
       const d = (cq && cq.data) || '';
       // روی تایید/رد هم صف اطلاعیه را جلو ببر (سبک)
       if (d.startsWith('approve:') || d.startsWith('reject') || d.startsWith('search_approve:')) {
-        drainAnnouncePiggyback(20).catch(function () {});
+        drainAnnouncePiggyback(35).catch(function () {});
       } else {
-        drainAnnouncePiggyback(25).catch(function () {});
+        drainAnnouncePiggyback(40).catch(function () {});
       }
     } catch (_d) {}
   }

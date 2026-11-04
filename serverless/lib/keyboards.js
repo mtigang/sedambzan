@@ -286,10 +286,8 @@ export function dataAnalysisModeInline(scope, period) {
   const p = String(period || 'week');
   return sanitizeMarkup({
     inline_keyboard: [
-      [{ text: '📊 گزارش کامل مدیریتی', callback_data: 'da:m:' + s + ':' + p + ':full', style: 'success' }],
-      [{ text: '👮 تمرکز عملکرد ادمین', callback_data: 'da:m:' + s + ':' + p + ':adm', style: 'primary' }],
-      [{ text: '📨 تمرکز چرخه پیام', callback_data: 'da:m:' + s + ':' + p + ':msg', style: 'primary' }],
-      [{ text: '◀️ بازه', callback_data: 'da:ch:' + s, style: 'danger' }],
+      [{ text: '📊 گزارش هفتگی ادمین (سریع)', callback_data: 'da:m:' + s + ':' + p + ':full', style: 'success' }],
+      [{ text: '◀️ کانال', callback_data: 'da:back', style: 'danger' }],
     ],
   });
 }
@@ -491,7 +489,7 @@ export function ownerReviewInline(id) {
 }
 
 /** نتیجه جستجوی مالک: pending = تأیید/رد | rejected = فقط تأیید و انتشار */
-export function searchMsgActionsInline(id, status, channelKey, channelMsgId) {
+export function searchMsgActionsInline(id, status, channelKey, channelMsgId, userId) {
   const st = String(status || '');
   const rows = [];
   if (st === 'pending') {
@@ -506,6 +504,12 @@ export function searchMsgActionsInline(id, status, channelKey, channelMsgId) {
   } else if (st === 'approved') {
     rows.push([
       { text: '❌ رد', callback_data: 'reject_direct:' + id, style: 'danger' },
+    ]);
+  }
+  const uid = Number(userId);
+  if (uid > 0) {
+    rows.push([
+      { text: '👤 مشاهده کاربر', callback_data: 'smsg_user:' + uid, style: 'primary' },
     ]);
   }
   let delData = 'smsg_del:' + id;

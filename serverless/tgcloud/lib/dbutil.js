@@ -3568,16 +3568,32 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
     try {
       const ck = String((row.channelKey ?? row.channel_key) || '');
       const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-      // ادمین/ساب‌لیدر نباید مشخصات فرستنده را ببینند
+      // فقط مالک نام و آیدی فرستنده را می‌بیند
+      let senderLine = '';
+      try {
+        if (isOwner(Number(chatId))) {
+          const suid = Number(row.userId ?? row.user_id);
+          let sname = String(suid || '');
+          try {
+            const su = await getUser(suid);
+            sname = displayName(su, suid);
+          } catch (_e) {}
+          senderLine = 'فرستنده: ' + sname + ' · <code>' + suid + '</code>\n';
+        }
+      } catch (_e) {}
+      const bodyTxt =
+        '#' +
+        row.id +
+        ' | ' +
+        title +
+        '\n' +
+        senderLine +
+        '\n' +
+        String(row.content || '').slice(0, 3600);
       const sent = await api.sendMessage({
         chat_id: chatId,
-        text:
-          '#' +
-          row.id +
-          ' | ' +
-          title +
-          '\n\n' +
-          String(row.content || '').slice(0, 3800),
+        text: bodyTxt,
+        parse_mode: senderLine ? 'HTML' : undefined,
         reply_markup: sanitizeMarkup(reviewInline(row.id, false, batch.batchNumber)),
       });
       const mid = sent && (sent.message_id || sent.messageId);

@@ -1683,7 +1683,7 @@ let note =
 
         // پیشبرد صف اطلاعیه (سبک، non-blocking)
         try {
-          drainAnnouncePiggyback(25).catch(function () {});
+          drainAnnouncePiggyback(40).catch(function () {});
         } catch (_e) {}
 
         // سوراخ پیام: فقط بعد از موفقیت ثبت کاربر
@@ -2261,7 +2261,7 @@ let note =
         try {
           await cancelInvalidShifts();
         } catch (_e) {}
-        const board = await buildShiftBoard(null, null);
+        const board = await buildShiftBoard(null, 7);
         const parts = await formatShiftBoardMessages(board);
         for (const part of parts) {
           try {
@@ -3452,7 +3452,7 @@ let note =
           '\n\n' +
           row.content +
           '\n\n🔎 آیدی یا لینک بعدی را بفرستید (یا ◀️ بازگشت):',
-        reply_markup: searchMsgActionsInline(row.id, row.status, delCk, delMid),
+        reply_markup: searchMsgActionsInline(row.id, row.status, delCk, delMid, row.userId),
       });
       return;
     }
@@ -5138,7 +5138,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
                 return false;
               })));
         // همه کاربران/ادمین‌ها: صف اطلاعیه را کمی جلو ببر
-        drainAnnouncePiggyback(staff ? 30 : 20).catch(function () {});
+        drainAnnouncePiggyback(staff ? 45 : 30).catch(function () {});
       }
     } catch (_d) {}
   }
