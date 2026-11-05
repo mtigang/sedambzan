@@ -1354,16 +1354,18 @@ if (data.startsWith('ban_user:')) {
       });
       try {
         let txt =
-          'خبر خوب 🎀 پیامت منتشر شد!\n\n' +
+          'پیامتو توی چنل گذاشتیم ! 🐳\n\n' +
           '📍 مسیر پیام:\n' +
-          '● ثبت شد 🩵\n│\n● صف بررسی 🌟\n│\n● بررسی ادمین ✨\n│\n● تأیید شد 💚\n│\n● منتشر شد روی کانال 🎀';
+          '● ثبت شد\n│\n● رفت تو صف بررسی\n│\n● نوبت ادمین\n│\n● تأیید\n│\n● انتشار توی چنل';
         if (link) txt += '\n\nلینک انتشار:\n' + link;
         await api.sendMessage({
           chat_id: row.userId,
           text: txt,
           link_preview_options: link ? { is_disabled: false, url: link } : undefined,
         });
-        await sendPublishStickerToUser(row.userId);
+      } catch (_e) {}
+      try {
+        await sendPublishStickerToUser(row.userId || row.user_id);
       } catch (_e) {}
       return;
     }
@@ -3777,7 +3779,9 @@ if (data.startsWith('own_shift:')) {
               text: txt,
               link_preview_options: link ? { is_disabled: false, url: link } : undefined,
             });
-            await sendPublishStickerToUser(row.userId);
+          } catch (_e) {}
+          try {
+            await sendPublishStickerToUser(row.userId || row.user_id);
           } catch (_e) {}
         } catch (e) {
           console.error('flush one', row.id, e);

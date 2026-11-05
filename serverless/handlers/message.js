@@ -579,7 +579,7 @@ export default async function (message) {
         } catch (_) {}
         await api.sendMessage({
           chat_id: chatId,
-          text: 'برگشتی به منوی اصلی 🎀',
+          text: 'برگشتی به منوی اصلی 🪼',
           reply_markup: await roleKb(userId),
         });
         return;
@@ -589,7 +589,7 @@ export default async function (message) {
       } catch (_) {}
       await api.sendMessage({
         chat_id: chatId,
-        text: 'برگشتی به منوی اصلی 🎀',
+        text: 'برگشتی به منوی اصلی 🪼',
         reply_markup: await roleKb(userId),
       });
       return;
@@ -968,10 +968,9 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text:
-          '🗑 می‌خوای یکی از پیام‌های منتشرشده‌ت رو پاک کنی؟ 🎀\n\n' +
+          '🗑 می‌خوای یکی از پیام‌های منتشرشده‌ت رو پاک کنی؟\n\n' +
           'آیدی پیام (#123) یا لینک عمومی کانال رو بفرست 🩵\n' +
-          'همون لحظه از کانال حذف می‌شه ✨\n' +
-          'سقف: حداکثر ۵ تا 💚',
+          'همون لحظه از کانال حذف می‌شه یادت باشه بیشتر از پنج تا پیام حذف نمیشه !',
         reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
@@ -1175,7 +1174,7 @@ if (text === '📝 ارسال پیام') {
 
     if (text === '📢 لیست چنل‌های مجموعه آرال') {
       const lines = [
-        '📢 چنل‌های مجموعه آرال 🎀\nانتخاب کن و سر بزن 🩵',
+        '📢 چنل‌های مجموعه آرال 🐳\nانتخاب کن و سر بزن بهمون',
         '',
         '• صدام بزن',
         'https://t.me/callMeAraIl',
@@ -1221,36 +1220,28 @@ if (text === '📝 ارسال پیام') {
       }
       function statusTimeline(st, id) {
         const s = String(st || '');
-        if (s === 'rejected') {
-          return (
-            '📍 #' +
-            id +
-            '\n● ثبت شد 🩵' +
-            '\n● رفت برای بررسی 🌟' +
-            '\n✗ رد شد' +
-            '\n○ انتشار'
-          );
+        // فقط برای پیام‌های در انتظار تایم‌لاین کامل
+        if (s === 'pending' || s === 'publishing') {
+          let step = s === 'publishing' ? 3 : 2;
+          const labels = [
+            'ثبت شد',
+            'تو صف بررسیه !',
+            'ادمین داره می‌بینه',
+            'تأیید شد',
+            'پیامتو توی چنل گذاشتیم ! 🐳',
+          ];
+          let t = '📍 #' + id + '\n';
+          for (let i = 0; i < labels.length; i++) {
+            const mark = i < step ? '●' : '○';
+            const tail = i < labels.length - 1 ? '\n│' : '';
+            t += mark + ' ' + labels[i] + tail + '\n';
+          }
+          return t.replace(/\n\|\n/g, '\n│\n');
         }
-        let step = 1;
-        if (s === 'pending') step = 2;
-        else if (s === 'publishing') step = 3;
-        else if (s === 'approved') step = 5;
-        const labels = [
-          'ثبت شد 🩵',
-          'تو صف بررسیه 🌟',
-          'ادمین داره می‌بینه ✨',
-          'تأیید شد 💚',
-          'منتشر شد روی کانال 🎀',
-        ];
-        let t = '📍 #' + id + '\n';
-        for (let i = 0; i < labels.length; i++) {
-          const mark = i < step ? '●' : '○';
-          const tail = i < labels.length - 1 ? '\n│' : '';
-          t += mark + ' ' + labels[i] + tail + '\n';
-        }
-        return t.replace(/\n\|\n/g, '\n│\n');
+        // approved / rejected — فقط شناسه
+        return '📍 #' + id;
       }
-      let body = '📊 پیگیری پیام‌هات 🎀\n' + list.length + ' تای اخیر 🩵\n\n';
+      let body = '📊 پیگیری پیام‌های تو 🫧\n' + list.length + ' تای اخیر\n\n';
       const cancelRows = [];
       for (const row of list) {
         const st = String(row.status || '');
@@ -1258,12 +1249,12 @@ if (text === '📝 ارسال پیام') {
         const when = formatTsJalali(row.submittedAt);
         const badge =
           st === 'approved'
-            ? '🟢 منتشر شده ✨'
+            ? '🟢 منتشر شده'
             : st === 'rejected'
               ? '🔴 رد شده'
               : st === 'publishing'
-                ? '⏳ داره می‌ره کانال 🌟'
-                : '🟡 تو صف 🩵';
+                ? '⏳ داره می‌ره کانال'
+                : '🔵 تو صف';
         body +=
           badge +
           '\n' +
@@ -1737,11 +1728,11 @@ if (text === '📝 ارسال پیام') {
         }
 
 let note =
-          'گرفتمش 🎀 ثبت شد!\n' +
+          'پیامتو ثبت کردم 🐳 !\n' +
           'شناسه پیگیری: #' +
           (msgId != null ? msgId : '?') +
           '\n\n' +
-          '📍 مسیر پیام از اینجا به بعد:\n' +
+          '📬 مسیر پیام از اینجا به بعد:\n' +
           '● ثبت شد\n' +
           '│\n' +
           '● رفت تو صف بررسی\n' +
@@ -1750,32 +1741,26 @@ let note =
           '│\n' +
           '○ تأیید\n' +
           '│\n' +
-          '○ انتشار روی کانال';
+          '○ انتشار توی چنل';
         if (ahead > 0) {
           const pos = ahead + 1;
+          const chTitle =
+            (DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || '';
           note +=
-            '\n\n📋 تو صف «' +
-            ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || '') +
-            '» حدوداً نفر ' +
+            '\n\nصبور باش ! تو صف { ' +
+            chTitle +
+            ' } حدودا نفر ' +
             toFaDigits(String(pos)) +
-            ' هستی' +
-            ' (حدود ' +
+            ' هستی { یعنی ' +
             toFaDigits(String(ahead)) +
-            ' تا جلوتر از توست).';
-          if (totalPendSeen > 0) {
-            note +=
-              '\nالان حدود ' +
-              toFaDigits(String(totalPendSeen)) +
-              ' پیام تو صف این کاناله.';
-          }
-          if (ahead <= 30) {
-            note += '\nنزدیکه! کمتر از ۳۰ تا مونده تا نوبتت 👀';
-          }
+            ' تا جلوتر از توست }';
         } else {
-          note += '\n\nتقریباً اول صفی — زود نوبتت می‌رسه ✨';
+          note += '\n\nصبور باش ! تقریباً اول صف { ' +
+            ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || '') +
+            ' } هستی';
         }
         note += '\n\nیکی دیگه هم می‌تونی بفرستی، یا ◀️ بازگشت';
-        if (v.autoFixed) note += '\n\nیه کم متنت رو مرتب کردم و فرستادم ✨';
+        if (v.autoFixed) note += '\n\nیه کم متنت رو مرتب کردم و فرستادم ، بخونش 🫧';
         await api.sendMessage({
           chat_id: chatId,
           text: note,
@@ -5137,7 +5122,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
     if (owner && state?.kind === 'owner_dm_content' && (text || message.photo || message.video || message.voice || message.audio || message.document || message.video_note || message.sticker)) {
       if (text === '◀️ بازگشت') {
         await clearState(userId);
-        await api.sendMessage({ chat_id: chatId, text: 'برگشتی به منوی اصلی 🎀', reply_markup: ownerKeyboard() });
+        await api.sendMessage({ chat_id: chatId, text: 'برگشتی به منوی اصلی 🪼', reply_markup: ownerKeyboard() });
         return;
       }
       const tid = Number(state.targetId);
