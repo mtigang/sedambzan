@@ -458,6 +458,61 @@ export async function findChannelMessageByInternalId(internalId) {
   return null;
 }
 
+/**
+ * حذف امن پیام از کانال.
+ * اگر deleteMessage رد شد، یک‌بار edit به «حذف شد» را امتحان می‌کند.
+ */
+export async function deleteChannelMessageSafe(chatId, messageId) {
+  const cid = Number(chatId);
+  const mid = Number(messageId);
+  if (!Number.isFinite(cid) || !cid || !Number.isFinite(mid) || mid <= 0) {
+    return { ok: false, error: 'شناسه کانال یا پیام نامعتبر است.' };
+  }
+  const attempts = [
+    { chat_id: cid, message_id: mid },
+    { chat_id: String(cid), message_id: mid },
+  ];
+  let lastErr = '';
+  for (const a of attempts) {
+    try {
+      await api.deleteMessage(a);
+      return { ok: true, method: 'delete' };
+    } catch (e) {
+      lastErr = String((e && (e.description || e.message)) || e || '');
+    }
+  }
+  // اگر حذف ممکن نبود، محتوا را خنثی کن (اگر ربات نویسنده باشد)
+  try {
+    await api.editMessageText({
+      chat_id: cid,
+      message_id: mid,
+      text: '🗑 این پیام حذف شد.',
+    });
+    return { ok: true, method: 'edit' };
+  } catch (_e2) {
+    try {
+      await api.editMessageText({
+        chat_id: String(cid),
+        message_id: mid,
+        text: '🗑 این پیام حذف شد.',
+      });
+      return { ok: true, method: 'edit' };
+    } catch (_e3) {}
+  }
+  let hint = lastErr || 'حذف ناموفق';
+  if (/can.?t be deleted|can't be deleted|message to delete not found|message not found/i.test(lastErr)) {
+    hint =
+      'تلگرام اجازه حذف نداد.\n' +
+      '• ربات را در کانال ادمین کنید و تیک Delete messages را روشن کنید\n' +
+      '• یا پیام از قبل پاک شده / آیدی اشتباه است\n' +
+      '• لینک عمومی همان پیام کانال را بفرستید\n' +
+      '(' +
+      lastErr.slice(0, 80) +
+      ')';
+  }
+  return { ok: false, error: hint };
+}
+
 
 
 /** سقف تقریبی حجم جدول messages ≈ ۵ مگابایت */

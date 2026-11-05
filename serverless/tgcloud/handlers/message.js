@@ -133,6 +133,8 @@ import {
   dropMessageFromReviewBatch,
   toBoldHtml,
   rememberChannelMessage,
+  deleteChannelMessageSafe,
+
   activeShiftChannelKeys,
   checkInactiveShiftAndCancel,
   restoreMistakenlyCancelledShifts,
@@ -798,7 +800,8 @@ export default async function (message) {
             }
           }
           try {
-            await api.deleteMessage({ chat_id: chatIdCh, message_id: msgId });
+            const delResAdm = await deleteChannelMessageSafe(chatIdCh, msgId);
+            if (!delResAdm.ok) throw new Error(delResAdm.error || 'delete failed');
             results.push(
               '✅ از کانال حذف شد · «' +
                 ((DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey) +
@@ -1071,7 +1074,15 @@ export default async function (message) {
           return;
         }
         try {
-          await api.deleteMessage({ chat_id: chatIdCh, message_id: chMid });
+          const delRes = await deleteChannelMessageSafe(chatIdCh, chMid);
+          if (!delRes.ok) {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: 'حذف از کانال ممکن نشد 🌬\n' + String(delRes.error || '').slice(0, 250),
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          }
         } catch (eDel) {
           console.error('user_del direct', eDel);
           await api.sendMessage({
@@ -3377,8 +3388,18 @@ let note =
             continue;
           }
           try {
-            await api.deleteMessage({ chat_id: chatIdCh, message_id: msgId });
-            results.push('✅ حذف شد · ' + (title || chatIdCh) + ' · #' + msgId);
+            const delRes = await deleteChannelMessageSafe(chatIdCh, msgId);
+            if (delRes.ok) {
+              results.push(
+                (delRes.method === 'edit' ? '⚠️ خنثی شد' : '✅ حذف شد') +
+                  ' · ' +
+                  (title || chatIdCh) +
+                  ' · #' +
+                  msgId
+              );
+            } else {
+              results.push('❌ #' + msgId + ' · ' + String(delRes.error || '').slice(0, 150));
+            }
           } catch (e) {
             const em =
               (e && (e.description || e.message)) || String(e);

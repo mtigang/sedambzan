@@ -35,6 +35,7 @@ import {
   settingGet,
   settingSet,
   rememberChannelMessage,
+  deleteChannelMessageSafe,
   findChannelMessageByInternalId,
   activeShiftAdmins,
   addChannelAdmin,
@@ -415,7 +416,14 @@ if (data.startsWith('ban_user:')) {
         } catch (_e) {}
         if (chatIdCh && channelMsgId) {
           try {
-            await api.deleteMessage({ chat_id: chatIdCh, message_id: channelMsgId });
+            const delRes = await deleteChannelMessageSafe(chatIdCh, channelMsgId);
+            if (!delRes.ok) {
+              await api.sendMessage({
+                chat_id: cq.message.chat.id,
+                text: 'خطا حذف از کانال:\n' + String(delRes.error || '').slice(0, 300),
+              });
+              return;
+            }
           } catch (e) {
             await api.sendMessage({
               chat_id: cq.message.chat.id,
@@ -519,13 +527,34 @@ if (data.startsWith('ban_user:')) {
           });
           return;
         }
-        await api.deleteMessage({ chat_id: chatIdCh, message_id: channelMsgId });
-        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'از کانال حذف شد' });
+        const delRes = await deleteChannelMessageSafe(chatIdCh, channelMsgId);
+        if (!delRes.ok) {
+          await api.answerCallbackQuery({
+            callback_query_id: cq.id,
+            text: String(delRes.error || 'خطا حذف').slice(0, 180),
+            show_alert: true,
+          });
+          try {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: '❌ حذف #' + mid + ' از کانال:\n' + String(delRes.error || ''),
+            });
+          } catch (_e) {}
+          return;
+        }
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: delRes.method === 'edit' ? 'محتوا پاک شد (حذف مستقیم ممکن نبود)' : 'از کانال حذف شد',
+        });
         try {
           await api.editMessageText({
             chat_id: cq.message.chat.id,
             message_id: cq.message.message_id,
-            text: (cq.message.text || '') + '\n\n🗑 از کانال حذف شد (در دیتابیس باقی ماند).',
+            text:
+              (cq.message.text || '') +
+              (delRes.method === 'edit'
+                ? '\n\n🗑 محتوا در کانال خنثی شد (حذف کامل ممکن نبود).'
+                : '\n\n🗑 از کانال حذف شد (در دیتابیس باقی ماند).'),
           });
         } catch (_e) {}
       } catch (e) {
