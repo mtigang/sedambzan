@@ -1354,9 +1354,9 @@ if (data.startsWith('ban_user:')) {
       });
       try {
         let txt =
-          'خبر خوب 🎉 پیامت منتشر شد!\n\n' +
+          'خبر خوب 🎀 پیامت منتشر شد!\n\n' +
           '📍 مسیر پیام:\n' +
-          '● ثبت شد\n│\n● صف بررسی\n│\n● بررسی ادمین\n│\n● تأیید شد\n│\n● منتشر شد روی کانال';
+          '● ثبت شد 🩵\n│\n● صف بررسی 🌟\n│\n● بررسی ادمین ✨\n│\n● تأیید شد 💚\n│\n● منتشر شد روی کانال 🎀';
         if (link) txt += '\n\nلینک انتشار:\n' + link;
         await api.sendMessage({
           chat_id: row.userId,
@@ -1541,9 +1541,9 @@ if (data.startsWith('ban_user:')) {
         if (uidNotify) {
           const title = conf.title || pendingRow.channelKey;
           let txt =
-            'خبر خوب 🎉 پیامت منتشر شد!\n\n' +
+            'خبر خوب 🎀 پیامت منتشر شد!\n\n' +
             '📍 مسیر پیام:\n' +
-            '● ثبت شد\n│\n● صف بررسی\n│\n● بررسی ادمین\n│\n● تأیید شد\n│\n● منتشر شد روی کانال';
+            '● ثبت شد 🩵\n│\n● صف بررسی 🌟\n│\n● بررسی ادمین ✨\n│\n● تأیید شد 💚\n│\n● منتشر شد روی کانال 🎀';
           if (link) txt += '\n\nلینک انتشار:\n' + link;
           api
             .sendMessage({
@@ -3766,9 +3766,9 @@ if (data.startsWith('own_shift:')) {
           const link = await resolveChannelMessageLink(conf.chatId, mid, channelKey);
           try {
             let txt =
-              'خبر خوب 🎉 پیامت منتشر شد!\n\n' +
+              'خبر خوب 🎀 پیامت منتشر شد!\n\n' +
               '📍 مسیر پیام:\n' +
-              '● ثبت شد\n│\n● صف بررسی\n│\n● بررسی ادمین\n│\n● تأیید شد\n│\n● منتشر شد روی کانال';
+              '● ثبت شد 🩵\n│\n● صف بررسی 🌟\n│\n● بررسی ادمین ✨\n│\n● تأیید شد 💚\n│\n● منتشر شد روی کانال 🎀';
             if (link) {
               txt += '\n\nلینک انتشار:\n' + link;
             }

@@ -579,7 +579,7 @@ export default async function (message) {
         } catch (_) {}
         await api.sendMessage({
           chat_id: chatId,
-          text: 'منوی اصلی',
+          text: 'برگشتی به منوی اصلی 🎀',
           reply_markup: await roleKb(userId),
         });
         return;
@@ -589,7 +589,7 @@ export default async function (message) {
       } catch (_) {}
       await api.sendMessage({
         chat_id: chatId,
-        text: 'منوی اصلی',
+        text: 'برگشتی به منوی اصلی 🎀',
         reply_markup: await roleKb(userId),
       });
       return;
@@ -968,10 +968,10 @@ export default async function (message) {
       await api.sendMessage({
         chat_id: chatId,
         text:
-          '🗑 حذف پیام منتشرشدهٔ خودتان\n\n' +
-          'آیدی پیام (#123) یا لینک عمومی کانال را بفرستید.\n' +
-          'درخواست برای مالک ارسال می‌شود و پس از تأیید، از کانال حذف می‌گردد.\n' +
-          'حداکثر ۵ درخواست موفق.',
+          '🗑 می‌خوای یکی از پیام‌های منتشرشده‌ت رو پاک کنی؟ 🎀\n\n' +
+          'آیدی پیام (#123) یا لینک عمومی کانال رو بفرست 🩵\n' +
+          'همون لحظه از کانال حذف می‌شه ✨\n' +
+          'سقف: حداکثر ۵ تا 💚',
         reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
@@ -1029,7 +1029,7 @@ export default async function (message) {
         if (String(row.status) !== 'approved') {
           await api.sendMessage({
             chat_id: chatId,
-            text: 'فقط پیام‌های تأیید و منتشرشده را می‌توان درخواست حذف کرد.\nبرای پیام در انتظار از «وضعیت پیام من» لغو کنید.',
+            text: 'فقط پیام‌های منتشرشده رو می‌تونی پاک کنی 🌬\nاگه هنوز تو صفه، از «📊 وضعیت پیام من» لغوش کن 🩵',
             reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
@@ -1042,7 +1042,7 @@ export default async function (message) {
         if (delCount >= 5) {
           await api.sendMessage({
             chat_id: chatId,
-            text: 'سقف ۵ حذف موفق پر شده است.',
+            text: 'سقف ۵ تا حذف پر شده 🎀\nفعلاً بیشتر نمی‌تونی پاک کنی 🩵',
             reply_markup: await roleKb(userId),
           });
           await clearState(userId);
@@ -1066,7 +1066,7 @@ export default async function (message) {
         if (!chatIdCh || !chMid) {
           await api.sendMessage({
             chat_id: chatId,
-            text: 'شناسه پیام در کانال پیدا نشد. لینک عمومی همان پیام را بفرستید.',
+            text: 'این پیام رو تو کانال پیدا نکردم 🌬\nلینک عمومی همون پیام رو بفرست 🩵',
             reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
@@ -1093,9 +1093,9 @@ export default async function (message) {
           text:
             '✅ پیام #' +
             mid +
-            ' از کانال حذف شد.\nباقی‌مانده سهمیه: ' +
+            ' از کانال پاک شد 🎀\nسهمیه باقی‌مونده: ' +
             (5 - (delCount + 1)) +
-            ' از ۵',
+            ' از ۵ 💚',
           reply_markup: await roleKb(userId),
         });
       } catch (e) {
@@ -1175,7 +1175,7 @@ if (text === '📝 ارسال پیام') {
 
     if (text === '📢 لیست چنل‌های مجموعه آرال') {
       const lines = [
-        '📢 چنل‌های مجموعه آرال',
+        '📢 چنل‌های مجموعه آرال 🎀\nانتخاب کن و سر بزن 🩵',
         '',
         '• صدام بزن',
         'https://t.me/callMeAraIl',
@@ -1206,7 +1206,7 @@ if (text === '📝 ارسال پیام') {
         console.error('status msgs', eSt);
         await api.sendMessage({
           chat_id: chatId,
-          text: 'اوه، وضعیت الان بالا نیومد 🙈 یه لحظه بعد دوباره بزن.',
+          text: 'اوه وضعیت الان بالا نیومد 🌬\nیه لحظه بعد دوباره بزن 🩵',
           reply_markup: await roleKb(userId),
         });
         return;
@@ -1214,7 +1214,7 @@ if (text === '📝 ارسال پیام') {
       if (!list.length) {
         await api.sendMessage({
           chat_id: chatId,
-          text: 'هنوز چیزی نفرستادی که پیگیری کنیم 😅\nاول از «📝 ارسال پیام» یکی بفرست.',
+          text: 'هنوز چیزی نفرستادی که پیگیری کنیم 🎀\nاول از «📝 ارسال پیام» یکی بفرست ✨',
           reply_markup: await roleKb(userId),
         });
         return;
@@ -1225,8 +1225,8 @@ if (text === '📝 ارسال پیام') {
           return (
             '📍 #' +
             id +
-            '\n● ثبت شد' +
-            '\n● رفت برای بررسی' +
+            '\n● ثبت شد 🩵' +
+            '\n● رفت برای بررسی 🌟' +
             '\n✗ رد شد' +
             '\n○ انتشار'
           );
@@ -1236,11 +1236,11 @@ if (text === '📝 ارسال پیام') {
         else if (s === 'publishing') step = 3;
         else if (s === 'approved') step = 5;
         const labels = [
-          'ثبت شد',
-          'تو صف بررسیه',
-          'ادمین داره می‌بینه',
-          'تأیید شد',
-          'منتشر شد روی کانال',
+          'ثبت شد 🩵',
+          'تو صف بررسیه 🌟',
+          'ادمین داره می‌بینه ✨',
+          'تأیید شد 💚',
+          'منتشر شد روی کانال 🎀',
         ];
         let t = '📍 #' + id + '\n';
         for (let i = 0; i < labels.length; i++) {
@@ -1250,7 +1250,7 @@ if (text === '📝 ارسال پیام') {
         }
         return t.replace(/\n\|\n/g, '\n│\n');
       }
-      let body = '📊 پیگیری پیام‌هات (' + list.length + ' تای اخیر)\n\n';
+      let body = '📊 پیگیری پیام‌هات 🎀\n' + list.length + ' تای اخیر 🩵\n\n';
       const cancelRows = [];
       for (const row of list) {
         const st = String(row.status || '');
@@ -1258,12 +1258,12 @@ if (text === '📝 ارسال پیام') {
         const when = formatTsJalali(row.submittedAt);
         const badge =
           st === 'approved'
-            ? '🟢 منتشر شده'
+            ? '🟢 منتشر شده ✨'
             : st === 'rejected'
               ? '🔴 رد شده'
               : st === 'publishing'
-                ? '⏳ در حال انتشار'
-                : '🟡 تو صف';
+                ? '⏳ داره می‌ره کانال 🌟'
+                : '🟡 تو صف 🩵';
         body +=
           badge +
           '\n' +
@@ -1325,7 +1325,7 @@ if (text === '📝 ارسال پیام') {
       await clearState(userId);
       await api.sendMessage({
         chat_id: chatId,
-        text: '✅ ثبت شد. مالک از «📬 پیام کاربران» می‌بیند.',
+        text: '✅ رسید به دست مالک 🎀\nاز «📬 پیام کاربران» می‌بینه 🩵',
         reply_markup: await roleKb(userId),
       });
       /* فیدبک فقط از پنل «پیام کاربران» */
@@ -1737,7 +1737,7 @@ if (text === '📝 ارسال پیام') {
         }
 
 let note =
-          'گرفتمش 🫶 ثبت شد!\n' +
+          'گرفتمش 🎀 ثبت شد!\n' +
           'شناسه پیگیری: #' +
           (msgId != null ? msgId : '?') +
           '\n\n' +
@@ -5137,7 +5137,7 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
     if (owner && state?.kind === 'owner_dm_content' && (text || message.photo || message.video || message.voice || message.audio || message.document || message.video_note || message.sticker)) {
       if (text === '◀️ بازگشت') {
         await clearState(userId);
-        await api.sendMessage({ chat_id: chatId, text: 'منوی اصلی', reply_markup: ownerKeyboard() });
+        await api.sendMessage({ chat_id: chatId, text: 'برگشتی به منوی اصلی 🎀', reply_markup: ownerKeyboard() });
         return;
       }
       const tid = Number(state.targetId);

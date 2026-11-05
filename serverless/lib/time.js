@@ -281,15 +281,16 @@ export function workHoursClosedText() {
   const h = hoursUntilWorkOpen();
   const cfg = getWorkHoursConfig();
   return (
-    '⏰ ساعت کاری از ' +
+    '🌬 فعلاً خارج از ساعت کاریمه…\n\n' +
+    'ساعت کارم از ' +
     toFaDigits(cfg.start) +
     ' تا ' +
     toFaDigits(cfg.end) +
-    ' است.\n\n' +
-    'الان خارج از ساعت کاری هستید — پیام ثبت نشد (ربات خراب نیست).\n' +
+    ' هست 🌟\n' +
+    'پیامت ثبت نشد؛ نگران نباش، ربات خراب نیست 🩵\n\n' +
     'حدود ' +
     toFaDigits(h) +
-    ' ساعت تا شروع کار مانده.'
+    ' ساعت دیگه دوباره باز می‌شم 🎀'
   );
 }
 
