@@ -2575,7 +2575,7 @@ export async function restoreMistakenlyCancelledShifts() {
  *  - Batch state ≠ Message state: حذف Batch هیچ پیامی را تغییر نمی‌دهد.
  * ============================================================ */
 
-export const REVIEW_BATCH_SIZE = 16;
+export const REVIEW_BATCH_SIZE = 18;
 const REVIEW_LOCK_TTL_MS = 10 * 1000;
 
 function reviewBatchKey(adminId) {
@@ -3308,7 +3308,7 @@ export async function isReviewBatchComplete(adminId) {
  * مسیر پایدار: چند برش DESC روی PK (سریع) → فیلتر pending → sort ASC → FIFO در همان پنجره.
  */
 async function selectReviewablePending(adminId) {
-  const need = Math.max(16, Number(REVIEW_BATCH_SIZE) || 16);
+  const need = Math.max(18, Number(REVIEW_BATCH_SIZE) || 18);
   // پنجرهٔ کافی برای صف چند هزارتایی؛ فقط ستون‌های سبک
   const WINDOW = 12000;
   const CHUNK = 3000;
@@ -3353,7 +3353,7 @@ async function selectReviewablePending(adminId) {
 
   // مسیر سریع: WHERE status=pending روی کانال (اگر پشتیبانی شد و نتیجه داد)
   try {
-    const want = Math.max(16, Number(REVIEW_BATCH_SIZE) || 16);
+    const want = Math.max(18, Number(REVIEW_BATCH_SIZE) || 18);
     let q = db
       .select()
       .from(messages)
