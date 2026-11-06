@@ -1,4 +1,4 @@
-import { buildAvailableShiftSlots } from 'lib/time';
+import { buildAvailableShiftSlots, getShiftDayMode } from 'lib/time';
 
 export const OWNER_IDS = [6666610646, 8302194171, 8434360251, 8476063231];
 
@@ -120,5 +120,6 @@ export const FEEDBACK_HINT =
   '{ 📝 ارسال پیام } استفاده کن';
 
 export function buildShiftSlots() {
+  // همیشه از وضعیت فعلی time.js (بعد از loadWorkHoursFromSettings)
   return buildAvailableShiftSlots();
 }

@@ -8,7 +8,7 @@ import {
   CHANNEL_IDS,
   ADMIN_GROUP_IDS,
 } from 'lib/config';
-import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf, periodOrd, isWorkHours } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf, periodOrd, isWorkHours, setWorkHoursConfig, setShiftDayMode, getShiftDayMode, buildAvailableShiftSlots } from 'lib/time';
 import { exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { reviewInline, sanitizeMarkup } from 'lib/keyboards';
 
@@ -708,7 +708,6 @@ export async function pruneOldestMessageIfOverBudget() {
 
 export async function loadWorkHoursFromSettings() {
   try {
-    const { setWorkHoursConfig, setShiftDayMode } = await import('lib/time');
     const mode = (await settingGet('shift_day_mode', '12')) || '12';
     setShiftDayMode(mode);
     if (String(mode) === '24') {
@@ -748,7 +747,6 @@ export async function saveWorkHours(startHm, endHm) {
   await settingSet('work_start_hm', s);
   await settingSet('work_end_hm', e);
   try {
-    const { setWorkHoursConfig } = await import('lib/time');
     setWorkHoursConfig(s, e);
   } catch (_e) {}
   // همگام‌سازی ساعت کاری هر کانال (لیست شیفت + پیام‌های ساعت کاری)
@@ -782,7 +780,6 @@ export async function saveShiftDayMode(mode) {
   const m = mode === '24' ? '24' : '12';
   await settingSet('shift_day_mode', m);
   try {
-    const { setShiftDayMode } = await import('lib/time');
     setShiftDayMode(m);
   } catch (_e) {}
   if (m === '24') {

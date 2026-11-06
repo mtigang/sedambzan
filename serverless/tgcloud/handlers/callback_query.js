@@ -98,7 +98,7 @@ import {
   subLeaderAdmins,
   listActiveSubLeaders,
 } from 'lib/subleader';
-import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod, toJalaliDisplay, periodOrd, isWorkHours, normHm, getWorkHoursConfig } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, formatTsJalali, sortShiftsByPeriod, toJalaliDisplay, periodOrd, isWorkHours, normHm, getWorkHoursConfig, buildAvailableShiftSlots, getShiftDayMode } from 'lib/time';
 import { DEFAULT_CHANNELS, OWNER_IDS, CHANNEL_IDS } from 'lib/config';
 import {
   buildWeeklyHrReport,
@@ -3351,7 +3351,7 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, (isOwner(userId) || false))),
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, buildAvailableShiftSlots(), (isOwner(userId) || false))),
         });
       } catch (_e) {}
       return;
@@ -5304,13 +5304,13 @@ if (data === 'ann_continue') {
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
           text: head,
-          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, manageMode)),
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, buildAvailableShiftSlots(), manageMode)),
         });
       } catch (_e) {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text: head,
-          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, manageMode)),
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, buildAvailableShiftSlots(), manageMode)),
         });
       }
       return;
@@ -5773,7 +5773,7 @@ if (data === 'ann_continue') {
         await api.editMessageReplyMarkup({
           chat_id: cq.message.chat.id,
           message_id: cq.message.message_id,
-          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, (isOwner(userId) || false))),
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, buildAvailableShiftSlots(), (isOwner(userId) || false))),
         });
       } catch (e) {
         console.error('edit self board', e);

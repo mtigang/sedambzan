@@ -67,7 +67,7 @@ import {
 // sanitize imported below
 import { validateAndFix, normalizeBody, exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
-import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm, sortShiftsByPeriod, periodOrd, setWorkHoursConfig, getWorkHoursConfig } from 'lib/time';
+import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm, sortShiftsByPeriod, periodOrd, setWorkHoursConfig, getWorkHoursConfig, buildAvailableShiftSlots, getShiftDayMode } from 'lib/time';
 // work hours: setWorkHoursConfig/getWorkHoursConfig exported from same module
 // normHm via time
 import { resolveUserId, channelMessageLink, channelPublicBase } from 'lib/resolve';
@@ -2311,10 +2311,14 @@ let note =
         try {
           manageMode = manageMode || (await canManageOthersShifts(userId, channelKey));
         } catch (_e) {}
+        try { await loadWorkHoursFromSettings(); } catch (_e) {}
+        const _slots = buildAvailableShiftSlots();
+        const _mode = getShiftDayMode();
+        const modeLine = _mode === '24' ? '\nحالت: ۲۴ ساعته' : '\nحالت: ۱۲ ساعته (۱۲:۰۰–۰۰:۰۰)';
         await api.sendMessage({
           chat_id: chatId,
-          text: head,
-          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, null, manageMode)),
+          text: head + modeLine,
+          reply_markup: sanitizeMarkup(shiftSlotsInline(channelKey, takenMap, myStarts, _slots, manageMode)),
         });
       } catch (e) {
         console.error('direct shift slots', e);
