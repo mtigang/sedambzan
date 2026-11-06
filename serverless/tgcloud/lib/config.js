@@ -10,8 +10,8 @@ export const CHANNEL_USERNAMES = {
   inkarbar: 'inKarbariral',
   zendegi: 'arialcuple',
   fekrmikardam: 'fekrmi',
-  kash: '',
-  delammikhahad: '',
+  kash: 'kasharal',
+  delammikhahad: 'wantraI',
 };
 
 export const CHANNEL_IDS = {
