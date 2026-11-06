@@ -5273,11 +5273,14 @@ if (data === 'ann_continue') {
         title +
         '»\nدوره: ' +
         (toJalaliDisplay(date) || date) +
-        ' (یک‌بارمصرف)\nساعت کاری: ' +
-        ((getWorkHoursConfig && getWorkHoursConfig().start) || '12:00') +
-        ' تا ' +
-        ((getWorkHoursConfig && getWorkHoursConfig().end) || '00:00') +
-        '\n' +
+        ' (یک‌بارمصرف)\n' +
+        (getShiftDayMode() === '24'
+          ? 'حالت: ۲۴ ساعته (تمام روز)\n'
+          : ('ساعت کاری: ' +
+            ((getWorkHoursConfig && getWorkHoursConfig().start) || '12:00') +
+            ' تا ' +
+            ((getWorkHoursConfig && getWorkHoursConfig().end) || '00:00') +
+            '\n')) +
         (isOwner(userId) ? 'مالک: بدون سقف شیفت\n' : 'حداکثر ۳ شیفت\n') +
         '🟢 خالی  ·  🔴 پر\n\n';
       if (occupied.length) {
@@ -5591,14 +5594,18 @@ if (data === 'ann_continue') {
             });
             return;
           }
-          const sh = Number(String(startN).split(':')[0]) || 0;
-          if (sh < 12) {
-            await api.answerCallbackQuery({
-              callback_query_id: cq.id,
-              text: 'شیفت فقط از ۱۲ تا ۰۰',
-              show_alert: true,
-            });
-            return;
+          // فقط در حالت ۱۲ ساعته محدود به ۱۲–۰۰
+          try { await loadWorkHoursFromSettings(); } catch (_e) {}
+          if (getShiftDayMode() !== '24') {
+            const sh = Number(String(startN).split(':')[0]) || 0;
+            if (sh < 12) {
+              await api.answerCallbackQuery({
+                callback_query_id: cq.id,
+                text: 'در حالت ۱۲ ساعته شیفت فقط از ۱۲ تا ۰۰ است',
+                show_alert: true,
+              });
+              return;
+            }
           }
         }
       }
@@ -5641,16 +5648,19 @@ if (data === 'ann_continue') {
         return;
       }
       {
-        // ادمین: فقط ۱۲–۰۰ | مالک: بدون محدودیت
+        // ادمین در حالت ۱۲ ساعته: فقط ۱۲–۰۰ | حالت ۲۴: همه ساعات | مالک: بدون محدودیت
         if (!isOwner(userId)) {
-          const sh = Number(String(startHm).split(':')[0]) || 0;
-          if (sh < 12) {
-            await api.answerCallbackQuery({
-              callback_query_id: cq.id,
-              text: 'شیفت فقط از ۱۲ تا ۰۰ معتبر است',
-              show_alert: true,
-            });
-            return;
+          try { await loadWorkHoursFromSettings(); } catch (_e) {}
+          if (getShiftDayMode() !== '24') {
+            const sh = Number(String(startHm).split(':')[0]) || 0;
+            if (sh < 12) {
+              await api.answerCallbackQuery({
+                callback_query_id: cq.id,
+                text: 'در حالت ۱۲ ساعته شیفت فقط از ۱۲ تا ۰۰ معتبر است',
+                show_alert: true,
+              });
+              return;
+            }
           }
         }
       }
