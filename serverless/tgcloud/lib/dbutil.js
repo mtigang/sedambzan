@@ -2311,138 +2311,131 @@ export async function buildAdminStatsPayload(day, channelScope) {
 }
 
 export async function getStatsDashboardText() {
-  let total = 0;
-  let pe = 0;
-  let ap = 0;
-  let rj = 0;
+  const _nl = String.fromCharCode(10);
+
+  async function countAll() {
+    try {
+      const rows = (await db.select({ n: sql`count(*)` }).from(messages).all()) || [];
+      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+    } catch (e) {
+      console.error('stats total', e);
+      return 0;
+    }
+  }
+
+  async function countByStatus(st) {
+    try {
+      const rows =
+        (await db.select({ n: sql`count(*)` }).from(messages).where(eq(messages.status, st)).all()) || [];
+      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+    } catch (e) {
+      console.error('stats status', st, e);
+      return null;
+    }
+  }
+
+  async function countByStatusChannel(st, ck) {
+    try {
+      const rows =
+        (await db
+          .select({ n: sql`count(*)` })
+          .from(messages)
+          .where(and(eq(messages.status, st), eq(messages.channelKey, ck)))
+          .all()) || [];
+      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+    } catch (e) {
+      console.error('stats ch', st, ck, e);
+      return null;
+    }
+  }
+
+  const total = await countAll();
+  let pe = await countByStatus('pending');
+  const pePub = await countByStatus('publishing');
+  let ap = await countByStatus('approved');
+  let rj = await countByStatus('rejected');
+  let accurate = pe != null && ap != null && rj != null;
+
+  if (pe == null || ap == null || rj == null) {
+    // fallback نمونهٔ سبک فقط در صورت timeout
+    try {
+      const sample =
+        (await db
+          .select({ status: messages.status, channelKey: messages.channelKey })
+          .from(messages)
+          .orderBy(desc(messages.id))
+          .limit(8000)
+          .all()) || [];
+      let sPe = 0, sAp = 0, sRj = 0;
+      for (const x of sample) {
+        const st = String(x.status || '');
+        if (st === 'pending' || st === 'publishing') sPe++;
+        else if (st === 'approved') sAp++;
+        else if (st === 'rejected') sRj++;
+      }
+      if (pe == null) pe = sPe;
+      if (ap == null) ap = sAp;
+      if (rj == null) rj = sRj;
+      accurate = false;
+    } catch (e) {
+      console.error('stats fallback', e);
+      pe = pe || 0;
+      ap = ap || 0;
+      rj = rj || 0;
+      accurate = false;
+    }
+  } else {
+    pe = Number(pe) + Number(pePub || 0);
+  }
+
   const byCh = {};
   for (const c of Object.values(DEFAULT_CHANNELS || {})) {
     byCh[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
   }
-  let note = '';
 
-  try {
-    const rows = (await db.select({ n: sql`count(*)` }).from(messages).all()) || [];
-    total = Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
-  } catch (e) {
-    console.error('stats total', e);
+  if (accurate) {
+    for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+      const ck = c.key;
+      const cPe = await countByStatusChannel('pending', ck);
+      const cPub = await countByStatusChannel('publishing', ck);
+      const cAp = await countByStatusChannel('approved', ck);
+      const cRj = await countByStatusChannel('rejected', ck);
+      if (cPe == null || cAp == null || cRj == null) {
+        accurate = false;
+        break;
+      }
+      const peN = Number(cPe) + Number(cPub || 0);
+      const apN = Number(cAp);
+      const rjN = Number(cRj);
+      byCh[ck] = { total: peN + apN + rjN, pe: peN, ap: apN, rj: rjN, title: c.title };
+    }
   }
 
-  // یک اسکن سبک از جدیدترین‌ها روی PK — بدون WHERE (مقاوم روی ۵۰k+)
-  let sample = [];
-  try {
-    sample =
-      (await db
-        .select({
-          status: messages.status,
-          channelKey: messages.channelKey,
-          submittedAt: messages.submittedAt,
-          reviewedAt: messages.reviewedAt,
-        })
-        .from(messages)
-        .orderBy(desc(messages.id))
-        .limit(6000)
-        .all()) || [];
-  } catch (e) {
-    console.error('stats sample', e);
+  if (!accurate) {
     try {
-      sample =
+      const sample =
         (await db
-          .select({
-            status: messages.status,
-            channelKey: messages.channelKey,
-          })
+          .select({ status: messages.status, channelKey: messages.channelKey })
           .from(messages)
           .orderBy(desc(messages.id))
-          .limit(2000)
+          .limit(8000)
           .all()) || [];
-    } catch (e2) {
-      console.error('stats sample2', e2);
-    }
-  }
-
-  let sPe = 0;
-  let sAp = 0;
-  let sRj = 0;
-  let sOther = 0;
-  for (const x of sample) {
-    const st = String(x.status || '');
-    const ck = String((x.channelKey ?? x.channel_key) || '');
-    if (st === 'pending' || st === 'publishing') sPe++;
-    else if (st === 'approved') sAp++;
-    else if (st === 'rejected') sRj++;
-    else sOther++;
-    if (byCh[ck]) {
-      byCh[ck].total++;
-      if (st === 'pending' || st === 'publishing') byCh[ck].pe++;
-      else if (st === 'approved') byCh[ck].ap++;
-      else if (st === 'rejected') byCh[ck].rj++;
-    }
-  }
-
-  const sSum = sPe + sAp + sRj + sOther;
-  if (sSum > 0 && total > 0) {
-    // اگر نمونه تقریباً کل است، اعداد دقیق نمونه؛ وگرنه مقیاس تقریبی
-    if (total <= sample.length + 50) {
-      pe = sPe;
-      ap = sAp;
-      rj = sRj;
-    } else {
-      const ratio = total / sSum;
-      pe = Math.round(sPe * ratio);
-      ap = Math.round(sAp * ratio);
-      rj = Math.round(sRj * ratio);
       for (const key of Object.keys(byCh)) {
-        const b = byCh[key];
-        byCh[key] = {
-          total: Math.round(b.total * ratio),
-          pe: Math.round(b.pe * ratio),
-          ap: Math.round(b.ap * ratio),
-          rj: Math.round(b.rj * ratio),
-          title: b.title,
-        };
+        byCh[key] = { total: 0, pe: 0, ap: 0, rj: 0, title: byCh[key].title };
       }
-      note = '\n\nℹ️ تفکیک از نمونه ' + sample.length + ' پیام اخیر + مقیاس روی کل برآورد شده.';
+      for (const x of sample) {
+        const st = String(x.status || '');
+        const ck = String((x.channelKey ?? x.channel_key) || '');
+        if (!byCh[ck]) continue;
+        byCh[ck].total++;
+        if (st === 'pending' || st === 'publishing') byCh[ck].pe++;
+        else if (st === 'approved') byCh[ck].ap++;
+        else if (st === 'rejected') byCh[ck].rj++;
+      }
+    } catch (e) {
+      console.error('stats byCh fallback', e);
     }
-  } else {
-    pe = sPe;
-    ap = sAp;
-    rj = sRj;
   }
-
-  // pending معمولاً در انتهای جدول است — اسکن عمیق‌تر بدون مقیاس اشتباه
-  try {
-    const deep = await countRecentByStatus(15000);
-    if (deep && deep.scanned > 0) {
-      pe = deep.pe;
-      // approved/rejected کل: اگر total داریم، باقی را تقریب بزن
-      if (total > 0) {
-        const rest = Math.max(0, total - pe);
-        // نسبت ap/rj از نمونه عمیق
-        const ar = (deep.ap + deep.rj) || 1;
-        ap = Math.round(rest * (deep.ap / ar));
-        rj = Math.max(0, rest - ap);
-      } else {
-        ap = deep.ap;
-        rj = deep.rj;
-      }
-      for (const c of Object.values(DEFAULT_CHANNELS || {})) {
-        const d = deep.byCh[c.key] || { pe: 0, ap: 0, rj: 0, total: 0 };
-        byCh[c.key] = {
-          total: d.total,
-          pe: d.pe,
-          ap: d.ap,
-          rj: d.rj,
-          title: c.title,
-        };
-      }
-      note =
-        String.fromCharCode(10, 10) +
-        'ℹ️ صف انتظار از ' +
-        deep.scanned +
-        ' پیام انتهای جدول (بدون مقیاس نادرست).';
-    }
-  } catch (_e) {}
 
   let userCount = 0;
   try {
@@ -2452,17 +2445,20 @@ export async function getStatsDashboardText() {
 
   let adminUnique = 0;
   try {
-    const ads = (await db.select().from(channelAdmins).all()) || [];
-    const set = new Set();
-    for (const a of ads) set.add(Number(a.userId ?? a.user_id));
-    adminUnique = set.size;
+    const ar = (await db.select().from(channelAdmins).all()) || [];
+    const set = {};
+    for (const a of ar) {
+      const id = Number(a.userId ?? a.user_id);
+      if (id) set[id] = 1;
+    }
+    adminUnique = Object.keys(set).length;
   } catch (_e) {}
 
   let shToday = 0;
   try {
     const now = tehranNow();
     const pdate = periodDateStr(now);
-    const sh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(400).all()) || [];
+    const sh = (await db.select().from(shifts).limit(800).all()) || [];
     shToday = sh.filter(function (s) {
       if (String(s.status) !== 'active') return false;
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
@@ -2470,12 +2466,21 @@ export async function getStatsDashboardText() {
     }).length;
   } catch (_e) {}
 
-  let todayPe = 0;
-  let todayAp = 0;
-  let todayRj = 0;
-  let todayNew = 0;
+  // امروز: نمونهٔ جدیدترین‌ها (بدون ایندکس زمانی دقیق‌تر ممکن نیست)
+  let todayPe = 0, todayAp = 0, todayRj = 0, todayNew = 0;
   try {
     const today = tehranNow().date;
+    const sample =
+      (await db
+        .select({
+          status: messages.status,
+          submittedAt: messages.submittedAt,
+          reviewedAt: messages.reviewedAt,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(4000)
+        .all()) || [];
     for (const m of sample) {
       const subD = tehranDateOfTs(m.submittedAt);
       const revD = tehranDateOfTs(m.reviewedAt);
@@ -2491,23 +2496,11 @@ export async function getStatsDashboardText() {
     }
   } catch (_e) {}
 
-  const _nl = String.fromCharCode(10);
   let by = '';
   for (const c of Object.values(DEFAULT_CHANNELS || {})) {
     const b = byCh[c.key] || { total: 0, pe: 0, ap: 0, rj: 0 };
     by +=
-      '• ' +
-      c.title +
-      ': ' +
-      b.total +
-      ' (🟡' +
-      b.pe +
-      ' 🟢' +
-      b.ap +
-      ' 🔴' +
-      b.rj +
-      ')' +
-      _nl;
+      '• ' + c.title + ': ' + b.total + ' (🟡' + b.pe + ' 🟢' + b.ap + ' 🔴' + b.rj + ')' + _nl;
   }
 
   let text =
@@ -2552,12 +2545,15 @@ export async function getStatsDashboardText() {
     '📺 تفکیک کانال:' +
     _nl +
     by +
-    note;
-  if (text.indexOf('\n') >= 0) {
-    text = text.split('\n').join(_nl);
-  }
+    _nl +
+    (accurate
+      ? '✅ آمار کل و تفکیک کانال از شمارش واقعی دیتابیس.'
+      : 'ℹ️ بخشی از آمار از شمارش واقعی؛ در صورت محدودیت زمان، تفکیک/امروز از نمونهٔ اخیر.') +
+    _nl;
+
   return text;
 }
+
 
 export async function checkInactiveShiftAndCancel(channelKey, opts) {
   // disabled — do nothing
@@ -3353,6 +3349,35 @@ async function selectReviewablePending(adminId) {
       if (!(allowSet[ck] || allowSet[nk])) return false;
     }
     return true;
+  }
+
+  // مسیر سریع: WHERE status=pending روی کانال (اگر پشتیبانی شد و نتیجه داد)
+  try {
+    const want = Math.max(16, Number(REVIEW_BATCH_SIZE) || 16);
+    let q = db
+      .select()
+      .from(messages)
+      .where(eq(messages.status, 'pending'))
+      .orderBy(asc(messages.id))
+      .limit(want * 4);
+    // بدون فیلتر کانال ممکن است روی جدول بزرگ timeout شود — فقط وقتی کانال مالک مشخص است
+    if (ownerCh) {
+      q = db
+        .select()
+        .from(messages)
+        .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, ownerCh)))
+        .orderBy(asc(messages.id))
+        .limit(want * 3);
+      const rows = (await q.all()) || [];
+      const filtered = rows.filter(function (r) {
+        return passChannel(r.channelKey ?? r.channel_key);
+      });
+      if (filtered.length) {
+        return filtered.slice(0, want);
+      }
+    }
+  } catch (eFast) {
+    console.error('selectReviewablePending fast', eFast);
   }
 
   // پاک‌سازی watermark خراب نسخهٔ قبلی (ASC از صفر)
