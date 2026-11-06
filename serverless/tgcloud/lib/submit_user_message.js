@@ -270,25 +270,38 @@ export async function submitUserMessage(userId, text) {
         content: v.content,
         channelKey: v.channelKey,
         status: 'pending',
-        submittedAt: new Date(),
       })
       .run();
 
     let msgId = null;
     const lastRows =
       (await db
-        .select({ id: messages.id, content: messages.content, channelKey: messages.channelKey, status: messages.status })
+        .select({
+          id: messages.id,
+          userId: messages.userId,
+          content: messages.content,
+          channelKey: messages.channelKey,
+          status: messages.status,
+        })
         .from(messages)
-        .where(eq(messages.userId, uid))
         .orderBy(desc(messages.id))
-        .limit(5)
+        .limit(20)
         .all()) || [];
     for (const row of lastRows) {
+      if (Number(row.userId ?? row.user_id) !== Number(uid)) continue;
       if (String(row.status) !== 'pending') continue;
       if (String(row.channelKey || row.channel_key) !== String(v.channelKey)) continue;
       if (String(row.content || '') === String(v.content)) {
         msgId = row.id;
         break;
+      }
+    }
+    if (msgId == null) {
+      for (const row of lastRows) {
+        if (Number(row.userId ?? row.user_id) === Number(uid) && String(row.status) === 'pending') {
+          msgId = row.id;
+          break;
+        }
       }
     }
     if (msgId == null && lastRows[0]) msgId = lastRows[0].id;

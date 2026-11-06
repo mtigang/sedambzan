@@ -85,6 +85,7 @@ import {
 } from 'lib/dbutil';
 import { drainHoleWave, startHoleJob, getHoleJob, saveHoleJob, drainHolePiggyback } from 'lib/hole_drain';
 import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob, countAnnounceAudience } from 'lib/announce_drain';
+import { maybeDeliverPassiveAnnounce, setPassiveUserAnnounce, clearPassiveUserAnnounce } from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
 import {
   upsertSubLeader,
@@ -247,6 +248,16 @@ export default async function (cq) {
         }
       }
     } catch (_eBan) {}
+
+    // اطلاعیهٔ کاربران عادی با هر دکمه
+    try {
+      if (!isOwner(userId) && cq.message && cq.message.chat) {
+        const _role = await getRole(userId);
+        if (_role === 'user') {
+          await maybeDeliverPassiveAnnounce(userId, cq.message.chat.id);
+        }
+      }
+    } catch (_pa) {}
 
     // —— هندلرهای کمکی (بن / حذف / ناوبری) ——
 // —— بن کاربر از جستجو ——
@@ -4975,6 +4986,21 @@ if (data.startsWith('ann_target:')) {
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text: 'متن اطلاعیه پیدا نشد. دوباره از «📣 اطلاعیه» شروع کنید.',
+        });
+        return;
+      }
+      // همه کاربران عادی: بدون ارسال انبوه — هر کاربر با اولین دکمه بعداً دریافت می‌کند
+      if (target === 'all') {
+        const id = await setPassiveUserAnnounce(annText, annEntities);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text:
+            '✅ اطلاعیه برای کاربران عادی ثبت شد.\n\n' +
+            'دیگر ارسال انبوه انجام نمی‌شود.\n' +
+            'هر کاربر با زدن هر دکمهٔ ربات، یک‌بار متن را می‌گیرد و ربات آن را در چتش سنجاق می‌کند.\n\n' +
+            'شناسه: ' +
+            id +
+            '\n\nبرای لغو ثبت، دوباره «📣 اطلاعیه» بزنید و لغو کنید یا از ابزار «پاک کردن اطلاعیه فعال» استفاده کنید.',
         });
         return;
       }

@@ -10,6 +10,8 @@ export const CHANNEL_USERNAMES = {
   inkarbar: 'inKarbariral',
   zendegi: 'arialcuple',
   fekrmikardam: 'fekrmi',
+  kash: '',
+  delammikhahad: '',
 };
 
 export const CHANNEL_IDS = {
@@ -17,6 +19,8 @@ export const CHANNEL_IDS = {
   inkarbar: -1003764383335,
   zendegi: -1004371148799,
   fekrmikardam: -1003964656653,
+  kash: -1004325797413,
+  delammikhahad: -1004443890239,
 };
 
 export const ADMIN_GROUP_IDS = {
@@ -24,6 +28,8 @@ export const ADMIN_GROUP_IDS = {
   inkarbar: -1004335935102,
   zendegi: -1003812392984,
   fekrmikardam: null,
+  kash: null,
+  delammikhahad: null,
 };
 
 export const DEFAULT_CHANNELS = {
@@ -63,6 +69,24 @@ export const DEFAULT_CHANNELS = {
     workStart: '12:00',
     workEnd: '00:00',
   },
+  kash: {
+    key: 'kash',
+    title: 'کاش',
+    prefixes: ['کاش'],
+    chatId: CHANNEL_IDS.kash,
+    adminGroupId: ADMIN_GROUP_IDS.kash,
+    workStart: '12:00',
+    workEnd: '00:00',
+  },
+  delammikhahad: {
+    key: 'delammikhahad',
+    title: 'دلم میخواد',
+    prefixes: ['دلم میخواد'],
+    chatId: CHANNEL_IDS.delammikhahad,
+    adminGroupId: ADMIN_GROUP_IDS.delammikhahad,
+    workStart: '12:00',
+    workEnd: '00:00',
+  },
 };
 
 export const CHANNEL_PREFIXES = [
@@ -70,6 +94,8 @@ export const CHANNEL_PREFIXES = [
   { key: 'inkarbar', prefix: 'این کاربر' },
   { key: 'zendegi', prefix: 'تو زندگی بعدی' },
   { key: 'fekrmikardam', prefix: 'من فکر میکردم' },
+  { key: 'kash', prefix: 'کاش' },
+  { key: 'delammikhahad', prefix: 'دلم میخواد' },
 ];
 
 export const WELCOME_TEXT =
@@ -79,7 +105,7 @@ export const WELCOME_TEXT =
 
 export const RULES_TEXT =
   'پیامت با یکی از اینا شروع شه :\n' +
-  '{ صدام بزن / این کاربر / تو زندگی بعدی / من فکر میکردم }\n\n' +
+  '{ صدام بزن / این کاربر / تو زندگی بعدی / من فکر میکردم / کاش / دلم میخواد }\n\n' +
   'توی ۱۰ دقیقه ۶ تا پیام بیشتر نمیتونی بدی به بقیه توهین نکن تکست سیاسیم نذار 🐳';
 
 export const BOT_DISABLED_TEXT =

@@ -722,7 +722,7 @@ export function announceTargetInline() {
   return sanitizeMarkup({
     inline_keyboard: [
       [{ text: '👮 فقط ادمین‌ها', callback_data: 'ann_target:admins', style: 'primary' }],
-      [{ text: '👥 همه کاربران', callback_data: 'ann_target:all', style: 'success' }],
+      [{ text: '👥 کاربران عادی (با هر دکمه)', callback_data: 'ann_target:all', style: 'success' }],
       [{ text: '💬 انتقادات پیشنهادات ادمین‌ها', callback_data: 'ann_target:admin_fb', style: 'primary' }],
       [{ text: 'لغو', callback_data: 'ann_cancel', style: 'danger' }],
     ],

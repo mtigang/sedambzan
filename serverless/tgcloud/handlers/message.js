@@ -89,6 +89,7 @@ import {
 } from 'lib/subleader';
 import {
   ensureChannelsSeeded,
+  maybeDeliverPassiveAnnounce,
   getChannels,
   getChannel,
   isBotOn,
@@ -415,6 +416,13 @@ export default async function (message) {
 
     const owner = isOwner(userId);
     const role = await getRole(userId);
+
+    // اطلاعیهٔ کاربران عادی: با هر تعامل یک‌بار ارسال + سنجاق (بدون ارسال انبوه)
+    if (!owner && role === 'user') {
+      try {
+        await maybeDeliverPassiveAnnounce(userId, chatId);
+      } catch (_pa) {}
+    }
 
     // تحویل خودکار Pending حذف شد: فقط با دکمه «📥 پیام‌های در انتظار» (Batch)
 
@@ -1131,7 +1139,7 @@ export default async function (message) {
         chat_id: chatId,
         text:
           '📝 ارسال مستقیم به کانال (مثل کاربر عادی)\n\n' +
-          'پیامتون با «صدام بزن / این کاربر / تو زندگی بعدی / من فکر میکردم» شروع بشه.\n\n' +
+          'پیامتون با «صدام بزن / این کاربر / تو زندگی بعدی / من فکر میکردم / کاش / دلم میخواد» شروع بشه.\n\n' +
           'سیاسی و بی‌احترامی و حاوی کلمات ناسزا نباشه.\n\n' +
           'پیام شما بدون صف، مستقیم در کانال منتشر می‌شود.\n' +
           '(حتی بدون شیفت — مگر ربات/کانال غیرفعال باشد)\n\n' +
@@ -1172,7 +1180,7 @@ if (text === '📝 ارسال پیام') {
         chat_id: chatId,
         text:
           'پیامت با یکی از اینا شروع شه :\n' +
-          '{ صدام بزن / این کاربر / تو زندگی بعدی / من فکر میکردم }\n\n' +
+          '{ صدام بزن / این کاربر / تو زندگی بعدی / من فکر میکردم / کاش / دلم میخواد }\n\n' +
           'توی ۱۰ دقیقه ۶ تا پیام بیشتر نمیتونی بدی به بقیه توهین نکن تکست سیاسیم نذار 🐳',
         reply_markup: sanitizeMarkup(backKeyboard()),
       });
@@ -1180,26 +1188,21 @@ if (text === '📝 ارسال پیام') {
     }
 
     if (text === '📢 لیست چنل‌های مجموعه آرال') {
-      const lines = [
-        '📢 چنل‌های مجموعه آرال 🐳\nانتخاب کن و سر بزن بهمون',
-        '',
-        '• صدام بزن',
-        'https://t.me/callMeAraIl',
-        '',
-        '• این کاربر',
-        'https://t.me/inKarbariral',
-        '',
-        '• تو زندگی بعدی',
-        'https://t.me/arialcuple',
-        '',
-        '• من فکر میکردم',
-        'https://t.me/fekrmi',
-      ];
+      const lines = ['📢 چنل‌های مجموعه آرال 🐳', 'انتخاب کن و سر بزن بهمون', ''];
+      for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+        lines.push('• ' + c.title);
+        const un = CHANNEL_USERNAMES[c.key];
+        if (un) lines.push('https://t.me/' + un);
+        else {
+          const id = String(c.chatId || '');
+          if (id.startsWith('-100')) lines.push('https://t.me/c/' + id.slice(4));
+        }
+        lines.push('');
+      }
       await api.sendMessage({
         chat_id: chatId,
-        text: lines.join('\n'),
-        reply_markup: await roleKb(userId),
-        disable_web_page_preview: true,
+        text: lines.join('\n').trim(),
+        reply_markup: kbFor(role),
       });
       return;
     }
