@@ -1204,7 +1204,7 @@ if (text === '📝 ارسال پیام') {
       await api.sendMessage({
         chat_id: chatId,
         text: lines.join('\n').trim(),
-        reply_markup: kbFor(role),
+        reply_markup: await roleKb(userId),
       });
       return;
     }
