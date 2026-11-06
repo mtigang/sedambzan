@@ -148,6 +148,8 @@ import {
   findBodyDuplicate,
   loadWorkHoursFromSettings,
   saveWorkHours,
+  saveShiftDayMode,
+  getShiftDayModeSetting,
   dedupeActiveShifts,
   cancelAllPermanentShifts,
   cancelInvalidShifts,
@@ -4923,6 +4925,31 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
       } catch (e) {
         console.error('set_work_hours', e);
         await api.sendMessage({ chat_id: chatId, text: 'خطا در ذخیره', reply_markup: await roleKb(userId) });
+      }
+      return;
+    }
+
+    if (owner && text === '🕐 حالت شیفت ۱۲/۲۴') {
+      try {
+        const cur = await getShiftDayModeSetting();
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '🕐 حالت شیفت فعلی: ' +
+            (cur === '24' ? '۲۴ ساعته (تمام روز)' : '۱۲ ساعته (۱۲:۰۰ تا ۰۰:۰۰)') +
+            '\n\nیکی را انتخاب کنید:',
+          reply_markup: sanitizeMarkup({
+            inline_keyboard: [
+              [
+                { text: '☀️ ۱۲ ساعته (۱۲–۰۰)', callback_data: 'shiftmode:12', style: cur === '12' ? 'success' : 'primary' },
+                { text: '🌙 ۲۴ ساعته', callback_data: 'shiftmode:24', style: cur === '24' ? 'success' : 'primary' },
+              ],
+            ],
+          }),
+        });
+      } catch (e) {
+        console.error('shift mode btn', e);
+        await api.sendMessage({ chat_id: chatId, text: 'خطا', reply_markup: await roleKb(userId) });
       }
       return;
     }

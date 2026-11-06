@@ -85,7 +85,7 @@ import {
 } from 'lib/dbutil';
 import { drainHoleWave, startHoleJob, getHoleJob, saveHoleJob, drainHolePiggyback } from 'lib/hole_drain';
 import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob, countAnnounceAudience } from 'lib/announce_drain';
-import { maybeDeliverPassiveAnnounce, setPassiveUserAnnounce, clearPassiveUserAnnounce } from 'lib/dbutil';
+import { maybeDeliverPassiveAnnounce, setPassiveUserAnnounce, clearPassiveUserAnnounce, saveShiftDayMode, getShiftDayModeSetting } from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
 import {
   upsertSubLeader,
@@ -260,6 +260,39 @@ export default async function (cq) {
     } catch (_pa) {}
 
     // —— هندلرهای کمکی (بن / حذف / ناوبری) ——
+
+    if (data.startsWith('shiftmode:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const mode = data.split(':')[1] === '24' ? '24' : '12';
+      try {
+        await saveShiftDayMode(mode);
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'ذخیره شد' });
+        const label = mode === '24' ? '۲۴ ساعته — تمام ساعات روز' : '۱۲ ساعته — ۱۲:۰۰ تا ۰۰:۰۰';
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text:
+              '✅ حالت شیفت: ' +
+              label +
+              '\n\nادمین‌ها از این به بعد لیست شیفت را مطابق همین حالت می‌بینند.\nساعت کاری کاربران هم با همین حالت هم‌خوان است.',
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: '✅ حالت شیفت: ' + label,
+          });
+        }
+      } catch (e) {
+        console.error('shiftmode', e);
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'خطا', show_alert: true });
+      }
+      return;
+    }
+
 // —— بن کاربر از جستجو ——
     
     if (data === 'nav:search') {

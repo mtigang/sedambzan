@@ -4,6 +4,8 @@
 let WORK_START_HM = '12:00';
 let WORK_END_HM = '00:00';
 let PERIOD_START_MIN = 12 * 60;
+/** '12' = ۱۲ ظهر تا ۱۲ شب | '24' = تمام شبانه‌روز */
+let SHIFT_DAY_MODE = '12';
 
 function _padHm(hm) {
   const p = String(hm || '0:0').split(':');
@@ -21,7 +23,25 @@ export function setWorkHoursConfig(startHm, endHm) {
 }
 
 export function getWorkHoursConfig() {
-  return { start: WORK_START_HM, end: WORK_END_HM };
+  return { start: WORK_START_HM, end: WORK_END_HM, mode: SHIFT_DAY_MODE };
+}
+
+export function getShiftDayMode() {
+  return SHIFT_DAY_MODE === '24' ? '24' : '12';
+}
+
+/** حالت شیفت: 12 (۱۲–۰۰) یا 24 (تمام روز) */
+export function setShiftDayMode(mode) {
+  SHIFT_DAY_MODE = mode === '24' ? '24' : '12';
+  if (SHIFT_DAY_MODE === '24') {
+    WORK_START_HM = '00:00';
+    WORK_END_HM = '00:00';
+    PERIOD_START_MIN = 0;
+  } else {
+    WORK_START_HM = '12:00';
+    WORK_END_HM = '00:00';
+    PERIOD_START_MIN = 12 * 60;
+  }
 }
 
 export function tehranNow() {
@@ -121,6 +141,7 @@ function addDays(iso, delta) {
 
 export function isWorkHours(now) {
   if (!now) now = tehranNow();
+  if (SHIFT_DAY_MODE === '24') return true;
   return inRange(now.hm, WORK_START_HM, WORK_END_HM);
 }
 
@@ -133,6 +154,25 @@ export function buildAvailableShiftSlots(now) {
   const slots = [];
   const pad = (n) => String(n).padStart(2, '0');
   const nOrd = periodOrd(now.hm);
+  // حالت ۲۴ ساعته: تمام ساعات روز — اسلات‌های کاملاً گذشته حذف می‌شوند
+  if (SHIFT_DAY_MODE === '24') {
+    for (let h = 0; h < 24; h++) {
+      const start = pad(h) + ':00';
+      const end = pad((h + 1) % 24) + ':00';
+      if (h < now.hour) continue; // گذشته
+      slots.push({ start: start, end: end, label: start + '–' + end, hourKey: start });
+    }
+    if (!slots.length) {
+      const h = now.hour;
+      slots.push({
+        start: pad(h) + ':00',
+        end: pad((h + 1) % 24) + ':00',
+        label: pad(h) + ':00–' + pad((h + 1) % 24) + ':00',
+        hourKey: pad(h) + ':00',
+      });
+    }
+    return slots;
+  }
   const startH = Math.floor(hmToMin(WORK_START_HM) / 60);
   let endH = Math.floor(hmToMin(WORK_END_HM) / 60);
   // اگر end = 00:00 یعنی تا نیمه‌شب → آخرین اسلات ۲۳–۰۰

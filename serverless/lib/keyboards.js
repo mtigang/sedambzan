@@ -238,6 +238,7 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
       [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '🔐 عضویت اجباری' }],
       [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
       [{ text: '⏰ ساعت کاری' }, { text: '🧪 تست کانال‌ها' }],
+      [{ text: '🕐 حالت شیفت ۱۲/۲۴' }],
       [{ text: '📈 تحلیل داده' }],
   ];
   // فقط برای این کاربر

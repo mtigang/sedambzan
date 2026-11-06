@@ -708,7 +708,22 @@ export async function pruneOldestMessageIfOverBudget() {
 
 export async function loadWorkHoursFromSettings() {
   try {
-    const { setWorkHoursConfig } = await import('lib/time');
+    const { setWorkHoursConfig, setShiftDayMode } = await import('lib/time');
+    const mode = (await settingGet('shift_day_mode', '12')) || '12';
+    setShiftDayMode(mode);
+    if (String(mode) === '24') {
+      const s = '00:00';
+      const e = '00:00';
+      try {
+        for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+          if (DEFAULT_CHANNELS[k]) {
+            DEFAULT_CHANNELS[k].workStart = s;
+            DEFAULT_CHANNELS[k].workEnd = e;
+          }
+        }
+      } catch (_e) {}
+      return { start: s, end: e, mode: '24' };
+    }
     const s = (await settingGet('work_start_hm', '12:00')) || '12:00';
     const e = (await settingGet('work_end_hm', '00:00')) || '00:00';
     setWorkHoursConfig(s, e);
@@ -720,10 +735,10 @@ export async function loadWorkHoursFromSettings() {
         }
       }
     } catch (_e) {}
-    return { start: s, end: e };
+    return { start: s, end: e, mode: '12' };
   } catch (e) {
     console.error('loadWorkHoursFromSettings', e);
-    return { start: '12:00', end: '00:00' };
+    return { start: '12:00', end: '00:00', mode: '12' };
   }
 }
 
@@ -759,6 +774,49 @@ export async function saveWorkHours(startHm, endHm) {
     }
   } catch (e) {
     console.error('saveWorkHours channel sync', e);
+  }
+}
+
+/** حالت شیفت روزانه: '12' یا '24' */
+export async function saveShiftDayMode(mode) {
+  const m = mode === '24' ? '24' : '12';
+  await settingSet('shift_day_mode', m);
+  try {
+    const { setShiftDayMode } = await import('lib/time');
+    setShiftDayMode(m);
+  } catch (_e) {}
+  if (m === '24') {
+    await settingSet('work_start_hm', '00:00');
+    await settingSet('work_end_hm', '00:00');
+    try {
+      for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+        if (DEFAULT_CHANNELS[k]) {
+          DEFAULT_CHANNELS[k].workStart = '00:00';
+          DEFAULT_CHANNELS[k].workEnd = '00:00';
+        }
+      }
+    } catch (_e) {}
+  } else {
+    await settingSet('work_start_hm', '12:00');
+    await settingSet('work_end_hm', '00:00');
+    try {
+      for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+        if (DEFAULT_CHANNELS[k]) {
+          DEFAULT_CHANNELS[k].workStart = '12:00';
+          DEFAULT_CHANNELS[k].workEnd = '00:00';
+        }
+      }
+    } catch (_e) {}
+  }
+  return m;
+}
+
+export async function getShiftDayModeSetting() {
+  try {
+    const m = (await settingGet('shift_day_mode', '12')) || '12';
+    return m === '24' ? '24' : '12';
+  } catch (_e) {
+    return '12';
   }
 }
 
