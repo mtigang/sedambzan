@@ -269,10 +269,7 @@ export async function drainHoleWave(opts) {
         // اطلاع کاربر — شکست آن پیام را ناموفق نمی‌کند
         try {
           const link = channelMessageLink(conf.chatId, mid, channelKey);
-          let txt = '✅ پیام شما تأیید و منتشر شد.';
-          if (link) {
-            txt += '\n\nمشاهده در کانال «' + (conf.title || channelKey) + '»:\n' + link;
-          }
+          let txt = 'عزیزدلم ! پیامتو توی چنل قرار دادیم لینک پیامت : ' + (link || '');
           await api.sendMessage({
             chat_id: row.userId,
             text: txt,
