@@ -2044,46 +2044,67 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
       try {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: '⏳ دریافت Batch…' });
       } catch (_e) {}
-      // اگر Batch فعلی هنوز پیام pending دارد → اجازه نده زودتر برود
+      // هرس اجباری: فقط pending واقعی بماند؛ اگر چیزی نماند Batch پاک شود
       try {
-        const curBatch = await getReviewBatch(userId);
-        if (curBatch && curBatch.ids && curBatch.ids.length) {
-          const checks = await Promise.all(
-            curBatch.ids.map(function (mid) {
-              return db
+        const pruned = await pruneReviewBatchToPending(userId);
+        if (!pruned.cleared && pruned.ids && pruned.ids.length) {
+          // دوباره از DB بخوان — اگر همه بررسی شده‌اند، پاک کن و برو بعدی
+          const still = [];
+          for (const mid of pruned.ids) {
+            try {
+              const rows = await db
                 .select({ id: messages.id, status: messages.status })
                 .from(messages)
                 .where(eq(messages.id, Number(mid)))
-                .all()
-                .catch(function () {
-                  return [];
-                });
-            })
-          );
-          let stillPending = false;
-          for (const rows of checks) {
-            if (rows && rows[0] && String(rows[0].status) === 'pending') {
-              stillPending = true;
-              break;
+                .all();
+              if (rows && rows[0] && String(rows[0].status || '') === 'pending') {
+                still.push(Number(mid));
+              }
+            } catch (_e) {}
+          }
+          if (!still.length) {
+            await clearReviewBatch(userId);
+          } else {
+            // هنوز pending واقعی هست → همان‌ها را بفرست (نه پیام خطای گیج‌کننده)
+            try {
+              const b = (await getReviewBatch(userId)) || {
+                ids: still,
+                batchNumber: 1,
+                createdAt: Date.now(),
+              };
+              b.ids = still;
+              // ذخیره از طریق prune/create؛ اینجا فقط نمایش
+              const msgs = [];
+              for (const mid of still) {
+                try {
+                  const rows = await db.select().from(messages).where(eq(messages.id, Number(mid))).all();
+                  if (rows && rows[0] && String(rows[0].status || '') === 'pending') msgs.push(rows[0]);
+                } catch (_e2) {}
+              }
+              if (msgs.length) {
+                await clearReviewUiMessages(userId, cq.message.chat.id).catch(function () {});
+                await sendReviewBatch(cq.message.chat.id, b, msgs, { resumed: true });
+                return;
+              }
+              await clearReviewBatch(userId);
+            } catch (_e3) {
+              await clearReviewBatch(userId);
             }
           }
-          if (stillPending) {
-            await api.sendMessage({
-              chat_id: cq.message.chat.id,
-              text: '⛔ ابتدا همه پیام‌های این Batch را تأیید یا رد کنید.',
-            });
-            return;
-          }
         }
-      } catch (_e) {}
-      // want = شماره Batch قبلی؛ بعد از اتمام، Batch پاک شده و null است → اشکالی ندارد
+      } catch (_e) {
+        try {
+          await clearReviewBatch(userId);
+        } catch (_e2) {}
+      }
+      // want فقط هشدار دکمه خیلی قدیمی — مانع ساخت Batch جدید نشود
       if (want != null) {
-        const cur = await getReviewBatch(userId);
-        if (cur && Number(cur.batchNumber) !== want) {
-          // Batch جدیدتری ساخته شده — دکمه قدیمی
-          await api.sendMessage({ chat_id: cq.message.chat.id, text: 'این دکمه قدیمی است. دوباره «📥 پیام‌های در انتظار» را بزنید.' });
-          return;
-        }
+        try {
+          const cur = await getReviewBatch(userId);
+          if (cur && Number(cur.batchNumber) && Number(cur.batchNumber) !== want) {
+            // نادیده بگیر و Batch تازه بساز
+          }
+        } catch (_e) {}
       }
                   try {
         await clearReviewUiMessages(userId, cq.message.chat.id);

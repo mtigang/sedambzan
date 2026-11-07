@@ -3214,13 +3214,16 @@ export async function pruneReviewBatchToPending(adminId) {
   if (!old || !old.ids || !old.ids.length) return { cleared: true, ids: [] };
   const rows = await Promise.all(
     old.ids.map(function (id) {
-      return getMessageById(Number(id));
+      return getMessageById(Number(id)).catch(function () {
+        return null;
+      });
     })
   );
   const alive = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (row && String(row.status) === 'pending') alive.push(Number(old.ids[i]));
+    // فقط pending واقعی؛ approved/rejected/publishing از Batch خارج
+    if (row && String(row.status || '') === 'pending') alive.push(Number(old.ids[i]));
   }
   if (!alive.length) {
     await clearReviewBatch(adminId);
@@ -3296,9 +3299,17 @@ export async function getReviewBatchMessages(adminId) {
 export async function isReviewBatchComplete(adminId) {
   const batch = await getReviewBatch(adminId);
   if (!batch || !batch.ids || !batch.ids.length) return true;
-  const rows = await Promise.all(batch.ids.map(function (id) { return getMessageById(Number(id)); }));
+  const rows = await Promise.all(
+    batch.ids.map(function (id) {
+      return getMessageById(Number(id)).catch(function () {
+        return null;
+      });
+    })
+  );
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i] && String(rows[i].status) === 'pending') return false;
+    const st = rows[i] ? String(rows[i].status || '') : '';
+    // فقط pending واقعی Batch را باز نگه می‌دارد
+    if (st === 'pending') return false;
   }
   return true;
 }
@@ -3742,7 +3753,7 @@ export async function createReviewBatch(adminId) {
         })
       );
       for (const row of got) {
-        if (row && String(row.status) === 'pending') pendingRows.push(row);
+        if (row && String(row.status || '') === 'pending') pendingRows.push(row);
       }
       if (!owner) {
         const allowed = await allowedReviewChannels(adminId);
@@ -3759,7 +3770,12 @@ export async function createReviewBatch(adminId) {
         });
       }
       if (pendingRows.length) {
-        const batch = pruned.batch || (await getReviewBatch(adminId));
+        const batch = pruned.batch || (await getReviewBatch(adminId)) || {
+          ids: [],
+          batchNumber: 1,
+          createdAt: Date.now(),
+          periodDate: periodDateStr(),
+        };
         batch.ids = pendingRows.map((r) => Number(r.id));
         await saveReviewBatch(adminId, batch);
         return { status: 'incomplete', batch, messages: pendingRows };
@@ -3767,9 +3783,20 @@ export async function createReviewBatch(adminId) {
       await clearReviewBatch(adminId);
     }
 
-    const candidates = (await selectReviewablePending(adminId)).filter(
-      (m) => m && String(m.status) === 'pending'
-    );
+    let candidates = (await selectReviewablePending(adminId)).filter(function (m) {
+      return m && String(m.status || '') === 'pending';
+    });
+    // یک‌بار دیگر از DB تأیید کن تا پیام بررسی‌شده برنگردد
+    {
+      const verified = [];
+      for (const m of candidates) {
+        try {
+          const fresh = await getMessageById(Number(m.id));
+          if (fresh && String(fresh.status || '') === 'pending') verified.push(fresh);
+        } catch (_e) {}
+      }
+      candidates = verified;
+    }
     const clean = candidates.slice(0, REVIEW_BATCH_SIZE);
     if (!clean.length) return { status: 'empty' };
 
@@ -3794,7 +3821,7 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
   const live = [];
   for (const row of rows || []) {
     if (!row) continue;
-    if (row.content != null && String(row.status || 'pending') === 'pending') {
+    if (row.content != null && String(row.status || '') === 'pending') {
       live.push(row);
       continue;
     }
