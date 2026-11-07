@@ -4105,6 +4105,12 @@ let note =
         annText: text,
         annEntities: annEntities,
       });
+      try {
+        await settingSet(
+          'announce_draft:' + userId,
+          JSON.stringify({ text: text, entities: annEntities || null, ts: Date.now() })
+        );
+      } catch (_e) {}
       await api.sendMessage({
         chat_id: chatId,
         text: 'ارسال به چه کسانی؟',

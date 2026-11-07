@@ -2576,6 +2576,8 @@ export async function restoreMistakenlyCancelledShifts() {
  * ============================================================ */
 
 export const REVIEW_BATCH_SIZE = 18;
+/** همیشه ۱۸ — تغییر نده بدون هماهنگی */
+export const REVIEW_BATCH_HARD = 18;
 const REVIEW_LOCK_TTL_MS = 10 * 1000;
 
 function reviewBatchKey(adminId) {
@@ -3319,7 +3321,7 @@ export async function isReviewBatchComplete(adminId) {
  * مسیر پایدار: چند برش DESC روی PK (سریع) → فیلتر pending → sort ASC → FIFO در همان پنجره.
  */
 async function selectReviewablePending(adminId) {
-  const need = Math.max(18, Number(REVIEW_BATCH_SIZE) || 18);
+  const need = 18; // hard size for all roles
   // پنجرهٔ کافی برای صف چند هزارتایی؛ فقط ستون‌های سبک
   const WINDOW = 12000;
   const CHUNK = 3000;
@@ -3364,7 +3366,7 @@ async function selectReviewablePending(adminId) {
 
   // مسیر سریع: WHERE status=pending روی کانال (اگر پشتیبانی شد و نتیجه داد)
   try {
-    const want = Math.max(18, Number(REVIEW_BATCH_SIZE) || 18);
+    const want = 18;
     let q = db
       .select()
       .from(messages)
@@ -3797,7 +3799,7 @@ export async function createReviewBatch(adminId) {
       }
       candidates = verified;
     }
-    const clean = candidates.slice(0, REVIEW_BATCH_SIZE);
+    const clean = candidates.slice(0, 18);
     if (!clean.length) return { status: 'empty' };
 
     const old = await getReviewBatch(adminId);
@@ -3817,18 +3819,38 @@ export async function createReviewBatch(adminId) {
 /** ارسال پیام‌های Batch به ادمین (حداکثر ۱۰ + یک پیام سرتیتر) */
 export async function sendReviewBatch(chatId, batch, rows, opts) {
   const resumed = !!(opts && opts.resumed);
-  // اگر ردیف‌ها content دارند همان را بگیر؛ فقط مشکوک‌ها را دوباره بخوان
+  // همیشه تا ۱۸ پیام pending از روی ids بچ یا rows — با خواندن تازه از DB
   const live = [];
-  for (const row of rows || []) {
-    if (!row) continue;
-    if (row.content != null && String(row.status || '') === 'pending') {
-      live.push(row);
-      continue;
-    }
+  const seen = Object.create(null);
+  const idOrder = (batch && Array.isArray(batch.ids) && batch.ids.length)
+    ? batch.ids.map(Number)
+    : (rows || []).map(function (r) { return Number(r && r.id); }).filter(Boolean);
+  for (const id of idOrder) {
+    if (!id || seen[id]) continue;
+    if (live.length >= 18) break;
     try {
-      const fresh = await getMessageById(Number(row.id));
-      if (fresh && String(fresh.status) === 'pending') live.push(fresh);
+      const fresh = await getMessageById(Number(id));
+      if (fresh && String(fresh.status || '') === 'pending') {
+        seen[id] = 1;
+        live.push(fresh);
+      }
     } catch (_e) {}
+  }
+  // اگر هنوز کمتر از ۱۸ و rows اضافه دارد
+  if (live.length < 18) {
+    for (const row of rows || []) {
+      if (!row) continue;
+      const id = Number(row.id);
+      if (!id || seen[id]) continue;
+      if (live.length >= 18) break;
+      try {
+        const fresh = await getMessageById(id);
+        if (fresh && String(fresh.status || '') === 'pending') {
+          seen[id] = 1;
+          live.push(fresh);
+        }
+      } catch (_e) {}
+    }
   }
   if (!live.length) {
     await api.sendMessage({

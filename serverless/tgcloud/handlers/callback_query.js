@@ -1,7 +1,7 @@
 import { normalizeBody, exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { api, db, InputFile } from 'sdk';
 import { eq, and, desc } from 'sdk/db';
-import { messages, feedback, shifts, settings, users, channelAdmins } from 'schema';
+import { messages, feedback, shifts, settings, users, channelAdmins, subLeaders } from 'schema';
 import {
   isOwner,
   setChannelEnabled,
@@ -5022,8 +5022,21 @@ if (data.startsWith('ann_target:')) {
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       const target = data.split(':')[1];
       const st = await getState(userId);
-      const annText = st && st.annText;
-      const annEntities = st && st.annEntities ? st.annEntities : null;
+      let annText = st && st.annText;
+      let annEntities = st && st.annEntities ? st.annEntities : null;
+      // بکاپ متن از settings اگر state خالی شد
+      if (!annText) {
+        try {
+          const raw = await settingGet('announce_draft:' + userId, '');
+          if (raw) {
+            const d = JSON.parse(raw);
+            if (d && d.text) {
+              annText = d.text;
+              annEntities = d.entities || null;
+            }
+          }
+        } catch (_e) {}
+      }
       await clearState(userId);
       if (!annText) {
         await api.sendMessage({
@@ -5053,13 +5066,44 @@ if (data.startsWith('ann_target:')) {
       var adminFbMode = target === 'admin_fb';
       try {
         if (target === 'admins' || target === 'admin_fb') {
-          const ads = (await db.select().from(channelAdmins).all()) || [];
-          for (const a of ads) {
-            const id = Number(a.userId || a.user_id);
-            if (id && !seen[id]) {
-              seen[id] = true;
-              ids.push(id);
+          try {
+            const ads = (await db.select().from(channelAdmins).all()) || [];
+            for (const a of ads) {
+              const id = Number(a.userId || a.user_id);
+              if (id && !seen[id]) {
+                seen[id] = true;
+                ids.push(id);
+              }
             }
+          } catch (eCa) {
+            console.error('ann channelAdmins', eCa);
+          }
+          // نقش admin در users
+          try {
+            const urows = (await db.select().from(users).limit(8000).all()) || [];
+            for (const u of urows) {
+              const id = Number(u.userId || u.user_id);
+              const role = String(u.role || '');
+              if (id && (role === 'admin' || role === 'subleader') && !seen[id]) {
+                seen[id] = true;
+                ids.push(id);
+              }
+            }
+          } catch (eU) {
+            console.error('ann users roles', eU);
+          }
+          // جدول ساب‌لیدر
+          try {
+            const sls = (await db.select().from(subLeaders).all()) || [];
+            for (const s of sls) {
+              const id = Number(s.userId || s.user_id);
+              if (id && !seen[id]) {
+                seen[id] = true;
+                ids.push(id);
+              }
+            }
+          } catch (eSl) {
+            console.error('ann subLeaders', eSl);
           }
           totalAudience = ids.length;
         } else {
@@ -5143,12 +5187,57 @@ if (data.startsWith('ann_target:')) {
           } catch (_pin) {}
         }
       } catch (_e) {}
+      // ادمین‌ها: ارسال مستقیم (لیست کوچک) — صف job برای کاربران عادی است
+      if (target === 'admins') {
+        let ok = 0;
+        let fail = 0;
+        const prog = await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '📣 در حال ارسال به ادمین‌ها…\n0 / ' + ids.length,
+        });
+        const pMid = prog && (prog.message_id || prog.messageId);
+        for (let i = 0; i < ids.length; i++) {
+          const id = ids[i];
+          try {
+            const payload = { chat_id: id, text: String(annText) };
+            if (annEntities) payload.entities = annEntities;
+            await api.sendMessage(payload);
+            ok++;
+          } catch (_e) {
+            fail++;
+          }
+          if (pMid && (i % 5 === 4 || i === ids.length - 1)) {
+            try {
+              await api.editMessageText({
+                chat_id: cq.message.chat.id,
+                message_id: pMid,
+                text:
+                  '📣 ارسال به ادمین‌ها\n' +
+                  (i + 1) +
+                  ' / ' +
+                  ids.length +
+                  '\n✅ ' +
+                  ok +
+                  '  ❌ ' +
+                  fail,
+              });
+            } catch (_e2) {}
+          }
+        }
+        try {
+          await settingSet('announce_draft:' + userId, '');
+        } catch (_e3) {}
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '✅ اطلاعیه ادمین‌ها تمام شد.\n✅ موفق: ' + ok + '   ❌ ناموفق: ' + fail,
+        });
+        return;
+      }
       const job = {
         status: 'running',
         text: annText,
         entities: Array.isArray(annEntities) && annEntities.length ? annEntities : null,
-        // فقط برای ادمین‌ها ids نگه می‌داریم
-        ids: target === 'admins' ? ids : undefined,
+        ids: undefined,
         lastId: 0,
         cursor: 0,
         ok: 0,
