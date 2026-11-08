@@ -4640,93 +4640,22 @@ export async function postToChannel(channelKey, text) {
   });
 }
 
-/** اطلاعیه غیرفعال‌سازی‌شده: با هر کلیک کاربر یک‌بار ارسال + سنجاق */
-const PASSIVE_ANN_KEY = 'passive_user_announce';
+/** اطلاعیه کاربران — پیاده‌سازی در lib/announcements.js */
+export {
+  setPassiveUserAnnounce,
+  clearPassiveUserAnnounce,
+  getPassiveUserAnnounce,
+  maybeDeliverPassiveAnnounce,
+  activateUserAnnouncement,
+  cancelAnnouncement,
+  countEligibleAnnounceUsers,
+  listAnnouncementsByStatus,
+  getAnnouncement,
+  countReceipts,
+  formatAnnouncementStats,
+  announceManageKeyboard,
+  announceActivateConfirmInline,
+  announceDetailInline,
+  announceCancelConfirmInline,
+} from 'lib/announcements';
 
-export async function setPassiveUserAnnounce(text, entities) {
-  const id = 'pa_' + Date.now();
-  const payload = {
-    id,
-    text: String(text || '').slice(0, 4000),
-    entities: entities || null,
-    at: Date.now(),
-  };
-  await settingSet(PASSIVE_ANN_KEY, JSON.stringify(payload));
-  return id;
-}
-
-export async function clearPassiveUserAnnounce() {
-  await settingSet(PASSIVE_ANN_KEY, '');
-}
-
-export async function getPassiveUserAnnounce() {
-  try {
-    const raw = await settingGet(PASSIVE_ANN_KEY, '');
-    if (!raw) return null;
-    const o = JSON.parse(String(raw));
-    if (!o || !o.id || !o.text) return null;
-    return o;
-  } catch (_e) {
-    return null;
-  }
-}
-
-/**
- * اگر اطلاعیهٔ فعال وجود دارد و این کاربر هنوز نگرفته، ارسال + سنجاق.
- * باید سریع باشد؛ خطاها بلعیده می‌شوند.
- */
-export async function maybeDeliverPassiveAnnounce(userId, chatId) {
-  const uid = Number(userId);
-  const cid = Number(chatId);
-  if (!uid || !cid) return false;
-  try {
-    const job = await getPassiveUserAnnounce();
-    if (!job) return false;
-    const seenKey = 'pau:' + uid;
-    const seen = await settingGet(seenKey, '');
-    if (String(seen) === String(job.id)) return false;
-    // علامت زود — جلوگیری از دوبار ارسال در کلیک‌های موازی
-    await settingSet(seenKey, String(job.id));
-    const opts = {
-      chat_id: cid,
-      text: String(job.text).slice(0, 4000),
-      disable_web_page_preview: false,
-    };
-    if (job.entities && Array.isArray(job.entities) && job.entities.length) {
-      try {
-        opts.entities = job.entities;
-      } catch (_e) {}
-    }
-    let sent;
-    try {
-      sent = await api.sendMessage(opts);
-    } catch (e1) {
-      // بدون entities دوباره
-      try {
-        sent = await api.sendMessage({
-          chat_id: cid,
-          text: String(job.text).slice(0, 4000),
-        });
-      } catch (e2) {
-        console.error('passiveAnnounce send', e2);
-        return false;
-      }
-    }
-    const mid = sent && (sent.message_id || sent.messageId);
-    if (mid) {
-      try {
-        await api.pinChatMessage({
-          chat_id: cid,
-          message_id: Number(mid),
-          disable_notification: true,
-        });
-      } catch (_pin) {
-        // کاربر ممکن است اجازه سنجاق به ربات ندهد
-      }
-    }
-    return true;
-  } catch (e) {
-    console.error('maybeDeliverPassiveAnnounce', e);
-    return false;
-  }
-}

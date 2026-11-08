@@ -116,6 +116,17 @@ import {
 import {
   ensureChannelsSeeded,
   maybeDeliverPassiveAnnounce,
+  activateUserAnnouncement,
+  cancelAnnouncement,
+  countEligibleAnnounceUsers,
+  listAnnouncementsByStatus,
+  getAnnouncement,
+  countReceipts,
+  formatAnnouncementStats,
+  announceManageKeyboard,
+  announceActivateConfirmInline,
+  announceDetailInline,
+  announceCancelConfirmInline,
   getChannels,
   getChannel,
   isBotOn,
@@ -4646,82 +4657,37 @@ let note =
 
     if (owner && text === '📣 اطلاعیه') {
       try {
-        // لیست اطلاعیه‌های فعال
-        let activeLines = [];
+        await clearState(userId);
+        let active = [];
         try {
-          const passive = await getPassiveUserAnnounce();
-          if (passive && passive.text) {
-            activeLines.push(
-              '🟢 کاربران عادی (فعال — تحویل با هر دکمه)\n' +
-                'شناسه: ' +
-                (passive.id || '—') +
-                '\n' +
-                String(passive.text).slice(0, 200) +
-                (String(passive.text).length > 200 ? '…' : '')
-            );
-          }
+          active = await listAnnouncementsByStatus('active', 10);
         } catch (_e) {}
-        try {
-          const job = await loadAnnounceJob();
-          if (job && (job.status === 'running' || job.status === 'stopped')) {
-            activeLines.push(
-              (job.status === 'running' ? '🟡 ارسال انبوه در جریان' : '⏹ ارسال انبوه متوقف') +
-                '\nمخاطب: ' +
-                (job.target || '—') +
-                ' | ' +
-                (Number(job.cursor) || 0) +
-                '/' +
-                (Number(job.total) || 0) +
-                '\n✅ ' +
-                (Number(job.ok) || 0) +
-                '  ❌ ' +
-                (Number(job.fail) || 0) +
-                '\n' +
-                String(job.text || '').slice(0, 160) +
-                (String(job.text || '').length > 160 ? '…' : '')
-            );
+        let head = '📣 مدیریت اطلاعیه‌ها\n━━━━━━━━━━━━\n';
+        if (active.length) {
+          head += 'فعال‌ها (' + active.length + '):\n';
+          for (const a of active.slice(0, 5)) {
+            head +=
+              '• #' +
+              a.id +
+              ' — دریافت ' +
+              ((a.deliveredCount ?? a.delivered_count) || 0) +
+              '/' +
+              ((a.eligibleCount ?? a.eligible_count) || 0) +
+              '\n';
           }
-        } catch (_e2) {}
-        try {
-          const camp = await getForceJoinCampaign();
-          if (camp && camp.active) {
-            activeLines.push(
-              '🔐 عضویت اجباری فعال\n' +
-                'کانال: ' +
-                (camp.title || (camp.channels && camp.channels[0] && camp.channels[0].title) || camp.channel || '—') +
-                ' | هدف: ' +
-                (camp.goal || camp.target || camp.targetCount || '—') +
-                ' | تأییدشده: ' +
-                (camp.confirmedCount || camp.confirmed || camp.count || 0)
-            );
-          }
-        } catch (_e3) {}
-        try {
-          const draft = await settingGet('announce_draft:' + userId, '');
-          if (draft) {
-            const d = JSON.parse(draft);
-            if (d && d.text) {
-              activeLines.push(
-                '📝 پیش‌نویس ذخیره‌شده\n' + String(d.text).slice(0, 160) + (String(d.text).length > 160 ? '…' : '')
-              );
-            }
-          }
-        } catch (_e4) {}
-
-        let head =
-          '📣 اطلاعیه‌ها\n━━━━━━━━━━━━\n';
-        if (activeLines.length) {
-          head += 'فعال‌ها:\n\n' + activeLines.join('\n\n—\n\n') + '\n\n━━━━━━━━━━━━\n';
+          head += '\n';
         } else {
-          head += 'در حال حاضر اطلاعیهٔ فعالی ثبت نشده.\n\n━━━━━━━━━━━━\n';
+          head += 'در حال حاضر اطلاعیهٔ فعالی نیست.\n\n';
         }
-        head += 'برای ثبت اطلاعیهٔ جدید، متن را همین‌جا بفرستید:\n(بعداً مخاطب را انتخاب می‌کنید)';
-
+        head +=
+          'اطلاعیهٔ کاربران عادی با هر /start یا دکمهٔ ربات یک‌بار تحویل داده می‌شود (بدون ارسال انبوه).\n' +
+          'ادمین‌ها از مسیر جدا با ارسال مستقیم هستند.\n\n' +
+          'از دکمه‌ها انتخاب کنید، یا برای ایجاد سریع همان متن را بفرستید:';
         await setState(userId, 'announce_wait_text');
         await api.sendMessage({
           chat_id: chatId,
           text: head,
-          reply_markup: sanitizeMarkup(backKeyboard()),
+          reply_markup: announceManageKeyboard(),
         });
       } catch (e) {
         console.error('announce start', e);

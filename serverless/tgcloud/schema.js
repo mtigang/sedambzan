@@ -123,3 +123,28 @@ export const anonymousBlocks = table('anonymous_blocks', {
   status: text('status').notNull().default('active'),
   createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(unixepoch())`),
 });
+
+
+/** اطلاعیه‌های ذخیره‌محور کاربران عادی */
+export const botAnnouncements = table('bot_announcements', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  text: text('text').notNull(),
+  entitiesJson: text('entities_json'),
+  status: text('status').notNull().default('draft'),
+  eligibleCount: integer('eligible_count').notNull().default(0),
+  deliveredCount: integer('delivered_count').notNull().default(0),
+  failCount: integer('fail_count').notNull().default(0),
+  createdBy: integer('created_by'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(unixepoch())`),
+  activatedAt: integer('activated_at', { mode: 'timestamp' }),
+  cancelledAt: integer('cancelled_at', { mode: 'timestamp' }),
+});
+
+/** دریافت اطلاعیه توسط کاربر — یک ردیف به ازای هر جفت */
+export const botAnnouncementReceipts = table('bot_announcement_receipts', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  announcementId: integer('announcement_id').notNull(),
+  userId: integer('user_id').notNull(),
+  status: text('status').notNull().default('delivered'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(unixepoch())`),
+});

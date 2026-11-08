@@ -85,7 +85,24 @@ import {
 } from 'lib/dbutil';
 import { drainHoleWave, startHoleJob, getHoleJob, saveHoleJob, drainHolePiggyback } from 'lib/hole_drain';
 import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveAnnounceJob, countAnnounceAudience } from 'lib/announce_drain';
-import { maybeDeliverPassiveAnnounce, setPassiveUserAnnounce, clearPassiveUserAnnounce, saveShiftDayMode, getShiftDayModeSetting } from 'lib/dbutil';
+import {
+  maybeDeliverPassiveAnnounce,
+  setPassiveUserAnnounce,
+  clearPassiveUserAnnounce,
+  saveShiftDayMode,
+  getShiftDayModeSetting,
+  activateUserAnnouncement,
+  cancelAnnouncement,
+  countEligibleAnnounceUsers,
+  listAnnouncementsByStatus,
+  getAnnouncement,
+  countReceipts,
+  formatAnnouncementStats,
+  announceManageKeyboard,
+  announceActivateConfirmInline,
+  announceDetailInline,
+  announceCancelConfirmInline,
+} from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
 import {
   anonMainKeyboard,
@@ -5239,7 +5256,186 @@ if (data.startsWith('sl_setch:')) {
       return;
     }
 
-if (data.startsWith('ann_target:')) {
+
+    // —— مدیریت اطلاعیه کاربران (ذخیره‌محور) ——
+    if (data === 'ann_m:new') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await setState(userId, 'announce_wait_text');
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'متن اطلاعیه را بفرستید:\\n(بعداً مخاطب و تأیید فعال‌سازی)',
+        reply_markup: sanitizeMarkup({ keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true }),
+      });
+      return;
+    }
+
+    if (data === 'ann_m:close') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: 'بسته شد.',
+        });
+      } catch (_e) {}
+      return;
+    }
+
+    if (data === 'ann_m:active' || data === 'ann_m:hist') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const st = data === 'ann_m:active' ? 'active' : 'cancelled';
+      const rows = await listAnnouncementsByStatus(st, 15);
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      if (!rows.length) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: st === 'active' ? 'اطلاعیهٔ فعالی نیست.' : 'تاریخچه‌ای نیست.',
+          reply_markup: announceManageKeyboard(),
+        });
+        return;
+      }
+      for (const a of rows.slice(0, 8)) {
+        let del = Number(a.deliveredCount ?? a.delivered_count) || 0;
+        try {
+          del = await countReceipts(a.id, 'delivered');
+        } catch (_e) {}
+        const body = formatAnnouncementStats(a, del);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: body,
+          reply_markup: announceDetailInline(a.id, st === 'active'),
+        });
+      }
+      return;
+    }
+
+    if (data === 'ann_m:go') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const st = await getState(userId);
+      let annText = st && st.kind === 'announce_confirm_activate' ? st.annText : null;
+      let annEntities = st && st.annEntities ? st.annEntities : null;
+      if (!annText && st && st.kind === 'announce_pick_target') {
+        annText = st.annText;
+        annEntities = st.annEntities;
+      }
+      if (!annText) {
+        try {
+          const raw = await settingGet('announce_draft:' + userId, '');
+          if (raw) {
+            const d = JSON.parse(raw);
+            annText = d.text;
+            annEntities = d.entities;
+          }
+        } catch (_e) {}
+      }
+      if (!annText) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'متن پیدا نشد', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فعال می‌شود…' });
+      const res = await activateUserAnnouncement(annText, annEntities, userId);
+      await clearState(userId);
+      if (!res.ok) {
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: res.text || 'خطا' });
+        return;
+      }
+      const ann = res.announcement || {};
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '✅ اطلاعیه فعال شد.\\nشناسه: #' +
+          (ann.id || '—') +
+          '\\nمشمول: ' +
+          (res.eligible != null ? res.eligible : '—') +
+          ' نفر\\n\\nکاربران با /start یا دکمه‌های ربات یک‌بار دریافت می‌کنند.',
+        reply_markup: announceManageKeyboard(),
+      });
+      return;
+    }
+
+    if (data === 'ann_m:abort') {
+      await clearState(userId);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'انصراف' });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'فعال‌سازی لغو شد. اطلاعیه ذخیره/فعال نشد.',
+        reply_markup: announceManageKeyboard(),
+      });
+      return;
+    }
+
+    if (data.startsWith('ann_m:st:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const id = Number(data.split(':')[2]);
+      const a = await getAnnouncement(id);
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      if (!a) {
+        await api.sendMessage({ chat_id: cq.message.chat.id, text: 'پیدا نشد' });
+        return;
+      }
+      let del = 0;
+      try {
+        del = await countReceipts(id, 'delivered');
+      } catch (_e) {}
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: formatAnnouncementStats(a, del),
+        reply_markup: announceDetailInline(id, String(a.status) === 'active'),
+      });
+      return;
+    }
+
+    if (data.startsWith('ann_m:cx:') && !data.startsWith('ann_m:cxok:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const id = Number(data.split(':')[2]);
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          'آیا از لغو اطلاعیه #' +
+          id +
+          ' اطمینان دارید؟\\nپس از لغو، دیگر به کاربران نمایش داده نخواهد شد.\\nسوابق دریافت قبلی حفظ می‌شود.',
+        reply_markup: announceCancelConfirmInline(id),
+      });
+      return;
+    }
+
+    if (data.startsWith('ann_m:cxok:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const id = Number(data.split(':')[2]);
+      const r = await cancelAnnouncement(id);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: r.ok ? 'لغو شد' : 'خطا', show_alert: true });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: r.ok
+          ? '🔴 اطلاعیه #' + id + ' لغو شد و دیگر نمایش داده نمی‌شود.'
+          : (r.text || 'خطا در لغو'),
+        reply_markup: announceManageKeyboard(),
+      });
+      return;
+    }
+
+
+    if (data.startsWith('ann_target:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
         return;
@@ -5271,17 +5467,30 @@ if (data.startsWith('ann_target:')) {
         return;
       }
       // همه کاربران عادی: بدون ارسال انبوه — هر کاربر با اولین دکمه بعداً دریافت می‌کند
-      if (target === 'all') {
-        const id = await setPassiveUserAnnounce(annText, annEntities);
+            if (target === 'all') {
+        await setState(userId, 'announce_confirm_activate', {
+          annText: annText,
+          annEntities: annEntities || null,
+        });
+        let eligible = 0;
+        try {
+          eligible = await countEligibleAnnounceUsers();
+        } catch (_e) {}
+        const preview = String(annText).slice(0, 400);
         await api.sendMessage({
           chat_id: cq.message.chat.id,
           text:
-            '✅ اطلاعیه برای کاربران عادی ثبت شد.\n\n' +
-            'دیگر ارسال انبوه انجام نمی‌شود.\n' +
-            'هر کاربر با زدن هر دکمهٔ ربات، یک‌بار متن را می‌گیرد و ربات آن را در چتش سنجاق می‌کند.\n\n' +
-            'شناسه: ' +
-            id +
-            '\n\nبرای لغو ثبت، دوباره «📣 اطلاعیه» بزنید و لغو کنید یا از ابزار «پاک کردن اطلاعیه فعال» استفاده کنید.',
+            'اطلاعیه آمادهٔ فعال‌سازی است.\n\n' +
+            'تعداد کاربران مشمول: ' +
+            eligible +
+            ' نفر\n\n' +
+            'با فعال‌سازی، کاربران هنگام /start یا دکمه‌های ربات (یک‌بار برای هر اطلاعیه) آن را می‌گیرند.\n' +
+            'ارسال انبوه انجام نمی‌شود.\n\n' +
+            'پیش‌نمایش:\n' +
+            preview +
+            (String(annText).length > 400 ? '…' : '') +
+            '\n\nآیا از فعال‌سازی اطمینان دارید؟',
+          reply_markup: announceActivateConfirmInline(),
         });
         return;
       }
