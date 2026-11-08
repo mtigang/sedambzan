@@ -4270,20 +4270,40 @@ let note =
           });
         }
       } catch (_e) {}
-      await setState(userId, 'announce_pick_target', {
-        annText: text,
-        annEntities: annEntities,
-      });
       try {
         await settingSet(
           'announce_draft:' + userId,
           JSON.stringify({ text: text, entities: annEntities || null, ts: Date.now() })
         );
       } catch (_e) {}
+      // مسیر ذخیره‌محور کاربران عادی: شمارش مشمول + تأیید فعال‌سازی
+      await setState(userId, 'announce_confirm_activate', {
+        annText: text,
+        annEntities: annEntities,
+      });
+      let eligible = 0;
+      try {
+        eligible = await countEligibleAnnounceUsers();
+      } catch (_e) {}
+      const preview = String(text).slice(0, 400);
+      let eligFa = String(eligible);
+      try {
+        eligFa = Number(eligible).toLocaleString('fa-IR');
+      } catch (_e) {}
       await api.sendMessage({
         chat_id: chatId,
-        text: 'ارسال به چه کسانی؟',
-        reply_markup: announceTargetInline(),
+        text:
+          'اطلاعیه آماده فعال‌سازی است.\n\n' +
+          'تعداد کاربران مشمول: ' +
+          eligFa +
+          ' نفر\n\n' +
+          'با فعال‌سازی این اطلاعیه، کاربران هنگام /start یا دکمه‌های ربات (یک‌بار برای هر اطلاعیه) آن را دریافت می‌کنند.\n' +
+          'ارسال انبوه انجام نمی‌شود.\n\n' +
+          'پیش‌نمایش:\n' +
+          preview +
+          (String(text).length > 400 ? '…' : '') +
+          '\n\nآیا از فعال‌سازی اطمینان دارید؟',
+        reply_markup: announceActivateConfirmInline(),
       });
       return;
     }

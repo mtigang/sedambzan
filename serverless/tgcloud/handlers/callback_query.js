@@ -5367,7 +5367,7 @@ if (data.startsWith('sl_setch:')) {
       await api.answerCallbackQuery({ callback_query_id: cq.id });
       await api.sendMessage({
         chat_id: cq.message.chat.id,
-        text: 'متن اطلاعیه را بفرستید:\\n(بعداً مخاطب و تأیید فعال‌سازی)',
+        text: 'متن اطلاعیه را بفرستید:\n(پس از ارسال متن، تعداد مشمول و تأیید فعال‌سازی نشان داده می‌شود)',
         reply_markup: sanitizeMarkup({ keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true }),
       });
       return;
@@ -5453,11 +5453,11 @@ if (data.startsWith('sl_setch:')) {
       await api.sendMessage({
         chat_id: cq.message.chat.id,
         text:
-          '✅ اطلاعیه فعال شد.\\nشناسه: #' +
+          '✅ اطلاعیه فعال شد.\nشناسه: #' +
           (ann.id || '—') +
-          '\\nمشمول: ' +
+          '\nمشمول: ' +
           (res.eligible != null ? res.eligible : '—') +
-          ' نفر\\n\\nکاربران با /start یا دکمه‌های ربات یک‌بار دریافت می‌کنند.',
+          ' نفر\n\nکاربران با /start یا دکمه‌های ربات یک‌بار دریافت می‌کنند.',
         reply_markup: announceManageKeyboard(),
       });
       return;
@@ -5510,7 +5510,7 @@ if (data.startsWith('sl_setch:')) {
         text:
           'آیا از لغو اطلاعیه #' +
           id +
-          ' اطمینان دارید؟\\nپس از لغو، دیگر به کاربران نمایش داده نخواهد شد.\\nسوابق دریافت قبلی حفظ می‌شود.',
+          ' اطمینان دارید؟\nپس از لغو، دیگر به کاربران نمایش داده نخواهد شد.\nسوابق دریافت قبلی حفظ می‌شود.',
         reply_markup: announceCancelConfirmInline(id),
       });
       return;

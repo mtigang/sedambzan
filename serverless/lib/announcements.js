@@ -138,29 +138,36 @@ export async function countReceipts(announcementId, status) {
 }
 
 async function hasReceipt(announcementId, userId) {
+  const aid = Number(announcementId);
+  const uid = Number(userId);
   try {
     const rows =
       (await db
-        .select({ id: botAnnouncementReceipts.id })
+        .select({ id: botAnnouncementReceipts.id, status: botAnnouncementReceipts.status })
         .from(botAnnouncementReceipts)
         .where(
           and(
-            eq(botAnnouncementReceipts.announcementId, Number(announcementId)),
-            eq(botAnnouncementReceipts.userId, Number(userId)),
-            eq(botAnnouncementReceipts.status, 'delivered')
+            eq(botAnnouncementReceipts.announcementId, aid),
+            eq(botAnnouncementReceipts.userId, uid)
           )
         )
-        .limit(1)
+        .limit(8)
         .all()) || [];
-    return !!(rows && rows[0]);
+    for (const r of rows) {
+      const st = String(r.status || '');
+      if (st === 'delivered' || st === 'pending' || st === 'claiming') return true;
+    }
   } catch (_e) {
-    // fallback legacy key
-    const seen = await settingGet('pau:' + userId, '');
-    const ann = await getAnnouncement(announcementId);
-    if (ann && String(seen) === 'ba_' + announcementId) return true;
-    if (ann && String(seen) === String(ann.id)) return true;
-    return false;
+    try {
+      const seen = await settingGet('pau:' + uid, '');
+      if (String(seen) === 'ba_' + aid || String(seen) === String(aid)) return true;
+    } catch (_e2) {}
   }
+  try {
+    const claim = await settingGet('arclaim:' + aid + ':' + uid, '');
+    if (claim === '1' || claim === 'p') return true;
+  } catch (_e3) {}
+  return false;
 }
 
 async function insertReceipt(announcementId, userId, status) {
@@ -175,8 +182,74 @@ async function insertReceipt(announcementId, userId, status) {
       .run();
     return true;
   } catch (e) {
-    // ممکن است تکراری باشد
     console.error('insertReceipt', e);
+    return false;
+  }
+}
+
+/** claim نرم قبل از ارسال — کاهش نمایش تکراری در race دو هندلر */
+async function tryClaimDelivery(announcementId, userId) {
+  const aid = Number(announcementId);
+  const uid = Number(userId);
+  if (!aid || !uid) return false;
+  if (await hasReceipt(aid, uid)) return false;
+  const claimKey = 'arclaim:' + aid + ':' + uid;
+  try {
+    const cur = await settingGet(claimKey, '');
+    if (cur === '1' || cur === 'p') return false;
+    await settingSet(claimKey, 'p');
+  } catch (_e) {}
+  try {
+    await insertReceipt(aid, uid, 'pending');
+  } catch (_e) {}
+  return true;
+}
+
+async function finalizeClaim(announcementId, userId, ok) {
+  const aid = Number(announcementId);
+  const uid = Number(userId);
+  const claimKey = 'arclaim:' + aid + ':' + uid;
+  try {
+    await settingSet(claimKey, ok ? '1' : '');
+  } catch (_e) {}
+  try {
+    const rows =
+      (await db
+        .select()
+        .from(botAnnouncementReceipts)
+        .where(
+          and(
+            eq(botAnnouncementReceipts.announcementId, aid),
+            eq(botAnnouncementReceipts.userId, uid)
+          )
+        )
+        .limit(10)
+        .all()) || [];
+    let pending = null;
+    for (const r of rows) {
+      if (String(r.status) === 'pending' || String(r.status) === 'claiming') {
+        pending = r;
+        break;
+      }
+    }
+    if (pending && pending.id) {
+      await db
+        .update(botAnnouncementReceipts)
+        .set({ status: ok ? 'delivered' : 'failed' })
+        .where(eq(botAnnouncementReceipts.id, Number(pending.id)))
+        .run();
+      return true;
+    }
+    if (ok) return await insertReceipt(aid, uid, 'delivered');
+    await insertReceipt(aid, uid, 'failed');
+    return false;
+  } catch (e) {
+    console.error('finalizeClaim', e);
+    if (ok) {
+      try {
+        await insertReceipt(aid, uid, 'delivered');
+      } catch (_e) {}
+    }
     return false;
   }
 }
@@ -284,6 +357,28 @@ export async function cancelAnnouncement(id) {
   }
 }
 
+function fmtTs(v) {
+  if (v == null || v === '') return '—';
+  try {
+    let d = v;
+    if (typeof v === 'number') d = new Date(v > 1e12 ? v : v * 1000);
+    else if (!(v instanceof Date)) d = new Date(v);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' });
+  } catch (_e) {
+    return '—';
+  }
+}
+
+function fmtNum(n) {
+  const x = Number(n) || 0;
+  try {
+    return x.toLocaleString('fa-IR');
+  } catch (_e) {
+    return String(x);
+  }
+}
+
 export function formatAnnouncementStats(row, deliveredLive) {
   if (!row) return 'اطلاعیه‌ای نیست.';
   const id = row.id;
@@ -305,16 +400,23 @@ export function formatAnnouncementStats(row, deliveredLive) {
     statusFa +
     '\n────────────\n' +
     'مشمول (زمان فعال‌سازی): ' +
-    elig +
+    fmtNum(elig) +
     '\nدریافت موفق: ' +
-    del +
-    '\nباقی‌مانده (هنوز هندلر نزده‌اند یا خطا): ' +
-    left +
+    fmtNum(del) +
+    '\nباقی‌مانده (هنوز هندلر نزده‌اند): ' +
+    fmtNum(left) +
     '\nخطای ارسال ثبت‌شده: ' +
-    fail +
+    fmtNum(fail) +
     '\nپوشش: ' +
     pct +
     '%\n────────────\n' +
+    'ایجاد: ' +
+    fmtTs(row.createdAt ?? row.created_at) +
+    '\nفعال‌سازی: ' +
+    fmtTs(row.activatedAt ?? row.activated_at) +
+    '\nلغو: ' +
+    fmtTs(row.cancelledAt ?? row.cancelled_at) +
+    '\n────────────\n' +
     String(row.text || '').slice(0, 500) +
     (String(row.text || '').length > 500 ? '…' : '')
   );
@@ -323,9 +425,9 @@ export function formatAnnouncementStats(row, deliveredLive) {
 export function announceManageKeyboard() {
   return sanitizeMarkup({
     inline_keyboard: [
-      [{ text: '➕ ایجاد اطلاعیه کاربران', callback_data: 'ann_m:new', style: 'success' }],
-      [{ text: '🟢 فعال‌ها', callback_data: 'ann_m:active', style: 'primary' }],
-      [{ text: '🔴 لغوشده / تاریخچه', callback_data: 'ann_m:hist', style: 'primary' }],
+      [{ text: '➕ ایجاد اطلاعیه جدید', callback_data: 'ann_m:new', style: 'success' }],
+      [{ text: '🟢 اطلاعیه‌های فعال', callback_data: 'ann_m:active', style: 'primary' }],
+      [{ text: '🔴 لغوشده‌ها / تاریخچه', callback_data: 'ann_m:hist', style: 'primary' }],
       [{ text: 'بستن', callback_data: 'ann_m:close', style: 'danger' }],
     ],
   });
@@ -435,11 +537,14 @@ export async function maybeDeliverPassiveAnnounce(userId, chatId) {
     for (const ann of active) {
       if (sentThisCall >= 2) break;
       const aid = Number(ann.id);
-      if (await hasReceipt(aid, uid)) continue;
+      if (!(await tryClaimDelivery(aid, uid))) continue;
 
       const entities = parseEntities(ann.entitiesJson ?? ann.entities_json);
       const text = String(ann.text || '').slice(0, 4000);
-      if (!text) continue;
+      if (!text) {
+        await finalizeClaim(aid, uid, false);
+        continue;
+      }
 
       let sent = null;
       try {
@@ -453,19 +558,20 @@ export async function maybeDeliverPassiveAnnounce(userId, chatId) {
       } catch (eSend) {
         console.error('ann deliver fail', aid, eSend);
         try {
-          await insertReceipt(aid, uid, 'failed');
+          await finalizeClaim(aid, uid, false);
           await bumpAnnouncementCounter(aid, 'failCount', 1);
         } catch (_e) {}
         continue;
       }
 
-      // موفقیت
-      const okIns = await insertReceipt(aid, uid, 'delivered');
-      if (okIns) {
+      // فقط پس از ارسال موفق
+      const okFin = await finalizeClaim(aid, uid, true);
+      if (okFin) {
         await bumpAnnouncementCounter(aid, 'deliveredCount', 1);
       }
-      // legacy seen برای سازگاری
-      await settingSet('pau:' + uid, 'ba_' + aid);
+      try {
+        await settingSet('pau:' + uid, 'ba_' + aid);
+      } catch (_e) {}
 
       const mid = sent && (sent.message_id || sent.messageId);
       if (mid) {
