@@ -3,7 +3,7 @@
  */
 import { db } from 'sdk';
 import { shifts, messages, channelAdmins } from 'schema';
-import { desc, sql } from 'sdk/db';
+import { desc, sql, eq, and } from 'sdk/db';
 import { DEFAULT_CHANNELS } from 'lib/config';
 import {
   tehranNow,
@@ -608,4 +608,256 @@ export async function formatAdminDetail(adminId, scope, period) {
       ' · ❌ ' +
       o.rj,
   ];
+}
+
+
+/** مدت شیفت به دقیقه (با پشتیبانی بازه عبوری از نیمه‌شب دوره) */
+export function shiftDurationMinutes(startHm, endHm) {
+  const s = periodOrd(normHm(startHm));
+  let e = periodOrd(normHm(endHm));
+  if (e <= s) e += 24 * 60;
+  const d = e - s;
+  return d > 0 && d < 24 * 60 ? d : 0;
+}
+
+function formatDurationFa(mins) {
+  const m = Math.max(0, Number(mins) || 0);
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  if (h && r) return h + 'س ' + r + 'د';
+  if (h) return h + ' ساعت';
+  return r + ' دقیقه';
+}
+
+/**
+ * وضعیت منطقی شیفت برای یک روز مشخص.
+ * dateStr = YYYY-MM-DD شیفت در DB
+ */
+export function classifyShiftStatusForDay(s, dayStr, now) {
+  if (!now) now = tehranNow();
+  const st = String(s.status || 'active');
+  if (st === 'cancelled') return 'cancelled';
+  if (st !== 'active') return 'other';
+  const start = normHm(s.startHm || s.start_hm || '');
+  const end = normHm(s.endHm || s.end_hm || '');
+  if (!start || !end || start === end) return 'incomplete';
+  const sd = String(s.shiftDate ?? s.shift_date ?? '');
+  if (sd === 'perm' || sd === 'permanent') return 'incomplete';
+  if (sd !== String(dayStr)) return 'other';
+
+  const today = now.date;
+  if (sd < today) return 'completed';
+  if (sd === today) {
+    if (inRange(now.hm, start, end)) return 'running';
+    const t = periodOrd(now.hm);
+    const sOrd = periodOrd(start);
+    let eOrd = periodOrd(end);
+    if (eOrd <= sOrd) eOrd += 24 * 60;
+    if (t < sOrd) return 'upcoming';
+    return 'completed';
+  }
+  return 'upcoming';
+}
+
+const DAY_STATUS_FA = {
+  running: 'در حال انجام',
+  upcoming: 'هنوز شروع نشده',
+  completed: 'تکمیل‌شده',
+  cancelled: 'لغوشده',
+  incomplete: 'ناقص',
+  other: 'سایر',
+};
+
+/** بارگذاری شیفت‌های یک کانال در یک تاریخ — کوئری دقیق، نه نمونهٔ سراسری */
+async function loadShiftsForChannelDay(channelKey, dateStr) {
+  const ck = String(channelKey || '');
+  const day = String(dateStr || '');
+  try {
+    const rows =
+      (await db
+        .select()
+        .from(shifts)
+        .where(and(eq(shifts.channelKey, ck), eq(shifts.shiftDate, day)))
+        .all()) || [];
+    return rows;
+  } catch (e1) {
+    console.error('loadShiftsForChannelDay where', e1);
+  }
+  // fallback: نمونهٔ اخیر + فیلتر دستی
+  try {
+    const all = await loadRecentShifts(SHIFT_LIMIT);
+    return (all || []).filter(function (s) {
+      return (
+        String(s.channelKey || s.channel_key || '') === ck &&
+        String(s.shiftDate || s.shift_date || '') === day
+      );
+    });
+  } catch (e2) {
+    console.error('loadShiftsForChannelDay fallback', e2);
+    return [];
+  }
+}
+
+/**
+ * گزارش یک روز × یک کانال — فقط از رکوردهای shifts
+ */
+export async function buildOwnerChannelDayReport(channelKey, dateStr) {
+  const now = tehranNow();
+  const ck = String(channelKey || '');
+  const day = String(dateStr || now.date);
+  const conf = DEFAULT_CHANNELS[ck];
+  const title = (conf && conf.title) || ck;
+
+  const rows = await loadShiftsForChannelDay(ck, day);
+  const seen = Object.create(null);
+  const items = [];
+  const adminSet = Object.create(null);
+
+  let sumMins = 0;
+  let nCompleted = 0;
+  let nIncomplete = 0;
+  let nCancelled = 0;
+  let nRunning = 0;
+  let nUpcoming = 0;
+
+  for (const s of rows) {
+    const sid = Number(s.id);
+    if (sid && seen[sid]) continue;
+    if (sid) seen[sid] = 1;
+
+    const start = normHm(s.startHm || s.start_hm);
+    const end = normHm(s.endHm || s.end_hm);
+    const logical = classifyShiftStatusForDay(s, day, now);
+    const mins = shiftDurationMinutes(start, end);
+    const aid = Number(s.adminId || s.admin_id) || 0;
+    if (aid && logical !== 'cancelled') adminSet[aid] = 1;
+
+    if (logical === 'completed') nCompleted++;
+    else if (logical === 'incomplete') nIncomplete++;
+    else if (logical === 'cancelled') nCancelled++;
+    else if (logical === 'running') nRunning++;
+    else if (logical === 'upcoming') nUpcoming++;
+
+    if (logical !== 'cancelled' && logical !== 'incomplete') sumMins += mins;
+
+    items.push({
+      id: sid,
+      adminId: aid,
+      startHm: start,
+      endHm: end,
+      minutes: mins,
+      logical: logical,
+      statusDb: String(s.status || ''),
+    });
+  }
+
+  items.sort(function (a, b) {
+    return periodOrd(a.startHm) - periodOrd(b.startHm);
+  });
+
+  return {
+    channelKey: ck,
+    title: title,
+    date: day,
+    now: now,
+    items: items,
+    summary: {
+      shifts: items.length,
+      admins: Object.keys(adminSet).length,
+      minutes: sumMins,
+      completed: nCompleted,
+      incomplete: nIncomplete,
+      cancelled: nCancelled,
+      running: nRunning,
+      upcoming: nUpcoming,
+    },
+  };
+}
+
+export async function formatOwnerChannelDayReport(report) {
+  if (!report) return 'خطا در ساخت گزارش.';
+  let jal = report.date;
+  try {
+    jal = toJalaliDisplay(report.date) || report.date;
+  } catch (_e) {}
+
+  const s = report.summary || {};
+  let text =
+    '📊 گزارش شیفت‌ها\n' +
+    '📢 کانال: «' +
+    report.title +
+    '»\n' +
+    '📅 ' +
+    jal +
+    ' (' +
+    report.date +
+    ')\n' +
+    '━━━━━━━━━━━━\n' +
+    'خلاصه روز\n' +
+    '• شیفت ثبت‌شده: ' +
+    (s.shifts || 0) +
+    '\n' +
+    '• ادمین فعال: ' +
+    (s.admins || 0) +
+    '\n' +
+    '• مجموع زمان فعالیت: ' +
+    formatDurationFa(s.minutes || 0) +
+    '\n' +
+    '• تکمیل‌شده: ' +
+    (s.completed || 0) +
+    '\n' +
+    '• در حال انجام: ' +
+    (s.running || 0) +
+    '\n' +
+    '• ناقص: ' +
+    (s.incomplete || 0) +
+    '\n' +
+    '• لغوشده: ' +
+    (s.cancelled || 0) +
+    '\n' +
+    '━━━━━━━━━━━━\n';
+
+  if (!report.items || !report.items.length) {
+    text += 'در این تاریخ هیچ شیفتی برای این کانال ثبت نشده است.';
+    return text;
+  }
+
+  text += 'فهرست شیفت‌ها\n';
+  for (const it of report.items) {
+    let name = String(it.adminId || '—');
+    try {
+      if (it.adminId) name = displayName(await getUser(it.adminId), it.adminId);
+    } catch (_e) {}
+    const stFa = DAY_STATUS_FA[it.logical] || it.logical;
+    const start = String(it.startHm || '').slice(0, 5);
+    const end = String(it.endHm || '').slice(0, 5);
+    text +=
+      '\n• ' +
+      name +
+      '\n  شروع: ' +
+      start +
+      ' · پایان: ' +
+      end +
+      '\n  مدت: ' +
+      formatDurationFa(it.minutes) +
+      '\n  وضعیت: ' +
+      stFa +
+      '\n';
+    if (text.length > 3500) {
+      text += '\n… و موارد بیشتر';
+      break;
+    }
+  }
+  return text;
+}
+
+/** جابه‌جایی تاریخ تقویمی تهران به صورت YYYY-MM-DD */
+export function shiftCalendarDate(dateStr, deltaDays) {
+  const parts = String(dateStr).split('-').map(Number);
+  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  dt.setUTCDate(dt.getUTCDate() + Number(deltaDays || 0));
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(dt.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + d;
 }

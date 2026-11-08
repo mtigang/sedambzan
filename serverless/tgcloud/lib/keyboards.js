@@ -747,6 +747,44 @@ export function ownerShiftListChannelInline() {
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
+/** انتخاب کانال برای گزارش روزانه شیفت مالک */
+export function ownerShiftChannelPickInline() {
+  const rows = [];
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    rows.push([
+      {
+        text: String((c && c.title) || c.key || 'کانال'),
+        callback_data: 'own_day:' + String(c.key),
+        style: 'primary',
+      },
+    ]);
+  }
+  rows.push([{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
+}
+
+/** ناوبری روز برای گزارش شیفت یک کانال */
+export function ownerShiftDayNavInline(channelKey, dateStr, canNext) {
+  const ck = String(channelKey || '');
+  const d = String(dateStr || '');
+  const row = [
+    { text: '◀️ روز قبلی', callback_data: 'own_daynav:' + ck + ':' + d + ':prev', style: 'primary' },
+  ];
+  if (canNext) {
+    row.push({ text: 'روز بعدی ▶️', callback_data: 'own_daynav:' + ck + ':' + d + ':next', style: 'primary' });
+  }
+  return sanitizeMarkup({
+    inline_keyboard: [
+      row,
+      [{ text: '🔄 امروز', callback_data: 'own_day:' + ck, style: 'success' }],
+      [{ text: '📢 تغییر کانال', callback_data: 'own_day_menu', style: 'primary' }],
+      [{ text: '📅 تخصیص / لغو', callback_data: 'own_shift_tools', style: 'primary' }],
+      [{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }],
+    ],
+  });
+}
+
+
 export function ownerShiftMenuInline() {
   return sanitizeMarkup({
     inline_keyboard: [

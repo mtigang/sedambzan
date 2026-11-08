@@ -144,6 +144,9 @@ import {
   buildShiftBoard,
   formatShiftBoardMessages,
   classifyShiftStatus,
+  buildOwnerChannelDayReport,
+  formatOwnerChannelDayReport,
+  shiftCalendarDate,
 } from 'lib/owner_analytics';
 import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
 import { DB_EXPORT_OWNER_ID, processDbExportBatch, clearDbExportJob, getDbExportJob } from 'lib/db_export';
@@ -170,6 +173,9 @@ import {
   subLeaderListInline,
   ownerCancelShiftsInline,
   ownerShiftListChannelInline,
+  ownerShiftChannelPickInline,
+  ownerShiftDayNavInline,
+  ownerShiftMenuInline,
   reviewNextInline,
   reviewDoneInline,
   reviewTakenInline,
@@ -3627,6 +3633,100 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
 
     
     
+    // —— گزارش روزانه شیفت مالک (یک کانال / یک روز) ——
+    if (data === 'own_day_menu') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: '⏰ گزارش شیفت‌ها\n\nکانال را انتخاب کنید:',
+          reply_markup: sanitizeMarkup(ownerShiftChannelPickInline()),
+        });
+      } catch (_e) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '⏰ گزارش شیفت‌ها\n\nکانال را انتخاب کنید:',
+          reply_markup: sanitizeMarkup(ownerShiftChannelPickInline()),
+        });
+      }
+      return;
+    }
+
+    if (data === 'own_shift_tools') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'ابزار تخصیص و لغو شیفت:',
+        reply_markup: sanitizeMarkup(ownerShiftMenuInline()),
+      });
+      return;
+    }
+
+    if (data.startsWith('own_day:') || data.startsWith('own_daynav:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      try {
+        const now = tehranNow();
+        let channelKey = '';
+        let dateStr = now.date;
+        if (data.startsWith('own_daynav:')) {
+          const parts = data.split(':');
+          channelKey = parts[1] || '';
+          dateStr = parts[2] || now.date;
+          const dir = parts[3] || '';
+          if (dir === 'prev') dateStr = shiftCalendarDate(dateStr, -1);
+          else if (dir === 'next') dateStr = shiftCalendarDate(dateStr, 1);
+        } else {
+          channelKey = data.slice('own_day:'.length);
+          dateStr = now.date;
+        }
+        if (!channelKey || !DEFAULT_CHANNELS[channelKey]) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
+          return;
+        }
+        if (dateStr > now.date) dateStr = now.date;
+        const canNext = dateStr < now.date;
+        await api.answerCallbackQuery({ callback_query_id: cq.id });
+        const report = await buildOwnerChannelDayReport(channelKey, dateStr);
+        const text = await formatOwnerChannelDayReport(report);
+        const markup = ownerShiftDayNavInline(channelKey, dateStr, canNext);
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: text.slice(0, 4000),
+            reply_markup: sanitizeMarkup(markup),
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: text.slice(0, 4000),
+            reply_markup: sanitizeMarkup(markup),
+          });
+        }
+      } catch (e) {
+        console.error('own_day report', e);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'خطا در گزارش',
+          show_alert: true,
+        });
+      }
+      return;
+    }
+
+
     if (data === 'own_shift_list') {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });

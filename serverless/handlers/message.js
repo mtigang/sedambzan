@@ -46,6 +46,7 @@ import {
   msgSearchActionsInline,
   adminFbReplyInline,
   ownerShiftMenuInline,
+  ownerShiftChannelPickInline,
   reviewNextInline,
   subLeaderKeyboard,
   adminPerfInline,
@@ -97,7 +98,7 @@ import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali
 // work hours: setWorkHoursConfig/getWorkHoursConfig exported from same module
 // normHm via time
 import { resolveUserId, channelMessageLink, channelPublicBase } from 'lib/resolve';
-import { buildShiftBoard, formatShiftBoardMessages } from 'lib/owner_analytics';
+import { buildShiftBoard, formatShiftBoardMessages, buildOwnerChannelDayReport, formatOwnerChannelDayReport, shiftCalendarDate } from 'lib/owner_analytics';
 import { setBlocked } from 'lib/users';
 import { DB_EXPORT_OWNER_ID, initDbExportJob, processDbExportBatch } from 'lib/db_export';
 import {
@@ -1350,8 +1351,8 @@ if (text === '📝 ارسال پیام') {
         chat_id: chatId,
         text:
           '🕶 پیام ناشناس آرال\n\n' +
-          'از اینجا می‌تونی برای کسانی که ربات رو استارت کردن، ناشناس پیام بفرستی.\n' +
-          'هویتت برای طرف مقابل دیده نمی‌شه؛ مدیریت آرال برای امنیت سیستم لاگ محدود داره.\n\n' +
+          'اینجا می‌تونی برای کسانی که ربات رو استارت کردن، ناشناس پیام بفرستی.\n' +
+          'اسم و هویتت پیش طرف مقابل مخفی می‌مونه.\n\n' +
           'یک گزینه انتخاب کن:',
         reply_markup: anonMainKeyboard(),
       });
@@ -2544,34 +2545,20 @@ let note =
         try {
           await cancelInvalidShifts();
         } catch (_e) {}
-        const board = await buildShiftBoard(null, 7);
-        const parts = await formatShiftBoardMessages(board);
-        for (const part of parts) {
-          try {
-            await api.sendMessage({
-              chat_id: chatId,
-              text: part,
-              parse_mode: part.indexOf('<blockquote>') >= 0 ? 'HTML' : undefined,
-            });
-          } catch (_e) {
-            await api.sendMessage({
-              chat_id: chatId,
-              text: String(part).replace(/<[^>]+>/g, ''),
-            });
-          }
-        }
         await api.sendMessage({
           chat_id: chatId,
           text:
-            'از دکمه‌های زیر:\n• تخصیص این دوره\n• لیست و لغو\n• لغو همه شیفت‌های دوره',
-          reply_markup: sanitizeMarkup(ownerShiftMenuInline()),
+            '⏰ گزارش شیفت‌ها\n\n' +
+            'ابتدا کانال را انتخاب کنید.\n' +
+            'سپس گزارش همان روز (پیش‌فرض: امروز) نمایش داده می‌شود و می‌توانید بین روزها جابه‌جا شوید.',
+          reply_markup: sanitizeMarkup(ownerShiftChannelPickInline()),
         });
       } catch (e) {
-        console.error('owner shifts board', e);
+        console.error('owner shifts menu', e);
         await api.sendMessage({
           chat_id: chatId,
-          text: 'خطا در خواندن شیفت‌ها: ' + String((e && e.message) || e).slice(0, 150),
-          reply_markup: ownerKeyboard(userId),
+          text: 'خطا: ' + String((e && e.message) || e).slice(0, 150),
+          reply_markup: await roleKb(userId),
         });
       }
       return;
