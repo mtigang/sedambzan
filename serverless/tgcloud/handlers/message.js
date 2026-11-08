@@ -67,6 +67,32 @@ import {
 // sanitize imported below
 import { validateAndFix, normalizeBody, exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { setState, getState, clearState } from 'lib/state';
+import {
+  anonMainKeyboard,
+  anonConfirmInline,
+  anonRecvInline,
+  anonConvActionsInline,
+  anonNotifyInline,
+  ensureAnonSettings,
+  setAnonReceiveEnabled,
+  resolveAnonTarget,
+  isAnonBlockedEither,
+  setAnonBlock,
+  clearAnonBlock,
+  listAnonBlocks,
+  sendAnonymousMessage,
+  getAnonMessage,
+  getConversation,
+  peerIdOfConv,
+  isParticipant,
+  softDeleteConversationForUser,
+  listInbox,
+  listConversationsForUser,
+  listMessagesInConv,
+  markAnonRead,
+  reportAnonMessage,
+  ANON_TURN_LIMIT,
+} from 'lib/anonymous';
 import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali, toJalaliDisplay, workHoursClosedText, toFaDigits, buildOwnerShiftSlots, normHm, sortShiftsByPeriod, periodOrd, setWorkHoursConfig, getWorkHoursConfig, buildAvailableShiftSlots, getShiftDayMode } from 'lib/time';
 // work hours: setWorkHoursConfig/getWorkHoursConfig exported from same module
 // normHm via time
@@ -1304,6 +1330,149 @@ if (text === '📝 ارسال پیام') {
     }
 
     
+    
+    // —— سیستم پیام ناشناس ——
+    if (text === '🕶 پیام ناشناس') {
+      await clearState(userId);
+      await ensureAnonSettings(userId);
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '🕶 پیام ناشناس آرال\n\n' +
+          'از اینجا می‌تونی برای کسانی که ربات رو استارت کردن، ناشناس پیام بفرستی.\n' +
+          'هویتت برای طرف مقابل دیده نمی‌شه؛ مدیریت آرال برای امنیت سیستم لاگ محدود داره.\n\n' +
+          'یک گزینه انتخاب کن:',
+        reply_markup: anonMainKeyboard(),
+      });
+      return;
+    }
+
+    if (text === '✉️ ارسال پیام جدید') {
+      await setState(userId, 'anon_target', {});
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          'از طریق آرال می‌تونی به افرادی که ربات رو استارت کردن، به‌صورت ناشناس پیام بدی.\n\n' +
+          'آیدی عددی یا نام کاربری تلگرام (@username) شخص موردنظر رو بفرست:',
+        reply_markup: anonMainKeyboard(),
+      });
+      return;
+    }
+
+    if (text === '📥 پیام‌های دریافتی') {
+      const rows = await listInbox(userId, 15);
+      if (!rows.length) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'هنوز پیام ناشناس دریافتی نداری.',
+          reply_markup: anonMainKeyboard(),
+        });
+        return;
+      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '📥 آخرین پیام‌های دریافتی ناشناس:',
+        reply_markup: anonMainKeyboard(),
+      });
+      for (const m of rows.slice(0, 10)) {
+        const mid = Number(m.id);
+        const body = String((m.messageText ?? m.message_text) || '').slice(0, 800);
+        try {
+          await markAnonRead(mid);
+        } catch (_e) {}
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '💌 #' + mid + ' · گفت‌وگو #' + (m.conversationId ?? m.conversation_id) + '\n\n' + body,
+          reply_markup: anonNotifyInline(mid),
+        });
+      }
+      return;
+    }
+
+    if (text === '💬 گفت‌وگوهای من') {
+      const convs = await listConversationsForUser(userId, 15);
+      if (!convs.length) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'گفت‌وگوی ناشناسی نداری.',
+          reply_markup: anonMainKeyboard(),
+        });
+        return;
+      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '💬 گفت‌وگوهای ناشناس تو:',
+        reply_markup: anonMainKeyboard(),
+      });
+      for (const c of convs.slice(0, 12)) {
+        const cid = Number(c.id);
+        const st = String(c.status || 'active');
+        const peer = peerIdOfConv(c, userId);
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            'گفت‌وگو #' +
+            cid +
+            '\nوضعیت: ' +
+            st +
+            '\nنوبت ارسال فعلی: ' +
+            ((c.currentSenderId ?? c.current_sender_id) || '—') +
+            '\nپیام در نوبت: ' +
+            ((c.messagesInTurn ?? c.messages_in_turn) || 0) +
+            '/' +
+            ANON_TURN_LIMIT,
+          reply_markup: anonConvActionsInline(cid),
+        });
+      }
+      return;
+    }
+
+    if (text === '🚫 افراد مسدودشده') {
+      const blocks = await listAnonBlocks(userId);
+      if (!blocks.length) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'لیست مسدودخالی است.',
+          reply_markup: anonMainKeyboard(),
+        });
+        return;
+      }
+      const { InlineKeyboard } = { InlineKeyboard: null };
+      const rows = [];
+      for (const b of blocks.slice(0, 20)) {
+        const bid = Number(b.blockedId ?? b.blocked_id);
+        rows.push([
+          {
+            text: 'رفع مسدود #' + bid,
+            callback_data: 'an:ub:' + bid,
+            style: 'success',
+          },
+        ]);
+      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '🚫 مسدودشده‌ها (ناشناس — شناسه داخلی):\n' + blocks.map(function (b) {
+          return '• ' + (b.blockedId ?? b.blocked_id);
+        }).join('\n'),
+        reply_markup: sanitizeMarkup({ inline_keyboard: rows }),
+      });
+      return;
+    }
+
+    if (text === '⚙️ تنظیمات دریافت پیام') {
+      const st = await ensureAnonSettings(userId);
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '⚙️ دریافت پیام ناشناس: ' +
+          (st.receiveEnabled ? '🟢 فعال' : '🔴 غیرفعال') +
+          '\n\nاگر غیرفعال باشد، کسی نمی‌تواند گفت‌وگوی جدید ناشناس با تو شروع کند.',
+        reply_markup: anonRecvInline(!!st.receiveEnabled),
+      });
+      return;
+    }
+
+
     if (text === '💬 انتقادات، پیشنهادات، گزارش مشکل') {
       await setState(userId, 'feedback');
       await api.sendMessage({
@@ -5272,6 +5441,109 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
       }
       return;
     }
+
+    
+    // —— state پیام ناشناس ——
+    if (state?.kind === 'anon_target' && text && text !== '◀️ بازگشت') {
+      const menuSkip = {
+        '✉️ ارسال پیام جدید': 1,
+        '📥 پیام‌های دریافتی': 1,
+        '💬 گفت‌وگوهای من': 1,
+        '🚫 افراد مسدودشده': 1,
+        '⚙️ تنظیمات دریافت پیام': 1,
+        '🕶 پیام ناشناس': 1,
+        '📝 ارسال پیام': 1,
+      };
+      if (menuSkip[text]) {
+        /* fall through to menu handlers only if ordered before - clear and ignore here */
+      } else {
+        const resolved = await resolveAnonTarget(text);
+        if (!resolved.ok) {
+          await api.sendMessage({ chat_id: chatId, text: resolved.text, reply_markup: anonMainKeyboard() });
+          return;
+        }
+        if (Number(resolved.userId) === Number(userId)) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'نمی‌تونی به خودت پیام ناشناس بفرستی.',
+            reply_markup: anonMainKeyboard(),
+          });
+          return;
+        }
+        if (await isAnonBlockedEither(userId, resolved.userId)) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'امکان ارسال پیام به این کاربر وجود ندارد.',
+            reply_markup: anonMainKeyboard(),
+          });
+          return;
+        }
+        await setState(userId, 'anon_compose', { toId: resolved.userId });
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'گیرنده تأیید شد ✅\nحالا متن پیام ناشناس‌ت رو بنویس (فقط متن):',
+          reply_markup: anonMainKeyboard(),
+        });
+        return;
+      }
+    }
+
+    if (state?.kind === 'anon_compose' && text && text !== '◀️ بازگشت') {
+      const toId = Number(state.toId);
+      const body = String(text).trim();
+      if (!body || body.length < 1) {
+        await api.sendMessage({ chat_id: chatId, text: 'متن خالی نمی‌تونی بفرستی.' });
+        return;
+      }
+      await setState(userId, 'anon_confirm', { toId: toId, body: body.slice(0, 3500) });
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'پیش‌نمایش پیام ناشناس:\n\n' + body.slice(0, 1500) + '\n\nارسال بشه؟',
+        reply_markup: anonConfirmInline(),
+      });
+      return;
+    }
+
+    if (state?.kind === 'anon_reply' && text && text !== '◀️ بازگشت') {
+      const convId = Number(state.convId);
+      const replyTo = state.replyToMsgId ? Number(state.replyToMsgId) : null;
+      const conv = await getConversation(convId);
+      if (!conv || !isParticipant(conv, userId)) {
+        await clearState(userId);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'گفت‌وگو نامعتبر است.',
+          reply_markup: anonMainKeyboard(),
+        });
+        return;
+      }
+      const peer = peerIdOfConv(conv, userId);
+      const res = await sendAnonymousMessage(userId, peer, text, {
+        conversationId: convId,
+        replyToInternalId: replyTo,
+      });
+      await clearState(userId);
+      if (!res.ok) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: res.text || 'ارسال نشد.',
+          reply_markup: anonMainKeyboard(),
+        });
+        return;
+      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '✅ پاسخت ارسال شد.\n' +
+          (res.delivered ? 'طرف مقابل مطلع شد.' : 'ثبت شد؛ اعلان ممکن است با تأخیر برسد.') +
+          '\nباقی‌مانده نوبت: ' +
+          (res.remainingInTurn != null ? res.remainingInTurn : '—') +
+          ' پیام',
+        reply_markup: anonMainKeyboard(),
+      });
+      return;
+    }
+
 
     if (owner && state?.kind === 'fb_reply' && (text || message.photo || message.video || message.voice || message.audio || message.document || message.video_note || message.sticker)) {
       const rows = await db

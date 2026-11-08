@@ -88,6 +88,26 @@ import { drainAnnouncePiggyback, drainAnnounceOwnerBurst, loadAnnounceJob, saveA
 import { maybeDeliverPassiveAnnounce, setPassiveUserAnnounce, clearPassiveUserAnnounce, saveShiftDayMode, getShiftDayModeSetting } from 'lib/dbutil';
 import { setState, getState, clearState } from 'lib/state';
 import {
+  anonMainKeyboard,
+  anonRecvInline,
+  anonNotifyInline,
+  anonConvActionsInline,
+  setAnonReceiveEnabled,
+  ensureAnonSettings,
+  sendAnonymousMessage,
+  getAnonMessage,
+  getConversation,
+  peerIdOfConv,
+  isParticipant,
+  softDeleteConversationForUser,
+  setAnonBlock,
+  clearAnonBlock,
+  listMessagesInConv,
+  markAnonRead,
+  reportAnonMessage,
+  isAnonBlockedEither,
+} from 'lib/anonymous';
+import {
   upsertSubLeader,
   deactivateSubLeader,
   getSubLeaderRecord,
@@ -260,6 +280,211 @@ export default async function (cq) {
     } catch (_pa) {}
 
     // —— هندلرهای کمکی (بن / حذف / ناوبری) ——
+
+    
+    // —— پیام ناشناس callbacks ——
+    if (data === 'an:ok') {
+      const st = await getState(userId);
+      if (!st || st.kind !== 'anon_confirm' || !st.toId || !st.body) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'منقضی شده', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'در حال ارسال…' });
+      const res = await sendAnonymousMessage(userId, Number(st.toId), String(st.body));
+      await clearState(userId);
+      const chat = cq.message && cq.message.chat && cq.message.chat.id;
+      if (!res.ok) {
+        await api.sendMessage({
+          chat_id: chat || userId,
+          text: res.text || 'ارسال نشد',
+          reply_markup: anonMainKeyboard(),
+        });
+        return;
+      }
+      await api.sendMessage({
+        chat_id: chat || userId,
+        text:
+          '✅ پیام ناشناس ارسال شد.\n' +
+          (res.delivered ? 'گیرنده همین الان مطلع شد.' : 'ثبت شد؛ اگر گیرنده ربات را بلاک کرده باشد اعلان نمی‌رسد.') +
+          '\nگفت‌وگو #' +
+          res.conversationId +
+          ' · پیام #' +
+          res.messageId +
+          '\nباقی نوبت شما: ' +
+          res.remainingInTurn +
+          ' پیام',
+        reply_markup: anonMainKeyboard(),
+      });
+      return;
+    }
+
+    if (data === 'an:no') {
+      await clearState(userId);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'لغو شد' });
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text: 'ارسال لغو شد.',
+        });
+      } catch (_e) {}
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'منوی پیام ناشناس:',
+        reply_markup: anonMainKeyboard(),
+      });
+      return;
+    }
+
+    if (data.startsWith('an:recv:')) {
+      const on = data.split(':')[2] === '1';
+      await setAnonReceiveEnabled(userId, on);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: on ? 'فعال شد' : 'غیرفعال شد' });
+      const st = await ensureAnonSettings(userId);
+      try {
+        await api.editMessageText({
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          text:
+            '⚙️ دریافت پیام ناشناس: ' +
+            (st.receiveEnabled ? '🟢 فعال' : '🔴 غیرفعال') +
+            '\n\nاگر غیرفعال باشد، کسی نمی‌تواند گفت‌وگوی جدید ناشناس با تو شروع کند.',
+          reply_markup: anonRecvInline(!!st.receiveEnabled),
+        });
+      } catch (_e) {}
+      return;
+    }
+
+    if (data.startsWith('an:rp:')) {
+      const mid = Number(data.split(':')[2]);
+      const m = await getAnonMessage(mid);
+      if (!m) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پیام پیدا نشد', show_alert: true });
+        return;
+      }
+      const recv = Number(m.receiverId ?? m.receiver_id);
+      const send = Number(m.senderId ?? m.sender_id);
+      if (Number(userId) !== recv && Number(userId) !== send) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+        return;
+      }
+      const convId = Number(m.conversationId ?? m.conversation_id);
+      const conv = await getConversation(convId);
+      if (!conv || String(conv.status) === 'blocked') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'گفت‌وگو مسدود/غیرفعال است', show_alert: true });
+        return;
+      }
+      await markAnonRead(mid);
+      await setState(userId, 'anon_reply', { convId: convId, replyToMsgId: mid });
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'پاسخ ناشناس‌ت رو بنویس (حداکثر ۳ پیام در هر نوبت):',
+        reply_markup: anonMainKeyboard(),
+      });
+      return;
+    }
+
+    if (data.startsWith('an:bk:')) {
+      const mid = Number(data.split(':')[2]);
+      const m = await getAnonMessage(mid);
+      if (!m) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'پیام پیدا نشد', show_alert: true });
+        return;
+      }
+      const other =
+        Number(userId) === Number(m.receiverId ?? m.receiver_id)
+          ? Number(m.senderId ?? m.sender_id)
+          : Number(m.receiverId ?? m.receiver_id);
+      if (!other || other === Number(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
+        return;
+      }
+      await setAnonBlock(userId, other);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'مسدود شد', show_alert: true });
+      try {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '🚫 این فرستنده مسدود شد. دیگر پیام ناشناس بین شما رد و بدل نمی‌شود.',
+          reply_markup: anonMainKeyboard(),
+        });
+      } catch (_e) {}
+      return;
+    }
+
+    if (data.startsWith('an:ub:')) {
+      const bid = Number(data.split(':')[2]);
+      await clearAnonBlock(userId, bid);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'رفع مسدود شد' });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '✅ رفع مسدودسازی انجام شد. می‌توانید گفت‌وگوی جدید شروع کنید (تاریخچه قبلی خودکار باز نمی‌شود).',
+        reply_markup: anonMainKeyboard(),
+      });
+      return;
+    }
+
+    if (data.startsWith('an:dl:')) {
+      const cid = Number(data.split(':')[2]);
+      const r = await softDeleteConversationForUser(cid, userId);
+      await api.answerCallbackQuery({
+        callback_query_id: cq.id,
+        text: r.ok ? 'حذف شد' : (r.text || 'خطا'),
+        show_alert: !r.ok,
+      });
+      if (r.ok) {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '🗑 گفت‌وگو از لیست تو حذف شد. کانال مرکزی و طرف مقابل تغییر نکردند.',
+          reply_markup: anonMainKeyboard(),
+        });
+      }
+      return;
+    }
+
+    if (data.startsWith('an:op:')) {
+      const cid = Number(data.split(':')[2]);
+      const conv = await getConversation(cid);
+      if (!conv || !isParticipant(conv, userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'نامعتبر', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      const msgs = await listMessagesInConv(cid, 20);
+      let body = '💬 گفت‌وگو #' + cid + '\nوضعیت: ' + (conv.status || '') + '\n────────────\n';
+      for (const m of msgs) {
+        const mine = Number(m.senderId ?? m.sender_id) === Number(userId);
+        body +=
+          (mine ? 'شما: ' : 'ناشناس: ') +
+          String((m.messageText ?? m.message_text) || '').slice(0, 200) +
+          '\n· #' +
+          m.id +
+          '\n\n';
+        if (body.length > 3500) break;
+      }
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: body.slice(0, 4000),
+        reply_markup: anonMainKeyboard(),
+      });
+      await setState(userId, 'anon_reply', {
+        convId: cid,
+        replyToMsgId: msgs.length ? Number(msgs[msgs.length - 1].id) : null,
+      });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: 'اگر می‌خوای ادامه بدی، همین‌جا متن بعدی رو بفرست:',
+      });
+      return;
+    }
+
+    if (data.startsWith('an:rg:')) {
+      const mid = Number(data.split(':')[2]);
+      await reportAnonMessage(mid, userId);
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'گزارش ثبت شد', show_alert: true });
+      return;
+    }
+
 
     if (data.startsWith('shiftmode:')) {
       if (!isOwner(userId)) {

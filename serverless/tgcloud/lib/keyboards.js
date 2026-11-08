@@ -114,7 +114,7 @@ export function sanitizeMarkup(markup) {
 export function userKeyboard() {
   return sanitizeMarkup({
     keyboard: [
-      [{ text: '📝 ارسال پیام' }],
+      [{ text: '📝 ارسال پیام' }, { text: '🕶 پیام ناشناس' }],
       [{ text: '📊 وضعیت پیام من' }, { text: '🗑 حذف پیام‌های خودم' }],
       [{ text: '📢 لیست چنل‌های مجموعه آرال' }],
       [{ text: '💬 انتقادات، پیشنهادات، گزارش مشکل' }],
