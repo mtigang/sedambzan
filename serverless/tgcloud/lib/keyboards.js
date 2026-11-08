@@ -785,6 +785,26 @@ export function ownerShiftDayNavInline(channelKey, dateStr, canNext) {
 }
 
 
+/** ناوبری روز برای ساب‌لیدر — فقط کانال خودش */
+export function subLeaderShiftDayNavInline(channelKey, dateStr, canNext) {
+  const ck = String(channelKey || '');
+  const d = String(dateStr || '');
+  const row = [
+    { text: '◀️ روز قبلی', callback_data: 'sl_daynav:' + ck + ':' + d + ':prev', style: 'primary' },
+  ];
+  if (canNext) {
+    row.push({ text: 'روز بعدی ▶️', callback_data: 'sl_daynav:' + ck + ':' + d + ':next', style: 'primary' });
+  }
+  return sanitizeMarkup({
+    inline_keyboard: [
+      row,
+      [{ text: '🔄 امروز', callback_data: 'sl_day:' + ck, style: 'success' }],
+      [{ text: '❌ لغو شیفت دوره فعلی', callback_data: 'sl_shift_cancel_menu:' + ck, style: 'danger' }],
+      [{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }],
+    ],
+  });
+}
+
 export function ownerShiftMenuInline() {
   return sanitizeMarkup({
     inline_keyboard: [

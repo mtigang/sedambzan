@@ -47,6 +47,7 @@ import {
   adminFbReplyInline,
   ownerShiftMenuInline,
   ownerShiftChannelPickInline,
+  subLeaderShiftDayNavInline,
   reviewNextInline,
   subLeaderKeyboard,
   adminPerfInline,
@@ -2755,7 +2756,7 @@ let note =
 
 
     
-    // ——— شیفت‌های کانال (۷ روز شمسی + لغو دوره فعلی) ———
+    // ——— شیفت‌های کانال ساب‌لیدر (گزارش روزانه مثل مالک، فقط کانال خودش) ———
     if (
       role === 'subleader' &&
       (text === '📋 شیفت‌های کانال' ||
@@ -2764,7 +2765,7 @@ let note =
     ) {
       try {
         const myCh = await getActiveSubLeaderChannel(userId);
-        if (!myCh) {
+        if (!myCh || !DEFAULT_CHANNELS[myCh]) {
           await api.sendMessage({
             chat_id: chatId,
             text: 'کانال ساب‌لیدری فعال نیست.',
@@ -2772,170 +2773,26 @@ let note =
           });
           return;
         }
-        const chTitle = (DEFAULT_CHANNELS[myCh] && DEFAULT_CHANNELS[myCh].title) || myCh;
-        const now = tehranNow();
-        const pdate = periodDateStr(now);
-
-        let allSh = [];
         try {
-          allSh = (await db.select().from(shifts).all()) || [];
-        } catch (e1) {
-          console.error('sl shifts select', e1);
-          try {
-            allSh =
-              (await db.select().from(shifts).where(eq(shifts.channelKey, myCh)).all()) || [];
-          } catch (e2) {
-            throw e2;
-          }
-        }
-
-        const forChannel = allSh.filter(function (s) {
-          const ck = String((s.channelKey != null ? s.channelKey : s.channel_key) || '');
-          const st = String(s.status || 'active');
-          // نمایش active و cancelled برای ساب‌لیدر/مالک
-          return ck === String(myCh) && (st === 'active' || st === 'cancelled');
-        });
-
-        // ۷ روز گذشته تا امروز — تاریخ شمسی
-        let body = '📋 شیفت‌های «' + chTitle + '»\n';
-        body += 'دوره فعلی: ' + toJalaliDisplay(pdate) + '\n';
-        body += 'برای لغو شیفت‌های دورهٔ فعلی از دکمه‌های زیر استفاده کنید.\n';
-
-        function addDaysIso(iso, delta) {
-          const parts = String(iso).split('-').map(Number);
-          const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
-          dt.setUTCDate(dt.getUTCDate() + delta);
-          return (
-            dt.getUTCFullYear() +
-            '-' +
-            String(dt.getUTCMonth() + 1).padStart(2, '0') +
-            '-' +
-            String(dt.getUTCDate()).padStart(2, '0')
-          );
-        }
-
-        for (let i = 0; i < 7; i++) {
-          const day = addDaysIso(now.date, -i);
-          const dayRows = forChannel
-            .filter(function (s) {
-              const sd = String((s.shiftDate != null ? s.shiftDate : s.shift_date) || '');
-              if (String(s.startHm) === String(s.endHm)) return false;
-              return sd === day || sd === 'perm' || sd === 'permanent';
-            })
-            .slice()
-            .sort(function (a, b) {
-              try {
-                return periodOrd(normHm(a.startHm)) - periodOrd(normHm(b.startHm));
-              } catch (_e) {
-                return String(a.startHm || '').localeCompare(String(b.startHm || ''));
-              }
-            });
-
-          body += '\n📅 ' + toJalaliDisplay(day);
-          if (i === 0) body += ' (امروز)';
-          body += '\n';
-          if (!dayRows.length) {
-            body += '  —\n';
-            continue;
-          }
-          for (const s of dayRows) {
-            let who = String(s.adminId != null ? s.adminId : s.admin_id || '?');
-            try {
-              const uid = Number(s.adminId != null ? s.adminId : s.admin_id);
-              who = displayName(await getUser(uid), uid);
-            } catch (_e) {}
-                        const tag =
-              String(s.shiftDate || '') === 'perm' || String(s.shiftDate || '') === 'permanent'
-                ? ' · دائم'
-                : '';
-            const stMark = String(s.status || '') === 'cancelled' ? ' · 🔴لغو' : '';
-            body +=
-              '  ' +
-              String(s.startHm || '').slice(0, 5) +
-              '–' +
-              String(s.endHm || '').slice(0, 5) +
-              ' | ' +
-              who +
-              tag +
-              stMark +
-              '\n';
-          }
-        }
-
-        // دکمه‌های لغو فقط برای دوره فعلی و فقط شیفت‌های هنوز active
-        const cancelSrc = forChannel.filter(function (s) {
-          if (String(s.status || 'active') !== 'active') return false;
-          if (String(s.startHm) === String(s.endHm)) return false;
-          const sd = String((s.shiftDate != null ? s.shiftDate : s.shift_date) || '');
-          return sd === pdate || sd === 'perm' || sd === 'permanent' || sd === now.date;
-        });
-        const cancelRows = [];
-        for (const s of cancelSrc.slice(0, 30)) {
-          let who = String(s.adminId != null ? s.adminId : '');
-          try {
-            const uid = Number(s.adminId != null ? s.adminId : s.admin_id);
-            who = displayName(await getUser(uid), uid);
-          } catch (_e) {}
-          cancelRows.push({
-            id: Number(s.id),
-            channelKey: String(myCh),
-            channelTitle: String(chTitle || ''),
-            startHm: String(s.startHm || s.start_hm || ''),
-            endHm: String(s.endHm || s.end_hm || ''),
-            adminId: Number(s.adminId != null ? s.adminId : s.admin_id) || 0,
-            name: String(who || ''),
-          });
-        }
-
+          await cancelInvalidShifts();
+        } catch (_e) {}
+        const now = tehranNow();
+        const dateStr = now.date;
+        const report = await buildOwnerChannelDayReport(myCh, dateStr);
+        const body = await formatOwnerChannelDayReport(report);
+        const markup = subLeaderShiftDayNavInline(myCh, dateStr, false);
         await api.sendMessage({
           chat_id: chatId,
           text: body.slice(0, 4000),
-          reply_markup: await roleKb(userId),
+          reply_markup: sanitizeMarkup(markup),
         });
-
-        if (cancelRows.length) {
-          try {
-            const markup = ownerCancelShiftsInline(cancelRows);
-            await api.sendMessage({
-              chat_id: chatId,
-              text: '❌ لغو شیفت دوره فعلی — روی ساعت بزنید تا از بیخ لغو شود:',
-              reply_markup: markup,
-            });
-          } catch (eBtn) {
-            console.error('cancel buttons', eBtn);
-            // fallback: دکمه‌های خیلی ساده فقط با ساعت
-            const simple = { inline_keyboard: [] };
-            for (let i = 0; i < cancelRows.length && i < 30; i++) {
-              const s = cancelRows[i];
-              const id = Number(s.id);
-              if (!id) continue;
-              const st = String(s.startHm || '').slice(0, 5);
-              const en = String(s.endHm || '').slice(0, 5);
-              simple.inline_keyboard.push([
-                {
-                  text: String('❌ ' + st + '-' + en),
-                  callback_data: String('own_sc:' + id),
-                  style: 'danger',
-                },
-              ]);
-            }
-            simple.inline_keyboard.push([
-              { text: 'بستن', callback_data: 'shift_close', style: 'primary' },
-            ]);
-            await api.sendMessage({
-              chat_id: chatId,
-              text: '❌ لغو شیفت (ساده):',
-              reply_markup: sanitizeMarkup(simple),
-            });
-          }
-        }
       } catch (e) {
         console.error('sl channel shifts', e);
         await api.sendMessage({
           chat_id: chatId,
           text:
-            'خطا در لیست شیفت‌ها: ' +
-            (e && (e.description || e.message) ? e.description || e.message : String(e)),
+            'خطا در گزارش شیفت‌ها: ' +
+            (e && (e.description || e.message) ? e.description || e.message : String(e)).slice(0, 200),
           reply_markup: await roleKb(userId),
         });
       }

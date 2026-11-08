@@ -175,6 +175,7 @@ import {
   ownerShiftListChannelInline,
   ownerShiftChannelPickInline,
   ownerShiftDayNavInline,
+  subLeaderShiftDayNavInline,
   ownerShiftMenuInline,
   reviewNextInline,
   reviewDoneInline,
@@ -3633,6 +3634,170 @@ if (data.startsWith('shift_cancel|') || data.startsWith('shift_cancel:')) {
 
     
     
+    // —— گزارش روزانه شیفت ساب‌لیدر (فقط کانال خودش) ——
+    if (data.startsWith('sl_day:') || data.startsWith('sl_daynav:')) {
+      try {
+        const roleSl = await getRole(userId);
+        if (roleSl !== 'subleader' && !isOwner(userId)) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط ساب‌لیدر', show_alert: true });
+          return;
+        }
+        const now = tehranNow();
+        let channelKey = '';
+        let dateStr = now.date;
+        if (data.startsWith('sl_daynav:')) {
+          const parts = data.split(':');
+          channelKey = parts[1] || '';
+          dateStr = parts[2] || now.date;
+          const dir = parts[3] || '';
+          if (dir === 'prev') dateStr = shiftCalendarDate(dateStr, -1);
+          else if (dir === 'next') dateStr = shiftCalendarDate(dateStr, 1);
+        } else {
+          channelKey = data.slice('sl_day:'.length);
+          dateStr = now.date;
+        }
+        if (!channelKey || !DEFAULT_CHANNELS[channelKey]) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'کانال نامعتبر', show_alert: true });
+          return;
+        }
+        // ساب‌لیدر فقط کانال خودش
+        if (!isOwner(userId)) {
+          let myCh = null;
+          try {
+            myCh = await getActiveSubLeaderChannel(userId);
+          } catch (_e) {}
+          if (!myCh || String(myCh) !== String(channelKey)) {
+            await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی به این کانال ندارید', show_alert: true });
+            return;
+          }
+        }
+        if (dateStr > now.date) dateStr = now.date;
+        const canNext = dateStr < now.date;
+        await api.answerCallbackQuery({ callback_query_id: cq.id });
+        const report = await buildOwnerChannelDayReport(channelKey, dateStr);
+        const text = await formatOwnerChannelDayReport(report);
+        const markup = subLeaderShiftDayNavInline(channelKey, dateStr, canNext);
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: text.slice(0, 4000),
+            reply_markup: sanitizeMarkup(markup),
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: text.slice(0, 4000),
+            reply_markup: sanitizeMarkup(markup),
+          });
+        }
+      } catch (e) {
+        console.error('sl_day report', e);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'خطا در گزارش',
+          show_alert: true,
+        });
+      }
+      return;
+    }
+
+    if (data.startsWith('sl_shift_cancel_menu:')) {
+      try {
+        const channelKey = data.slice('sl_shift_cancel_menu:'.length);
+        const roleSl = await getRole(userId);
+        if (roleSl !== 'subleader' && !isOwner(userId)) {
+          await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+          return;
+        }
+        if (!isOwner(userId)) {
+          let myCh = null;
+          try {
+            myCh = await getActiveSubLeaderChannel(userId);
+          } catch (_e) {}
+          if (!myCh || String(myCh) !== String(channelKey)) {
+            await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'دسترسی ندارید', show_alert: true });
+            return;
+          }
+          let ok = false;
+          try {
+            ok = await canManageOthersShifts(userId, channelKey);
+          } catch (_e) {}
+          if (!ok) {
+            await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'اجازه لغو شیفت ندارید', show_alert: true });
+            return;
+          }
+        }
+        await api.answerCallbackQuery({ callback_query_id: cq.id });
+        const now = tehranNow();
+        const pdate = periodDateStr(now);
+        const chTitle = (DEFAULT_CHANNELS[channelKey] && DEFAULT_CHANNELS[channelKey].title) || channelKey;
+        let rows = [];
+        try {
+          rows =
+            (await db
+              .select()
+              .from(shifts)
+              .where(and(eq(shifts.channelKey, String(channelKey)), eq(shifts.status, 'active')))
+              .all()) || [];
+        } catch (e1) {
+          try {
+            const all = (await db.select().from(shifts).all()) || [];
+            rows = all.filter(function (s) {
+              return (
+                String(s.channelKey || s.channel_key || '') === String(channelKey) &&
+                String(s.status || '') === 'active'
+              );
+            });
+          } catch (_e2) {
+            rows = [];
+          }
+        }
+        const cancelRows = [];
+        for (const s of rows) {
+          const sd = String(s.shiftDate ?? s.shift_date ?? '');
+          if (sd !== pdate && sd !== now.date && sd !== 'perm' && sd !== 'permanent') continue;
+          if (String(s.startHm || s.start_hm) === String(s.endHm || s.end_hm)) continue;
+          let who = String(s.adminId || s.admin_id || '');
+          try {
+            const uid = Number(s.adminId || s.admin_id);
+            who = displayName(await getUser(uid), uid);
+          } catch (_e) {}
+          cancelRows.push({
+            id: Number(s.id),
+            channelKey: String(channelKey),
+            channelTitle: String(chTitle),
+            startHm: String(s.startHm || s.start_hm || ''),
+            endHm: String(s.endHm || s.end_hm || ''),
+            adminId: Number(s.adminId || s.admin_id) || 0,
+            name: String(who || ''),
+          });
+        }
+        if (!cancelRows.length) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: 'شیفت فعالی برای لغو در دوره فعلی «' + chTitle + '» نیست.',
+          });
+          return;
+        }
+        const markup = ownerCancelShiftsInline(cancelRows);
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: '❌ لغو شیفت دوره فعلی — «' + chTitle + '»\nروی ساعت بزنید تا لغو شود:',
+          reply_markup: markup,
+        });
+      } catch (e) {
+        console.error('sl_shift_cancel_menu', e);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'خطا',
+          show_alert: true,
+        });
+      }
+      return;
+    }
+
+
     // —— گزارش روزانه شیفت مالک (یک کانال / یک روز) ——
     if (data === 'own_day_menu') {
       if (!isOwner(userId)) {
