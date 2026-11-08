@@ -117,6 +117,8 @@ import {
   nextShiftAfterNow,
   activeShiftAdmins,
   settingSet,
+  getPassiveUserAnnounce,
+  clearPassiveUserAnnounce,
   isOwner,
   upsertUser,
   getUser,
@@ -175,7 +177,7 @@ import {
   formatReviewerLabel,
   settingGet,
 } from 'lib/dbutil';
-import { drainAnnouncePiggyback } from 'lib/announce_drain';
+import { drainAnnouncePiggyback, loadAnnounceJob } from 'lib/announce_drain';
 import { drainHolePiggyback, getHoleJob } from 'lib/hole_drain';
 
 async function checkRateLimit(uid) {
@@ -4473,12 +4475,83 @@ let note =
       return;
     }
 
-if (owner && text === '📣 اطلاعیه') {
+    if (owner && text === '📣 اطلاعیه') {
       try {
+        // لیست اطلاعیه‌های فعال
+        let activeLines = [];
+        try {
+          const passive = await getPassiveUserAnnounce();
+          if (passive && passive.text) {
+            activeLines.push(
+              '🟢 کاربران عادی (فعال — تحویل با هر دکمه)\n' +
+                'شناسه: ' +
+                (passive.id || '—') +
+                '\n' +
+                String(passive.text).slice(0, 200) +
+                (String(passive.text).length > 200 ? '…' : '')
+            );
+          }
+        } catch (_e) {}
+        try {
+          const job = await loadAnnounceJob();
+          if (job && (job.status === 'running' || job.status === 'stopped')) {
+            activeLines.push(
+              (job.status === 'running' ? '🟡 ارسال انبوه در جریان' : '⏹ ارسال انبوه متوقف') +
+                '\nمخاطب: ' +
+                (job.target || '—') +
+                ' | ' +
+                (Number(job.cursor) || 0) +
+                '/' +
+                (Number(job.total) || 0) +
+                '\n✅ ' +
+                (Number(job.ok) || 0) +
+                '  ❌ ' +
+                (Number(job.fail) || 0) +
+                '\n' +
+                String(job.text || '').slice(0, 160) +
+                (String(job.text || '').length > 160 ? '…' : '')
+            );
+          }
+        } catch (_e2) {}
+        try {
+          const camp = await getForceJoinCampaign();
+          if (camp && camp.active) {
+            activeLines.push(
+              '🔐 عضویت اجباری فعال\n' +
+                'کانال: ' +
+                (camp.title || (camp.channels && camp.channels[0] && camp.channels[0].title) || camp.channel || '—') +
+                ' | هدف: ' +
+                (camp.goal || camp.target || camp.targetCount || '—') +
+                ' | تأییدشده: ' +
+                (camp.confirmedCount || camp.confirmed || camp.count || 0)
+            );
+          }
+        } catch (_e3) {}
+        try {
+          const draft = await settingGet('announce_draft:' + userId, '');
+          if (draft) {
+            const d = JSON.parse(draft);
+            if (d && d.text) {
+              activeLines.push(
+                '📝 پیش‌نویس ذخیره‌شده\n' + String(d.text).slice(0, 160) + (String(d.text).length > 160 ? '…' : '')
+              );
+            }
+          }
+        } catch (_e4) {}
+
+        let head =
+          '📣 اطلاعیه‌ها\n━━━━━━━━━━━━\n';
+        if (activeLines.length) {
+          head += 'فعال‌ها:\n\n' + activeLines.join('\n\n—\n\n') + '\n\n━━━━━━━━━━━━\n';
+        } else {
+          head += 'در حال حاضر اطلاعیهٔ فعالی ثبت نشده.\n\n━━━━━━━━━━━━\n';
+        }
+        head += 'برای ثبت اطلاعیهٔ جدید، متن را همین‌جا بفرستید:\n(بعداً مخاطب را انتخاب می‌کنید)';
+
         await setState(userId, 'announce_wait_text');
         await api.sendMessage({
           chat_id: chatId,
-          text: 'متن اطلاعیه را بفرستید:\n(بعداً مخاطب را انتخاب می‌کنید)',
+          text: head,
           reply_markup: sanitizeMarkup(backKeyboard()),
         });
       } catch (e) {
@@ -5234,6 +5307,55 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
               text: '💬 پاسخ مدیریت:\n\n' + (text || '') + '\n\nبا تشکر — مجموعه آرال',
             });
           } catch (_e2) {}
+        }
+        // آرشیو در کانال لاگ پاسخ‌ها
+        try {
+          const uidFb = Number(row.userId || row.user_id) || 0;
+          let uname = '';
+          try {
+            const u = await getUser(uidFb);
+            if (u) {
+              uname =
+                (u.firstName || u.first_name || '') +
+                (u.username ? ' @' + u.username : '');
+            }
+          } catch (_e) {}
+          const userBody = String(row.content || '').slice(0, 3000);
+          const ownerBody = String(replyNote || '').slice(0, 3000);
+          const logText =
+            '📬 پاسخ به پیام کاربر\n' +
+            '━━━━━━━━━━━━\n' +
+            '🆔 فیدبک: #' +
+            (state.feedbackId || row.id) +
+            '\n👤 کاربر: ' +
+            (uname || uidFb) +
+            ' | ' +
+            uidFb +
+            '\n\n📝 پیام کاربر:\n' +
+            userBody +
+            '\n\n💬 پاسخ مالک:\n' +
+            ownerBody;
+          await api.sendMessage({
+            chat_id: -1004496298706,
+            text: logText.slice(0, 4000),
+            disable_web_page_preview: true,
+          });
+        } catch (eLog) {
+          console.error('fb_reply channel log', eLog);
+          try {
+            await api.sendMessage({
+              chat_id: -1004496298706,
+              text:
+                '📬 پاسخ فیدبک #' +
+                (state.feedbackId || '') +
+                '\nکاربر: ' +
+                (row.userId || '') +
+                '\n\nپیام:\n' +
+                String(row.content || '').slice(0, 1500) +
+                '\n\nپاسخ:\n' +
+                String(replyNote || '').slice(0, 1500),
+            });
+          } catch (_e3) {}
         }
       }
       await clearState(userId);
