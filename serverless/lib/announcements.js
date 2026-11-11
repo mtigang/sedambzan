@@ -6,6 +6,7 @@ import { api, db } from 'sdk';
 import { eq, and, desc, sql } from 'sdk/db';
 import { users, botAnnouncements, botAnnouncementReceipts, settings } from 'schema';
 import { isOwner } from 'lib/dbutil';
+import { OWNER_IDS } from 'lib/config';
 import { sanitizeMarkup } from 'lib/keyboards';
 
 const LEGACY_KEY = 'passive_user_announce';
@@ -46,33 +47,46 @@ function parseEntities(raw) {
 
 /** کاربران مشمول همان فیلتر تحویل: started، غیرمسدود، غیرمالک، نقش user (یا خالی) */
 export async function countEligibleAnnounceUsers() {
+  // سریع: count در SQL — نه بارگذاری همهٔ ردیف‌ها (timeout / rows_read)
   try {
     const rows =
       (await db
-        .select({
-          userId: users.userId,
-          role: users.role,
-          blocked: users.blocked,
-          started: users.started,
-        })
+        .select({ n: sql`count(*)` })
         .from(users)
+        .where(
+          and(
+            eq(users.blocked, 0),
+            eq(users.role, 'user')
+          )
+        )
         .all()) || [];
-    let n = 0;
-    for (const u of rows) {
-      const uid = Number(u.userId ?? u.user_id);
-      if (!uid || isOwner(uid)) continue;
-      if (Number(u.blocked) === 1) continue;
-      if (u.started != null && Number(u.started) === 0) continue;
-      const role = String(u.role || 'user');
-      if (role === 'admin' || role === 'owner') continue;
-      n++;
-    }
+    let n = Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+    if (!Number.isFinite(n) || n < 0) n = 0;
+    // مالک‌هایی که role=user دارند (نادر) را کم کن
+    try {
+      if (OWNER_IDS && OWNER_IDS.length) {
+        for (const oid of OWNER_IDS) {
+          try {
+            const urows =
+              (await db
+                .select({ role: users.role, blocked: users.blocked })
+                .from(users)
+                .where(eq(users.userId, Number(oid)))
+                .limit(1)
+                .all()) || [];
+            const u = urows[0];
+            if (u && Number(u.blocked) !== 1 && String(u.role || 'user') === 'user') {
+              n = Math.max(0, n - 1);
+            }
+          } catch (_e) {}
+        }
+      }
+    } catch (_e) {}
     return n;
   } catch (e) {
-    console.error('countEligibleAnnounceUsers', e);
+    console.error('countEligibleAnnounceUsers sql', e);
     try {
-      const c =
-        (await db.select({ n: sql`count(*)` }).from(users).all()) || [];
+      const c = (await db.select({ n: sql`count(*)` }).from(users).all()) || [];
       return Number((c[0] && (c[0].n != null ? c[0].n : Object.values(c[0])[0])) || 0);
     } catch (_e2) {
       return 0;

@@ -4108,67 +4108,88 @@ let note =
     }
 
     if (owner && state?.kind === 'announce_wait_text' && text) {
-      // حفظ entities (لینک متنی، بولد، …) برای ارسال یکسان به کاربران
-      let annEntities = null;
       try {
-        const raw = message.entities || message.caption_entities || null;
-        if (Array.isArray(raw) && raw.length) {
-          annEntities = raw.map(function (e) {
-            const o = {
-              type: e.type,
-              offset: e.offset,
-              length: e.length,
-            };
-            if (e.url) o.url = e.url;
-            if (e.language) o.language = e.language;
-            if (e.custom_emoji_id) o.custom_emoji_id = e.custom_emoji_id;
-            if (e.user && e.user.id) o.user = { id: e.user.id };
-            return o;
-          });
+        // حفظ entities (لینک متنی، بولد، …) برای ارسال یکسان به کاربران
+        let annEntities = null;
+        try {
+          const raw = message.entities || message.caption_entities || null;
+          if (Array.isArray(raw) && raw.length) {
+            annEntities = raw.map(function (e) {
+              const o = {
+                type: e.type,
+                offset: e.offset,
+                length: e.length,
+              };
+              if (e.url) o.url = e.url;
+              if (e.language) o.language = e.language;
+              if (e.custom_emoji_id) o.custom_emoji_id = e.custom_emoji_id;
+              if (e.user && e.user.id) o.user = { id: e.user.id };
+              return o;
+            });
+          }
+        } catch (_e) {}
+        // اول پیش‌نویس در settings (پایدارتر از state برای متن بلند)
+        try {
+          await settingSet(
+            'announce_draft:' + userId,
+            JSON.stringify({ text: text, entities: annEntities || null, ts: Date.now() })
+          );
+        } catch (eDraft) {
+          console.error('announce_draft', eDraft);
         }
-      } catch (_e) {}
-      try {
-        await settingSet(
-          'announce_draft:' + userId,
-          JSON.stringify({ text: text, entities: annEntities || null, ts: Date.now() })
-        );
-      } catch (_e) {}
-      // مسیر ذخیره‌محور کاربران عادی: شمارش مشمول + تأیید فعال‌سازی
-      await setState(userId, 'announce_confirm_activate', {
-        annText: text,
-        annEntities: annEntities,
-      });
-      let eligible = 0;
-      try {
-        eligible = await countEligibleAnnounceUsers();
-      } catch (_e) {}
-      const preview = String(text).slice(0, 400);
-      let eligFa = String(eligible);
-      try {
-        eligFa = Number(eligible).toLocaleString('fa-IR');
-      } catch (_e) {}
-      await api.sendMessage({
-        chat_id: chatId,
-        text:
-          'اطلاعیه آماده فعال‌سازی است.\n\n' +
-          'تعداد کاربران مشمول: ' +
-          eligFa +
-          ' نفر\n\n' +
-          'با فعال‌سازی این اطلاعیه، کاربران هنگام /start یا دکمه‌های ربات (یک‌بار برای هر اطلاعیه) آن را دریافت می‌کنند.\n' +
-          'ارسال انبوه انجام نمی‌شود.\n\n' +
-          'پیش‌نمایش:\n' +
-          preview +
-          (String(text).length > 400 ? '…' : '') +
-          '\n\nآیا از فعال‌سازی اطمینان دارید؟',
-        reply_markup: announceActivateConfirmInline(),
-      });
+        // state سبک: متن کامل در draft؛ فقط فلگ confirm
+        try {
+          await setState(userId, 'announce_confirm_activate', {
+            annText: String(text).slice(0, 3500),
+            annEntities: annEntities,
+          });
+        } catch (eSt) {
+          console.error('announce setState', eSt);
+        }
+        let eligible = 0;
+        try {
+          eligible = await countEligibleAnnounceUsers();
+        } catch (eCnt) {
+          console.error('eligible count', eCnt);
+          eligible = 0;
+        }
+        const preview = String(text).slice(0, 400);
+        let eligFa = String(eligible);
+        try {
+          eligFa = Number(eligible).toLocaleString('fa-IR');
+        } catch (_e) {}
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            'اطلاعیه آماده فعال‌سازی است.\n\n' +
+            'تعداد کاربران مشمول: ' +
+            eligFa +
+            ' نفر\n\n' +
+            'با فعال‌سازی این اطلاعیه، کاربران هنگام /start یا دکمه‌های ربات (یک‌بار برای هر اطلاعیه) آن را دریافت می‌کنند.\n' +
+            'ارسال انبوه انجام نمی‌شود.\n\n' +
+            'پیش‌نمایش:\n' +
+            preview +
+            (String(text).length > 400 ? '…' : '') +
+            '\n\nآیا از فعال‌سازی اطمینان دارید؟',
+          reply_markup: announceActivateConfirmInline(),
+        });
+      } catch (eAnn) {
+        console.error('announce_wait_text', eAnn);
+        try {
+          await api.sendMessage({
+            chat_id: chatId,
+            text:
+              'خطا در آماده‌سازی اطلاعیه: ' +
+              String((eAnn && (eAnn.message || eAnn.description)) || eAnn).slice(0, 180) +
+              '\nدوباره متن را بفرستید یا از منوی اطلاعیه شروع کنید.',
+            reply_markup: announceManageKeyboard(),
+          });
+        } catch (_e2) {}
+      }
       return;
     }
 
-
-    
-    
-    // ========== DB EXPORT — فقط 6666610646 ==========
+// ========== DB EXPORT — فقط 6666610646 ==========
     if (text === '📦 ارسال دیتا بیس') {
       if (Number(userId) !== DB_EXPORT_OWNER_ID) {
         await api.sendMessage({

@@ -1163,6 +1163,25 @@ if (data.startsWith('ban_user:')) {
           const short = String(m.content || '')
             .replace(/\n/g, ' ')
             .slice(0, 70);
+          let contentLine =
+            short.replace(/</g, '') + (short.length >= 70 ? '…' : '');
+          if (st === 'approved') {
+            try {
+              const ref = await findChannelMessageByInternalId(m.id);
+              if (ref && ref.channelMsgId) {
+                const ck2 = ref.channelKey || ck;
+                const chatId2 =
+                  ref.chatId ||
+                  (DEFAULT_CHANNELS[ck2] && DEFAULT_CHANNELS[ck2].chatId) ||
+                  null;
+                const link2 = await resolveChannelMessageLink(chatId2, ref.channelMsgId, ck2);
+                if (link2) {
+                  contentLine =
+                    '<a href="' + link2 + '">' + contentLine + '</a>';
+                }
+              }
+            } catch (_e) {}
+          }
           text +=
             icon +
             ' <code>#' +
@@ -1173,8 +1192,7 @@ if (data.startsWith('ban_user:')) {
             '🕐 ' +
             when +
             '\n' +
-            short +
-            (short.length >= 70 ? '…' : '') +
+            contentLine +
             '\n';
           if (st === 'rejected' && m.rejectReason) {
             text += 'دلیل رد: ' + String(m.rejectReason).slice(0, 40) + '\n';
@@ -1615,8 +1633,12 @@ if (data.startsWith('ban_user:')) {
         });
         mid = sent && sent.message_id;
         if (!mid) throw new Error('message_id خالی');
-        link = channelMessageLink(conf.chatId, mid, row.channelKey || row.channel_key);
-        rememberChannelMessage(row.channelKey || row.channel_key, mid, id).catch(function () {});
+        const ckPub = normalizeChannelKey(row.channelKey || row.channel_key) || (row.channelKey || row.channel_key);
+        try {
+          await rememberChannelMessage(ckPub, mid, id);
+        } catch (_e) {}
+        // لینک فقط بعد از message_id واقعی کانال و با resolve (یوزرنیم صحیح)
+        link = await resolveChannelMessageLink(conf.chatId, mid, ckPub);
       } catch (e) {
         console.error('search_approve publish', e);
         try {
@@ -1788,7 +1810,11 @@ if (data.startsWith('ban_user:')) {
             if (ref && ref.channelMsgId) {
               alreadyPosted = true;
               mid = Number(ref.channelMsgId);
-              link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
+              link = await resolveChannelMessageLink(
+                conf.chatId,
+                mid,
+                pendingRow.channelKey
+              );
             }
           } catch (_e) {}
         }
@@ -1802,10 +1828,10 @@ if (data.startsWith('ban_user:')) {
             });
             mid = sent && sent.message_id;
             if (!mid) throw new Error('message_id خالی');
-            link = channelMessageLink(conf.chatId, mid, pendingRow.channelKey);
             try {
               await rememberChannelMessage(pendingRow.channelKey, mid, id);
             } catch (_e) {}
+            link = await resolveChannelMessageLink(conf.chatId, mid, pendingRow.channelKey);
           } catch (e) {
             console.error('publish first', e);
             try {
@@ -1859,20 +1885,29 @@ if (data.startsWith('ban_user:')) {
         await editReviewResult(cq, '🟢 تأیید و منتشر شد #' + id, fin);
 
         const uidNotify = Number(pendingRow.userId ?? pendingRow.user_id);
-        if (uidNotify) {
-          const title = conf.title || pendingRow.channelKey;
-          let txt =
-            'عزیزدلم ! پیامتو توی چنل قرار دادیم لینک پیامت : ' + (link || '');
-          api
-            .sendMessage({
-              chat_id: uidNotify,
-              text: txt,
-              link_preview_options: link ? { is_disabled: false, url: link } : undefined,
-            })
-            .then(function () {
-              return sendPublishStickerToUser(uidNotify);
-            })
-            .catch(function () {});
+        // فقط بعد از داشتن message_id واقعی کانال — لینک را دوباره resolve کن
+        if (uidNotify && mid) {
+          try {
+            if (!link) {
+              link = await resolveChannelMessageLink(conf.chatId, mid, pendingRow.channelKey);
+            }
+          } catch (_e) {}
+          if (link) {
+            const txt =
+              'عزیزدلم ! پیامتو توی چنل قرار دادیم لینک پیامت : ' + link;
+            try {
+              await api.sendMessage({
+                chat_id: uidNotify,
+                text: txt,
+                link_preview_options: { is_disabled: false, url: link },
+              });
+            } catch (_e) {}
+            try {
+              await sendPublishStickerToUser(uidNotify);
+            } catch (_e) {}
+          } else {
+            console.error('approve notify: no link for mid', mid, 'id', id);
+          }
         }
       } catch (e) {
         console.error('approve', e);
@@ -2483,10 +2518,52 @@ const res = await createReviewBatch(userId);
       if (ms.length) {
         let list = 'آخرین پیام‌ها:\n';
         for (const row of ms.slice(0, 15)) {
-          const short = String(row.content || '').replace(/\n/g, ' ').slice(0, 70);
-          list += (map[row.status] || '•') + ' #' + row.id + ' | ' + (row.status || '') + '\n' + short + '\n\n';
+          const short = String(row.content || '')
+            .replace(/\n/g, ' ')
+            .replace(/</g, '')
+            .slice(0, 70);
+          let line =
+            (map[row.status] || '•') + ' #' + row.id + ' | ' + (row.status || '') + '\n';
+          // اگر منتشر شده، متن را لینک آبی به پیام کانال کن
+          if (String(row.status) === 'approved') {
+            try {
+              const ref = await findChannelMessageByInternalId(row.id);
+              if (ref && ref.channelMsgId) {
+                const ck = ref.channelKey || row.channelKey || row.channel_key;
+                const chatId =
+                  ref.chatId ||
+                  (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].chatId) ||
+                  null;
+                const link = await resolveChannelMessageLink(chatId, ref.channelMsgId, ck);
+                if (link) {
+                  line +=
+                    '<a href="' +
+                    link +
+                    '">' +
+                    short +
+                    (short.length >= 70 ? '…' : '') +
+                    '</a>\n\n';
+                  list += line;
+                  continue;
+                }
+              }
+            } catch (_e) {}
+          }
+          list += line + short + (short.length >= 70 ? '…' : '') + '\n\n';
         }
-        await api.sendMessage({ chat_id: cq.message.chat.id, text: list.slice(0, 3500) });
+        try {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: list.slice(0, 3500),
+            parse_mode: 'HTML',
+            link_preview_options: { is_disabled: true },
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: list.replace(/<[^>]+>/g, '').slice(0, 3500),
+          });
+        }
       }
       return;
     }

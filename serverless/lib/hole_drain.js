@@ -9,7 +9,7 @@ import { DEFAULT_CHANNELS } from 'lib/config';
 import { settingGet, settingSet,
   rememberChannelMessage, acquireLock, releaseLock, toBoldHtml, dropMessageFromAllReviewBatches } from 'lib/dbutil';
 import { exactBodyKey } from 'lib/validation';
-import { channelMessageLink } from 'lib/resolve';
+import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
 import { flushProgressInline, sanitizeMarkup } from 'lib/keyboards';
 
 export const HOLE_BATCH = 10;
@@ -268,12 +268,14 @@ export async function drainHoleWave(opts) {
 
         // اطلاع کاربر — شکست آن پیام را ناموفق نمی‌کند
         try {
-          const link = channelMessageLink(conf.chatId, mid, channelKey);
-          let txt = 'عزیزدلم ! پیامتو توی چنل قرار دادیم لینک پیامت : ' + (link || '');
+          if (!mid) throw new Error('no mid');
+          const link = await resolveChannelMessageLink(conf.chatId, mid, channelKey);
+          if (!link) throw new Error('no link');
+          let txt = 'عزیزدلم ! پیامتو توی چنل قرار دادیم لینک پیامت : ' + link;
           await api.sendMessage({
             chat_id: row.userId,
             text: txt,
-            link_preview_options: link ? { is_disabled: false, url: link } : undefined,
+            link_preview_options: { is_disabled: false, url: link },
           });
         } catch (_e) {}
       } catch (e) {
