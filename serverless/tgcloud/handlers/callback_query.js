@@ -2096,10 +2096,10 @@ if (data.startsWith('reject_menu:')) {
         return;
       }
       if (res.status === 'incomplete') {
-        await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: true });
+        await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { adminId: userId, resumed: true });
         return;
       }
-      await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: false });
+      await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { adminId: userId, resumed: false });
       return;
     }
 
@@ -2367,7 +2367,7 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
               }
               if (msgs.length) {
                 await clearReviewUiMessages(userId, cq.message.chat.id).catch(function () {});
-                await sendReviewBatch(cq.message.chat.id, b, msgs, { resumed: true });
+                await sendReviewBatch(cq.message.chat.id, b, msgs, { adminId: userId, resumed: true });
                 return;
               }
               await clearReviewBatch(userId);
@@ -2410,7 +2410,7 @@ const res = await createReviewBatch(userId);
       }
       if (res.status === 'incomplete') {
         /* answered early */
-        await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: true });
+        await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { adminId: userId, resumed: true });
         return;
       }
       if (res.status === 'empty') {
@@ -2436,7 +2436,7 @@ const res = await createReviewBatch(userId);
           reply_markup: sanitizeMarkup(reviewTakenInline()),
         });
       } catch (_) {}
-      await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { resumed: false });
+      await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { adminId: userId, resumed: false });
       return;
     }
 

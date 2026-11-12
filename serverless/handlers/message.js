@@ -2093,10 +2093,10 @@ let note =
         return;
       }
       if (res.status === 'incomplete') {
-        await sendReviewBatch(chatId, res.batch, res.messages, { resumed: true });
+        await sendReviewBatch(chatId, res.batch, res.messages, { adminId: userId, resumed: true });
         return;
       }
-      await sendReviewBatch(chatId, res.batch, res.messages, { resumed: false });
+      await sendReviewBatch(chatId, res.batch, res.messages, { adminId: userId, resumed: false });
       return;
     }
 

@@ -3772,6 +3772,24 @@ export async function createReviewBatch(adminId) {
         });
       }
       if (pendingRows.length) {
+        // تکمیل تا ۱۸ از صف، تا Batch ناقص کوچک گیر نکند
+        try {
+          if (pendingRows.length < 18) {
+            const have = Object.create(null);
+            for (const r of pendingRows) have[Number(r.id)] = 1;
+            const extra = (await selectReviewablePending(adminId)) || [];
+            for (const m of extra) {
+              if (pendingRows.length >= 18) break;
+              const mid = Number(m && m.id);
+              if (!mid || have[mid]) continue;
+              if (String(m.status || '') !== 'pending') continue;
+              have[mid] = 1;
+              pendingRows.push(m);
+            }
+          }
+        } catch (eFill) {
+          console.error('incomplete topup', eFill);
+        }
         const batch = pruned.batch || (await getReviewBatch(adminId)) || {
           ids: [],
           batchNumber: 1,
@@ -3816,70 +3834,103 @@ export async function createReviewBatch(adminId) {
   }
 }
 
-/** ارسال پیام‌های Batch به ادمین (حداکثر ۱۰ + یک پیام سرتیتر) */
+/** ارسال پیام‌های Batch به ادمین (هدف: ۱۸ پیام + یک پیام سرتیتر) */
 export async function sendReviewBatch(chatId, batch, rows, opts) {
   const resumed = !!(opts && opts.resumed);
-  // همیشه تا ۱۸ پیام pending از روی ids بچ یا rows — با خواندن تازه از DB
-  const live = [];
-  const seen = Object.create(null);
-  const idOrder = (batch && Array.isArray(batch.ids) && batch.ids.length)
-    ? batch.ids.map(Number)
-    : (rows || []).map(function (r) { return Number(r && r.id); }).filter(Boolean);
-  for (const id of idOrder) {
-    if (!id || seen[id]) continue;
-    if (live.length >= 18) break;
-    try {
-      const fresh = await getMessageById(Number(id));
-      if (fresh && String(fresh.status || '') === 'pending') {
-        seen[id] = 1;
-        live.push(fresh);
-      }
-    } catch (_e) {}
+  const adminId = Number((opts && opts.adminId) || chatId) || null;
+  const TARGET = 18;
+
+  async function loadPendingByIds(ids, limit) {
+    const out = [];
+    const seen = Object.create(null);
+    for (const rawId of ids || []) {
+      const id = Number(rawId);
+      if (!id || seen[id]) continue;
+      if (out.length >= limit) break;
+      try {
+        const fresh = await getMessageById(id);
+        if (fresh && String(fresh.status || '') === 'pending') {
+          seen[id] = 1;
+          out.push(fresh);
+        }
+      } catch (_e) {}
+    }
+    return out;
   }
-  // اگر هنوز کمتر از ۱۸ و rows اضافه دارد
-  if (live.length < 18) {
+
+  // ۱) پیام‌های pending همین Batch
+  let live = await loadPendingByIds(
+    batch && Array.isArray(batch.ids) ? batch.ids : [],
+    TARGET
+  );
+  const seen = Object.create(null);
+  for (const r of live) seen[Number(r.id)] = 1;
+
+  // از rows هم پر کن
+  if (live.length < TARGET) {
     for (const row of rows || []) {
       if (!row) continue;
       const id = Number(row.id);
       if (!id || seen[id]) continue;
-      if (live.length >= 18) break;
       try {
         const fresh = await getMessageById(id);
         if (fresh && String(fresh.status || '') === 'pending') {
           seen[id] = 1;
           live.push(fresh);
+          if (live.length >= TARGET) break;
         }
       } catch (_e) {}
     }
   }
+
+  // ۲) اگر کمتر از ۱۸ بود از صف قابل‌بررسی top-up کن
+  if (live.length < TARGET && adminId) {
+    try {
+      const more = (await selectReviewablePending(adminId)) || [];
+      for (const m of more) {
+        if (live.length >= TARGET) break;
+        const id = Number(m && m.id);
+        if (!id || seen[id]) continue;
+        if (String(m.status || '') !== 'pending') continue;
+        seen[id] = 1;
+        live.push(m);
+      }
+    } catch (eTop) {
+      console.error('sendReviewBatch topup', eTop);
+    }
+  }
+
   if (!live.length) {
+    if (adminId) {
+      try {
+        await clearReviewBatch(adminId);
+      } catch (_e) {}
+    }
     await api.sendMessage({
       chat_id: chatId,
       text: '📭 در این Batch پیام pending نمانده. دوباره «📥 پیام‌های در انتظار» را بزنید.',
     });
-    return;
+    return { sent: 0, batch: null };
   }
-  const lastId = Number(live[live.length - 1].id);
-  // خوش‌آمد شیفت فقط یک‌بار، روی اولین دریافت Batch در بازه شیفت
+
   if (!resumed) {
     try {
       await maybeGreetShiftStart(chatId, chatId);
     } catch (_e) {}
   }
-  const queueHint = '';
+
   const head = resumed
     ? '⏳ Batch فعلی هنوز کامل بررسی نشده است.\nBatch شماره ' +
-      batch.batchNumber +
+      (batch && batch.batchNumber != null ? batch.batchNumber : '—') +
       ' — ' +
       live.length +
-      ' پیام باقی مانده.' +
-      queueHint
+      ' پیام برای بررسی مجدد / باقی‌مانده.'
     : '📥 Batch شماره ' +
-      batch.batchNumber +
+      (batch && batch.batchNumber != null ? batch.batchNumber : '—') +
       '\n' +
       live.length +
-      ' پیام برای بررسی' +
-      queueHint;
+      ' پیام برای بررسی';
+
   const uiIds = [];
   try {
     const headMsg = await api.sendMessage({ chat_id: chatId, text: head });
@@ -3890,46 +3941,86 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
       await api.sendMessage({ chat_id: chatId, text: head });
     } catch (_e2) {}
   }
-  for (const row of live) {
+
+  const deliveredIds = [];
+  const bn = batch && batch.batchNumber != null ? batch.batchNumber : 0;
+
+  async function sendOne(row) {
+    const ck = String((row.channelKey ?? row.channel_key) || '');
+    const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+    let senderLine = '';
     try {
-      const ck = String((row.channelKey ?? row.channel_key) || '');
-      const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-      // فقط مالک نام و آیدی فرستنده را می‌بیند
-      let senderLine = '';
+      if (isOwner(Number(chatId))) {
+        const suid = Number(row.userId ?? row.user_id);
+        let sname = String(suid || '');
+        try {
+          const su = await getUser(suid);
+          sname = displayName(su, suid);
+        } catch (_e) {}
+        senderLine = 'فرستنده: ' + sname + ' · <code>' + suid + '</code>\n';
+      }
+    } catch (_e) {}
+    const bodyTxt =
+      '#' +
+      row.id +
+      ' | ' +
+      title +
+      '\n' +
+      senderLine +
+      '\n' +
+      String(row.content || '').slice(0, 3600);
+    const sent = await api.sendMessage({
+      chat_id: chatId,
+      text: bodyTxt,
+      parse_mode: senderLine ? 'HTML' : undefined,
+      reply_markup: sanitizeMarkup(reviewInline(row.id, false, bn)),
+    });
+    return sent && (sent.message_id || sent.messageId);
+  }
+
+  for (const row of live) {
+    let okMid = null;
+    try {
+      okMid = await sendOne(row);
+    } catch (e1) {
+      console.error('sendReviewBatch try1', row.id, e1);
       try {
-        if (isOwner(Number(chatId))) {
-          const suid = Number(row.userId ?? row.user_id);
-          let sname = String(suid || '');
-          try {
-            const su = await getUser(suid);
-            sname = displayName(su, suid);
-          } catch (_e) {}
-          senderLine = 'فرستنده: ' + sname + ' · <code>' + suid + '</code>\n';
-        }
-      } catch (_e) {}
-      const bodyTxt =
-        '#' +
-        row.id +
-        ' | ' +
-        title +
-        '\n' +
-        senderLine +
-        '\n' +
-        String(row.content || '').slice(0, 3600);
-      const sent = await api.sendMessage({
-        chat_id: chatId,
-        text: bodyTxt,
-        parse_mode: senderLine ? 'HTML' : undefined,
-        reply_markup: sanitizeMarkup(reviewInline(row.id, false, batch.batchNumber)),
-      });
-      const mid = sent && (sent.message_id || sent.messageId);
-      if (mid) uiIds.push(Number(mid));
-    } catch (e) {
-      console.error('sendReviewBatch', row.id, e);
+        // یک بار دیگر با تأخیر کوتاه منطقی (بدون setTimeout در serverless: فقط retry فوری)
+        okMid = await sendOne(row);
+      } catch (e2) {
+        console.error('sendReviewBatch try2', row.id, e2);
+      }
+    }
+    if (okMid) {
+      uiIds.push(Number(okMid));
+      deliveredIds.push(Number(row.id));
     }
   }
+
+  // ۳) Batch را فقط با پیام‌هایی که واقعاً به ادمین رسید هم‌تراز کن
+  //    پیام‌های ارسال‌نشده در صف عمومی می‌مانند و Batch را قفل نمی‌کنند
+  if (adminId) {
+    try {
+      if (deliveredIds.length) {
+        const next = {
+          ids: deliveredIds,
+          batchNumber: bn || 1,
+          createdAt: (batch && batch.createdAt) || Date.now(),
+          periodDate: (batch && batch.periodDate) || periodDateStr(),
+        };
+        await saveReviewBatch(adminId, next);
+        batch.ids = deliveredIds;
+        batch.batchNumber = next.batchNumber;
+      } else {
+        await clearReviewBatch(adminId);
+      }
+    } catch (eSave) {
+      console.error('sendReviewBatch save ids', eSave);
+    }
+  }
+
   try {
-    const adminKey = Number(chatId);
+    const adminKey = Number(adminId || chatId);
     const prevRaw = await settingGet('review_ui:' + adminKey, '[]');
     let prev = [];
     try {
@@ -3942,7 +4033,21 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
   } catch (eUi) {
     console.error('review_ui save', eUi);
   }
+
+  // اگر هیچ پیام UI نرسید
+  if (!deliveredIds.length) {
+    try {
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '⚠️ ارسال پیام‌های Batch ناموفق بود (محدودیت تلگرام یا خطا).\nچند ثانیه بعد دوباره «📥 پیام‌های در انتظار» را بزنید.',
+      });
+    } catch (_e) {}
+  }
+
+  return { sent: deliveredIds.length, batch: batch };
 }
+
 
 /**
  * بررسی مجوز ادمین برای یک پیام.
