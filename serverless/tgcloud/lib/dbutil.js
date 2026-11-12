@@ -2569,20 +2569,90 @@ export async function restoreMistakenlyCancelledShifts() {
 /* ============================================================
  *  سیستم Batch بررسی پیام‌ها (Serverless-safe)
  *  - هیچ Pending ای خودکار برای ادمین ارسال نمی‌شود (No Push).
- *  - ادمین با دکمه‌ی «📥 پیام‌های در انتظار» یک Batch ده‌تایی می‌گیرد.
+ *  - ادمین با دکمه‌ی «📥 پیام‌های در انتظار» یک Batch به اندازه REVIEW_BATCH_SIZE می‌گیرد.
  *  - IDهای Batch در settings با کلید review_batch:<adminId> ذخیره می‌شوند.
- *  - Lock با Timestamp در DB (بدون setTimeout)؛ TTL کوتاه.
- *  - Batch state ≠ Message state: حذف Batch هیچ پیامی را تغییر نمی‌دهد.
+ *  - پیشرفت تحویل پس از هر sendMessage موفق به‌صورت افزایشی ذخیره می‌شود.
+ *  - Claim نرم (review_claim:<msgId>) از اختصاص هم‌زمان به چند بازبین جلوگیری می‌کند.
+ *  - Lock با Timestamp در DB (بدون worker دائمی)؛ TTL کوتاه.
+ *  - Batch state ≠ Message status: حذف Batch پیام را approve/reject نمی‌کند.
  * ============================================================ */
 
 export const REVIEW_BATCH_SIZE = 18;
-/** همیشه ۱۸ — تغییر نده بدون هماهنگی */
-export const REVIEW_BATCH_HARD = 18;
-const REVIEW_LOCK_TTL_MS = 10 * 1000;
+/** همیشه برابر REVIEW_BATCH_SIZE */
+export const REVIEW_BATCH_HARD = REVIEW_BATCH_SIZE;
+const REVIEW_LOCK_TTL_MS = 12 * 1000;
+const REVIEW_CLAIM_TTL_MS = 90 * 60 * 1000;
+const PUBLISHING_STUCK_MS = 20 * 60 * 1000;
+const BATCH_SEND_GAP_MS = 45;
+const BATCH_MAX_RETRIES_PER_MSG = 2;
 
 function reviewBatchKey(adminId) {
   return 'review_batch:' + Number(adminId);
 }
+function reviewClaimKey(msgId) {
+  return 'review_claim:' + Number(msgId);
+}
+function batchLog(event, fields) {
+  try {
+    console.log(JSON.stringify(Object.assign({ evt: 'batch', at: Date.now(), event: event }, fields || {})));
+  } catch (_e) {}
+}
+function escapeHtmlBatch(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function sleepMs(ms) {
+  const n = Math.max(0, Math.min(Number(ms) || 0, 8000));
+  if (n <= 0) return Promise.resolve();
+  return new Promise(function (resolve) { setTimeout(resolve, n); });
+}
+function parseTelegramRetryAfter(err) {
+  try {
+    if (!err) return 0;
+    if (err.parameters && err.parameters.retry_after != null) return Number(err.parameters.retry_after) || 0;
+    const resp = err.response || err;
+    if (resp && resp.parameters && resp.parameters.retry_after != null) return Number(resp.parameters.retry_after) || 0;
+    const msg = String(err.description || err.message || err || '');
+    const m = msg.match(/retry after (\d+)/i);
+    if (m) return Number(m[1]) || 0;
+  } catch (_e) {}
+  return 0;
+}
+function isTelegram429(err) {
+  try {
+    const code = Number(err && (err.error_code || err.code || err.statusCode)) || 0;
+    if (code === 429) return true;
+    const msg = String((err && (err.description || err.message)) || err || '').toLowerCase();
+    return msg.includes('too many requests') || msg.includes('retry after');
+  } catch (_e) { return false; }
+}
+function isPermanentTelegramError(err) {
+  try {
+    const code = Number(err && (err.error_code || err.code)) || 0;
+    if (code === 400 || code === 403 || code === 404) return true;
+    const msg = String((err && (err.description || err.message)) || '').toLowerCase();
+    if (msg.includes('chat not found') || msg.includes('blocked by the user')) return true;
+    if (msg.includes("can't parse entities") || msg.includes('parse entities')) return true;
+  } catch (_e) {}
+  return false;
+}
+function normalizeBatchState(raw, adminId) {
+  const b = raw && typeof raw === 'object' ? raw : {};
+  return {
+    ids: Array.isArray(b.ids) ? b.ids.map(Number).filter(Boolean) : [],
+    delivered: Array.isArray(b.delivered) ? b.delivered.map(Number).filter(Boolean) : [],
+    failed: Array.isArray(b.failed) ? b.failed.map(Number).filter(Boolean) : [],
+    batchNumber: Number(b.batchNumber) || 1,
+    createdAt: Number(b.createdAt) || Date.now(),
+    periodDate: b.periodDate || periodDateStr(),
+    version: Number(b.version) || 1,
+    adminId: Number(b.adminId || adminId) || Number(adminId) || 0,
+  };
+}
+
 
 /** آیا این رکورد shift همین الان (تهران) فعال است؟ */
 export function shiftActiveNow(s, now, pdate) {
@@ -3147,35 +3217,42 @@ export async function getReviewBatch(adminId) {
   if (!raw) return null;
   try {
     const b = JSON.parse(raw);
-    if (b && Array.isArray(b.ids)) return b;
+    if (b && Array.isArray(b.ids)) return normalizeBatchState(b, adminId);
   } catch (_e) {}
   return null;
 }
 
 /** برخلاف settingSet خطا را می‌اندازد تا Batch نیمه‌کاره ثبت نشود */
 async function saveReviewBatch(adminId, batch) {
+  const normalized = normalizeBatchState(batch, adminId);
+  normalized.version = (Number(normalized.version) || 0) + 1;
+  normalized.adminId = Number(adminId);
   const key = reviewBatchKey(adminId);
-  const value = JSON.stringify(batch);
+  const value = JSON.stringify(normalized);
   const rows = await db.select().from(settings).where(eq(settings.key, key)).all();
   if (rows && rows.length) {
-    await db.update(settings).set({ value }).where(eq(settings.key, key)).run();
+    await db.update(settings).set({ value: value }).where(eq(settings.key, key)).run();
   } else {
-    await db.insert(settings).values({ key, value }).run();
+    await db.insert(settings).values({ key: key, value: value }).run();
   }
-
   try {
     const raw = await settingGet('review_batch_index', '[]');
     let arr = [];
     try { arr = JSON.parse(raw || '[]') || []; } catch (_e) { arr = []; }
     if (!Array.isArray(arr)) arr = [];
     const aid = Number(adminId);
-    if (!arr.map(Number).includes(aid)) {
-      arr.push(aid);
-      if (arr.length > 500) arr = arr.slice(-500);
-      await settingSet('review_batch_index', JSON.stringify(arr));
+    if (normalized.ids && normalized.ids.length) {
+      if (!arr.map(Number).includes(aid)) {
+        arr.push(aid);
+        if (arr.length > 500) arr = arr.slice(-500);
+        await settingSet('review_batch_index', JSON.stringify(arr));
+      }
+    } else {
+      const next = arr.filter(function (x) { return Number(x) !== aid; });
+      if (next.length !== arr.length) await settingSet('review_batch_index', JSON.stringify(next));
     }
   } catch (_e) {}
-
+  return normalized;
 }
 
 /** فقط state Batch را پاک می‌کند؛ هیچ پیامی تغییر نمی‌کند */
@@ -3202,15 +3279,84 @@ export async function clearReviewUiMessages(adminId, chatId) {
 }
 
 export async function clearReviewBatch(adminId) {
-
+  try {
+    const old = await getReviewBatch(adminId);
+    if (old && Array.isArray(old.ids)) {
+      for (const id of old.ids) {
+        try { await releaseReviewClaim(id, adminId); } catch (_e) {}
+      }
+    }
+  } catch (_e) {}
   try {
     await db.delete(settings).where(eq(settings.key, reviewBatchKey(adminId))).run();
   } catch (e) {
     console.error('clearReviewBatch', e);
   }
+  try {
+    const raw = await settingGet('review_batch_index', '[]');
+    let arr = [];
+    try { arr = JSON.parse(raw || '[]') || []; } catch (_e) { arr = []; }
+    if (Array.isArray(arr)) {
+      const next = arr.filter(function (x) { return Number(x) !== Number(adminId); });
+      if (next.length !== arr.length) await settingSet('review_batch_index', JSON.stringify(next));
+    }
+  } catch (_e) {}
 }
 
 /** فقط IDهای هنوز pending را نگه می‌دارد */
+
+async function getReviewClaim(msgId) {
+  try {
+    const raw = await settingGet(reviewClaimKey(msgId), '');
+    if (!raw) return null;
+    const c = JSON.parse(raw);
+    if (!c || !c.adminId) return null;
+    if (c.expiresAt && Date.now() > Number(c.expiresAt)) {
+      try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run(); } catch (_e) {}
+      return null;
+    }
+    return c;
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function tryClaimReviewMessage(msgId, adminId, batchNumber) {
+  const id = Number(msgId);
+  const aid = Number(adminId);
+  if (!id || !aid) return { ok: false, code: 'bad' };
+  const existing = await getReviewClaim(id);
+  if (existing) {
+    if (Number(existing.adminId) === aid) return { ok: true, renewed: true };
+    return { ok: false, code: 'held', holder: Number(existing.adminId) };
+  }
+  const payload = JSON.stringify({
+    adminId: aid,
+    batchNumber: Number(batchNumber) || 0,
+    claimedAt: Date.now(),
+    expiresAt: Date.now() + REVIEW_CLAIM_TTL_MS,
+  });
+  try {
+    await db.insert(settings).values({ key: reviewClaimKey(id), value: payload }).run();
+    return { ok: true };
+  } catch (_e) {
+    const again = await getReviewClaim(id);
+    if (again && Number(again.adminId) === aid) return { ok: true, renewed: true };
+    return { ok: false, code: 'held', holder: again ? Number(again.adminId) : null };
+  }
+}
+
+async function releaseReviewClaim(msgId, adminId) {
+  const id = Number(msgId);
+  if (!id) return;
+  try {
+    const cur = await getReviewClaim(id);
+    if (!cur) return;
+    if (adminId != null && Number(cur.adminId) !== Number(adminId)) return;
+    await db.delete(settings).where(eq(settings.key, reviewClaimKey(id))).run();
+  } catch (_e) {}
+}
+
 export async function pruneReviewBatchToPending(adminId) {
   const old = await getReviewBatch(adminId);
   if (!old || !old.ids || !old.ids.length) return { cleared: true, ids: [] };
@@ -3247,9 +3393,11 @@ export async function dropMessageFromReviewBatch(adminId, msgId) {
     if (!old || !Array.isArray(old.ids)) return;
     const next = old.ids.map(Number).filter(function (id) { return id !== msgId; });
     if (next.length === old.ids.length) return;
+    try { await releaseReviewClaim(msgId, adminId); } catch (_e) {}
     if (!next.length) await clearReviewBatch(adminId);
     else {
       old.ids = next;
+      old.delivered = (old.delivered || []).map(Number).filter(function (id) { return id !== msgId; });
       await saveReviewBatch(adminId, old);
     }
   } catch (e) {
@@ -3268,8 +3416,7 @@ export async function dropMessageFromAllReviewBatches(msgId) {
     } catch (_e) {
       adminIds = [];
     }
-    // هرگز کل جدول settings را لود نکن (timeout / کندی شدید)
-    // اگر ایندکس خالی است فقط همین را رد شو؛ Batch خود ادمین جداگانه drop می‌شود
+    try { await releaseReviewClaim(msgId, null); } catch (_e) {}
     for (const aid of adminIds) {
       try {
         await dropMessageFromReviewBatch(aid, msgId);
@@ -3301,17 +3448,20 @@ export async function getReviewBatchMessages(adminId) {
 export async function isReviewBatchComplete(adminId) {
   const batch = await getReviewBatch(adminId);
   if (!batch || !batch.ids || !batch.ids.length) return true;
-  const rows = await Promise.all(
-    batch.ids.map(function (id) {
-      return getMessageById(Number(id)).catch(function () {
-        return null;
-      });
-    })
-  );
-  for (let i = 0; i < rows.length; i++) {
-    const st = rows[i] ? String(rows[i].status || '') : '';
-    // فقط pending واقعی Batch را باز نگه می‌دارد
+  for (const id of batch.ids) {
+    let row = null;
+    try {
+      row = await getMessageById(Number(id));
+    } catch (_e) {
+      row = null;
+    }
+    if (!row) continue;
+    const st = String(row.status || '');
     if (st === 'pending') return false;
+    if (st === 'publishing') {
+      const ra = row.reviewedAt ? new Date(row.reviewedAt).getTime() : 0;
+      if (!ra || Date.now() - ra < PUBLISHING_STUCK_MS) return false;
+    }
   }
   return true;
 }
@@ -3320,11 +3470,9 @@ export async function isReviewBatchComplete(adminId) {
  * با ۵۰k+ ردیف، ASC از id=0 قبل از رسیدن به صف واقعی بودجه را تمام می‌کند.
  * مسیر پایدار: چند برش DESC روی PK (سریع) → فیلتر pending → sort ASC → FIFO در همان پنجره.
  */
-async function selectReviewablePending(adminId) {
-  const need = 18; // hard size for all roles
-  // پنجرهٔ کافی برای صف چند هزارتایی؛ فقط ستون‌های سبک
-  const WINDOW = 12000;
-  const CHUNK = 3000;
+async function selectReviewablePending(adminId, limit) {
+  const need = Math.min(Math.max(Number(limit) || REVIEW_BATCH_SIZE, 1), 80);
+  const fetchLimit = Math.min(Math.max(need * 8, 24), 300);
 
   let ownerCh = '';
   if (isOwner(adminId)) {
@@ -3364,182 +3512,87 @@ async function selectReviewablePending(adminId) {
     return true;
   }
 
-  // مسیر سریع: WHERE status=pending روی کانال (اگر پشتیبانی شد و نتیجه داد)
+  let rows = [];
   try {
-    const want = 18;
-    let q = db
-      .select()
-      .from(messages)
-      .where(eq(messages.status, 'pending'))
-      .orderBy(asc(messages.id))
-      .limit(want * 4);
-    // بدون فیلتر کانال ممکن است روی جدول بزرگ timeout شود — فقط وقتی کانال مالک مشخص است
     if (ownerCh) {
-      q = db
-        .select()
-        .from(messages)
-        .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, ownerCh)))
-        .orderBy(asc(messages.id))
-        .limit(want * 3);
-      const rows = (await q.all()) || [];
-      const filtered = rows.filter(function (r) {
-        return passChannel(r.channelKey ?? r.channel_key);
-      });
-      if (filtered.length) {
-        return filtered.slice(0, want);
-      }
+      rows =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, ownerCh)))
+          .orderBy(asc(messages.id))
+          .limit(fetchLimit)
+          .all()) || [];
+    } else {
+      rows =
+        (await db
+          .select()
+          .from(messages)
+          .where(eq(messages.status, 'pending'))
+          .orderBy(asc(messages.id))
+          .limit(allowSet ? Math.min(fetchLimit * 3, 300) : fetchLimit)
+          .all()) || [];
     }
   } catch (eFast) {
-    console.error('selectReviewablePending fast', eFast);
+    console.error('selectReviewablePending query', eFast);
+    rows = [];
   }
 
-  // پاک‌سازی watermark خراب نسخهٔ قبلی (ASC از صفر)
-  try {
-    await settingSet('fifo_wm:owner', '0');
-  } catch (_e) {}
-
-  const light = [];
-  const seen = Object.create(null);
-  let cursorMax = null; // برای اسکن عمیق‌تر: id کمتر از این
-
-  try {
-    // حداکثر id جدول
-    const top =
-      (await db
-        .select({ id: messages.id })
-        .from(messages)
-        .orderBy(desc(messages.id))
-        .limit(1)
-        .all()) || [];
-    if (top[0] && top[0].id != null) cursorMax = Number(top[0].id) + 1;
-  } catch (e) {
-    console.error('selectReviewablePending maxid', e);
-  }
-
-  let fetched = 0;
-  while (fetched < WINDOW && light.length < need * 3) {
-    let batch = [];
+  const out = [];
+  for (const r of rows) {
+    if (!r) continue;
+    if (String(r.status || '') !== 'pending') continue;
+    const ck = String((r.channelKey ?? r.channel_key) || '');
+    if (!passChannel(ck)) continue;
+    const mid = Number(r.id);
     try {
-      if (cursorMax != null) {
-        batch =
-          (await db
-            .select({
-              id: messages.id,
-              status: messages.status,
-              channelKey: messages.channelKey,
-            })
-            .from(messages)
-            .where(sql`${messages.id} < ${cursorMax}`)
-            .orderBy(desc(messages.id))
-            .limit(CHUNK)
-            .all()) || [];
-      } else {
-        batch =
-          (await db
-            .select({
-              id: messages.id,
-              status: messages.status,
-              channelKey: messages.channelKey,
-            })
-            .from(messages)
-            .orderBy(desc(messages.id))
-            .limit(CHUNK)
-            .all()) || [];
-      }
-    } catch (e) {
-      console.error('selectReviewablePending chunk', e);
-      // fallback بدون where
-      try {
-        batch =
-          (await db
-            .select({
-              id: messages.id,
-              status: messages.status,
-              channelKey: messages.channelKey,
-            })
-            .from(messages)
-            .orderBy(desc(messages.id))
-            .limit(CHUNK)
-            .all()) || [];
-        if (cursorMax != null) {
-          batch = batch.filter(function (m) {
-            return Number(m.id) < cursorMax;
-          });
-        }
-      } catch (e2) {
-        console.error('selectReviewablePending chunk2', e2);
-        break;
-      }
-    }
-    if (!batch.length) break;
-    fetched += batch.length;
-    let minId = Number(batch[0].id) || 0;
-    for (const m of batch) {
-      const id = Number(m.id) || 0;
-      if (id < minId) minId = id;
-      if (seen[id]) continue;
-      seen[id] = 1;
-      const st = String(m.status || '');
-      if (st !== 'pending' && st !== 'publishing') continue;
-      const ck = String((m.channelKey ?? m.channel_key) || '');
-      if (!passChannel(ck)) continue;
-      light.push(m);
-    }
-    cursorMax = minId;
-    if (batch.length < CHUNK) break;
-    // اگر به اندازه کافی pending جمع شد، همان کافی است
-    if (light.length >= need * 2) break;
+      const claim = await getReviewClaim(mid);
+      if (claim && Number(claim.adminId) !== Number(adminId)) continue;
+    } catch (_e) {}
+    out.push(r);
+    if (out.length >= need) break;
   }
-
-  // FIFO: کوچک‌ترین id اول
-  light.sort(function (a, b) {
+  out.sort(function (a, b) {
     return (Number(a.id) || 0) - (Number(b.id) || 0);
   });
-
-  const ids = light.slice(0, need).map(function (m) {
-    return Number(m.id);
-  });
-  if (!ids.length) return [];
-
-  const rows = await Promise.all(
-    ids.map(function (id) {
-      return getMessageById(id).catch(function () {
-        return null;
-      });
-    })
-  );
-  const full = [];
-  for (const row of rows) {
-    if (row && (String(row.status) === 'pending' || String(row.status) === 'publishing')) {
-      full.push(row);
-    }
-  }
-  full.sort(function (a, b) {
-    return (Number(a.id) || 0) - (Number(b.id) || 0);
-  });
-  return full;
+  return out;
 }
 
+export async function hasEligiblePending(adminId) {
+  try {
+    const rows = await selectReviewablePending(adminId, 1);
+    return !!(rows && rows.length);
+  } catch (e) {
+    console.error('hasEligiblePending', e);
+    return true;
+  }
+}
 
 export async function finishReviewBatchIfComplete(adminId, messageId) {
   try {
     const batch = await getReviewBatch(adminId);
     if (!batch) {
-      // بدون اسکن کامل صف — hasMore را true فرض کن تا دکمه Batch بعدی بماند
-      return { inBatch: false, complete: true, hasMore: true, batch: null };
+      let hasMore = false;
+      try {
+        hasMore = await hasEligiblePending(adminId);
+      } catch (_e) {
+        hasMore = true;
+      }
+      return { inBatch: false, complete: true, hasMore: hasMore, batch: null };
     }
     const ids = (batch.ids || []).map(Number);
     const inBatch = messageId == null || ids.includes(Number(messageId));
-    // سریع: فقط اگر همه idها از لیست رفته‌اند complete است (بعد از drop)
-    // isReviewBatchComplete همچنان دقیق است ولی سبک‌تر از selectReviewablePending
     const complete = await isReviewBatchComplete(adminId);
     let hasMore = false;
     if (complete) {
       try {
         await clearReviewBatch(adminId);
       } catch (_e) {}
-      // اسکن کامل صف را نکن — دکمه «Batch بعدی» را نشان بده؛ اگر خالی باشد بعداً empty می‌گوید
-      hasMore = true;
+      try {
+        hasMore = await hasEligiblePending(adminId);
+      } catch (_e) {
+        hasMore = false;
+      }
     }
     return { inBatch: inBatch || complete, complete, hasMore, batch };
   } catch (e) {
@@ -3727,11 +3780,85 @@ export async function maybeGreetShiftStart(adminId, chatId) {
 }
 
 
+
+export async function recoverStuckPublishingForReviewer(adminId) {
+  const aid = Number(adminId);
+  let recovered = 0;
+  try {
+    let extra = [];
+    try {
+      extra =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.status, 'publishing'), eq(messages.reviewedBy, aid)))
+          .orderBy(desc(messages.id))
+          .limit(30)
+          .all()) || [];
+    } catch (_e) {
+      extra = [];
+    }
+    const batch = await getReviewBatch(aid);
+    const ids = batch && Array.isArray(batch.ids) ? batch.ids.map(Number) : [];
+    const seen = Object.create(null);
+    const list = [];
+    for (const id of ids) {
+      if (seen[id]) continue;
+      seen[id] = 1;
+      try {
+        const row = await getMessageById(id);
+        if (row) list.push(row);
+      } catch (_e) {}
+    }
+    for (const row of extra) {
+      const id = Number(row.id);
+      if (seen[id]) continue;
+      seen[id] = 1;
+      list.push(row);
+    }
+    for (const row of list) {
+      if (!row || String(row.status || '') !== 'publishing') continue;
+      const ra = row.reviewedAt ? new Date(row.reviewedAt).getTime() : 0;
+      if (ra && Date.now() - ra < PUBLISHING_STUCK_MS) continue;
+      const id = Number(row.id);
+      let ref = null;
+      try { ref = await findChannelMessageByInternalId(id); } catch (_e) {}
+      if (ref && ref.channelMsgId) {
+        try {
+          await db
+            .update(messages)
+            .set({ status: 'approved', reviewedAt: new Date() })
+            .where(and(eq(messages.id, id), eq(messages.status, 'publishing')))
+            .run();
+          recovered++;
+          batchLog('publishing_to_approved', { adminId: aid, msgId: id });
+          try { await dropMessageFromAllReviewBatches(id); } catch (_e) {}
+          continue;
+        } catch (_e) {}
+      }
+      try {
+        await db
+          .update(messages)
+          .set({ status: 'pending', reviewedBy: null, reviewedAt: null })
+          .where(and(eq(messages.id, id), eq(messages.status, 'publishing')))
+          .run();
+        recovered++;
+        batchLog('publishing_to_pending', { adminId: aid, msgId: id });
+      } catch (_e) {}
+    }
+  } catch (e) {
+    console.error('recoverStuckPublishingForReviewer', e);
+  }
+  return recovered;
+}
+
 export async function createReviewBatch(adminId) {
   const lockKey = 'review_batch_lock:' + adminId;
   const lock = await acquireLock(lockKey);
   if (!lock) return { status: 'busy' };
+  const t0 = Date.now();
   try {
+    try { await recoverStuckPublishingForReviewer(adminId); } catch (_e) {}
     const owner = isOwner(adminId);
     if (!owner) {
       const slCh = await getActiveSubLeaderChannel(adminId);
@@ -3774,12 +3901,12 @@ export async function createReviewBatch(adminId) {
       if (pendingRows.length) {
         // تکمیل تا ۱۸ از صف، تا Batch ناقص کوچک گیر نکند
         try {
-          if (pendingRows.length < 18) {
+          if (pendingRows.length < REVIEW_BATCH_SIZE) {
             const have = Object.create(null);
             for (const r of pendingRows) have[Number(r.id)] = 1;
             const extra = (await selectReviewablePending(adminId)) || [];
             for (const m of extra) {
-              if (pendingRows.length >= 18) break;
+              if (pendingRows.length >= REVIEW_BATCH_SIZE) break;
               const mid = Number(m && m.id);
               if (!mid || have[mid]) continue;
               if (String(m.status || '') !== 'pending') continue;
@@ -3803,10 +3930,9 @@ export async function createReviewBatch(adminId) {
       await clearReviewBatch(adminId);
     }
 
-    let candidates = (await selectReviewablePending(adminId)).filter(function (m) {
+    let candidates = ((await selectReviewablePending(adminId, REVIEW_BATCH_SIZE)) || []).filter(function (m) {
       return m && String(m.status || '') === 'pending';
     });
-    // یک‌بار دیگر از DB تأیید کن تا پیام بررسی‌شده برنگردد
     {
       const verified = [];
       for (const m of candidates) {
@@ -3817,94 +3943,128 @@ export async function createReviewBatch(adminId) {
       }
       candidates = verified;
     }
-    const clean = candidates.slice(0, 18);
-    if (!clean.length) return { status: 'empty' };
-
     const old = await getReviewBatch(adminId);
-    const batch = {
-      ids: clean.map((m) => Number(m.id)),
-      batchNumber: (old && Number(old.batchNumber) ? Number(old.batchNumber) : 0) + 1,
+    const batchNumber = (old && Number(old.batchNumber) ? Number(old.batchNumber) : 0) + 1;
+    const claimed = [];
+    for (const m of candidates) {
+      if (claimed.length >= REVIEW_BATCH_SIZE) break;
+      const cl = await tryClaimReviewMessage(m.id, adminId, batchNumber);
+      if (!cl.ok) continue;
+      claimed.push(m);
+    }
+    if (!claimed.length) {
+      batchLog('create_empty', { adminId: Number(adminId), ms: Date.now() - t0 });
+      return { status: 'empty' };
+    }
+    const batch = normalizeBatchState({
+      ids: claimed.map(function (m) { return Number(m.id); }),
+      delivered: [],
+      failed: [],
+      batchNumber: batchNumber,
       createdAt: Date.now(),
       periodDate: periodDateStr(),
-    };
+    }, adminId);
     await saveReviewBatch(adminId, batch);
-    return { status: 'created', batch, messages: clean };
+    batchLog('create_ok', { adminId: Number(adminId), batchNumber: batch.batchNumber, selected: batch.ids.length, ms: Date.now() - t0 });
+    return { status: 'created', batch, messages: claimed };
   } finally {
     await releaseLock(lockKey, lock);
   }
 }
 
-/** ارسال پیام‌های Batch به ادمین (هدف: ۱۸ پیام + یک پیام سرتیتر) */
+/**
+ * ارسال پیام‌های Batch — پیشرفت افزایشی بعد از هر send موفق
+ */
 export async function sendReviewBatch(chatId, batch, rows, opts) {
   const resumed = !!(opts && opts.resumed);
   const adminId = Number((opts && opts.adminId) || chatId) || null;
-  const TARGET = 18;
+  const t0 = Date.now();
+  const TIME_BUDGET_MS = 45000;
 
-  async function loadPendingByIds(ids, limit) {
-    const out = [];
-    const seen = Object.create(null);
-    for (const rawId of ids || []) {
-      const id = Number(rawId);
-      if (!id || seen[id]) continue;
-      if (out.length >= limit) break;
-      try {
-        const fresh = await getMessageById(id);
-        if (fresh && String(fresh.status || '') === 'pending') {
-          seen[id] = 1;
-          out.push(fresh);
-        }
-      } catch (_e) {}
-    }
-    return out;
+  if (!batch && adminId) {
+    try { batch = await getReviewBatch(adminId); } catch (_e) {}
   }
+  batch = normalizeBatchState(batch || { ids: [] }, adminId);
 
-  // ۱) پیام‌های pending همین Batch
-  let live = await loadPendingByIds(
-    batch && Array.isArray(batch.ids) ? batch.ids : [],
-    TARGET
-  );
+  const alreadyDelivered = Object.create(null);
+  for (const d of batch.delivered || []) alreadyDelivered[Number(d)] = 1;
+
+  const live = [];
   const seen = Object.create(null);
-  for (const r of live) seen[Number(r.id)] = 1;
+  const idOrder =
+    batch.ids && batch.ids.length
+      ? batch.ids.map(Number)
+      : (rows || [])
+          .map(function (r) {
+            return Number(r && r.id);
+          })
+          .filter(Boolean);
 
-  // از rows هم پر کن
-  if (live.length < TARGET) {
-    for (const row of rows || []) {
-      if (!row) continue;
-      const id = Number(row.id);
-      if (!id || seen[id]) continue;
-      try {
-        const fresh = await getMessageById(id);
-        if (fresh && String(fresh.status || '') === 'pending') {
-          seen[id] = 1;
-          live.push(fresh);
-          if (live.length >= TARGET) break;
-        }
-      } catch (_e) {}
+  for (const id of idOrder) {
+    if (!id || seen[id]) continue;
+    if (live.length >= REVIEW_BATCH_SIZE) break;
+    if (resumed && alreadyDelivered[id] && !(opts && opts.forceResend)) {
+      seen[id] = 1;
+      continue;
     }
+    try {
+      const fresh = await getMessageById(Number(id));
+      if (fresh && String(fresh.status || '') === 'pending') {
+        seen[id] = 1;
+        live.push(fresh);
+      }
+    } catch (_e) {}
   }
 
-  // ۲) اگر کمتر از ۱۸ بود از صف قابل‌بررسی top-up کن
-  if (live.length < TARGET && adminId) {
+  if (adminId && live.length < REVIEW_BATCH_SIZE) {
     try {
-      const more = (await selectReviewablePending(adminId)) || [];
+      const more = (await selectReviewablePending(adminId, REVIEW_BATCH_SIZE)) || [];
       for (const m of more) {
-        if (live.length >= TARGET) break;
+        if (live.length >= REVIEW_BATCH_SIZE) break;
         const id = Number(m && m.id);
-        if (!id || seen[id]) continue;
+        if (!id || seen[id] || alreadyDelivered[id]) continue;
         if (String(m.status || '') !== 'pending') continue;
+        const cl = await tryClaimReviewMessage(id, adminId, batch.batchNumber);
+        if (!cl.ok) continue;
         seen[id] = 1;
         live.push(m);
+        if (!(batch.ids || []).map(Number).includes(id)) {
+          batch.ids = (batch.ids || []).concat([id]);
+        }
       }
+      try {
+        await saveReviewBatch(adminId, batch);
+      } catch (_e) {}
     } catch (eTop) {
       console.error('sendReviewBatch topup', eTop);
     }
   }
 
   if (!live.length) {
+    if (adminId && (batch.ids || []).length) {
+      let still = 0;
+      for (const id of batch.ids) {
+        try {
+          const r = await getMessageById(id);
+          if (r && String(r.status) === 'pending') still++;
+        } catch (_e) {}
+      }
+      if (still && resumed) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '⏳ Batch شماره ' +
+            batch.batchNumber +
+            ' — ' +
+            still +
+            ' پیام تحویل‌شده هنوز بررسی نشده‌اند.\nپس از بررسی همه، Batch بعدی آزاد می‌شود.',
+        });
+        batchLog('send_resume_waiting_review', { adminId: adminId, batchNumber: batch.batchNumber, remaining: still });
+        return { sent: 0, batch: batch, waitingReview: true };
+      }
+    }
     if (adminId) {
-      try {
-        await clearReviewBatch(adminId);
-      } catch (_e) {}
+      try { await clearReviewBatch(adminId); } catch (_e) {}
     }
     await api.sendMessage({
       chat_id: chatId,
@@ -3914,22 +4074,12 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
   }
 
   if (!resumed) {
-    try {
-      await maybeGreetShiftStart(chatId, chatId);
-    } catch (_e) {}
+    try { await maybeGreetShiftStart(chatId, chatId); } catch (_e) {}
   }
 
   const head = resumed
-    ? '⏳ Batch فعلی هنوز کامل بررسی نشده است.\nBatch شماره ' +
-      (batch && batch.batchNumber != null ? batch.batchNumber : '—') +
-      ' — ' +
-      live.length +
-      ' پیام برای بررسی مجدد / باقی‌مانده.'
-    : '📥 Batch شماره ' +
-      (batch && batch.batchNumber != null ? batch.batchNumber : '—') +
-      '\n' +
-      live.length +
-      ' پیام برای بررسی';
+    ? '⏳ ادامه Batch شماره ' + batch.batchNumber + '\n' + live.length + ' پیام برای تحویل/بررسی.'
+    : '📥 Batch شماره ' + batch.batchNumber + '\n' + live.length + ' پیام برای بررسی';
 
   const uiIds = [];
   try {
@@ -3937,15 +4087,15 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
     const hid = headMsg && (headMsg.message_id || headMsg.messageId);
     if (hid) uiIds.push(Number(hid));
   } catch (_e) {
-    try {
-      await api.sendMessage({ chat_id: chatId, text: head });
-    } catch (_e2) {}
+    try { await api.sendMessage({ chat_id: chatId, text: head }); } catch (_e2) {}
   }
 
-  const deliveredIds = [];
-  const bn = batch && batch.batchNumber != null ? batch.batchNumber : 0;
+  const deliveredNow = [];
+  const failedNow = [];
+  let deferred = false;
+  const bn = batch.batchNumber || 0;
 
-  async function sendOne(row) {
+  async function sendOne(row, useHtml) {
     const ck = String((row.channelKey ?? row.channel_key) || '');
     const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
     let senderLine = '';
@@ -3957,97 +4107,153 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
           const su = await getUser(suid);
           sname = displayName(su, suid);
         } catch (_e) {}
-        senderLine = 'فرستنده: ' + sname + ' · <code>' + suid + '</code>\n';
+        if (useHtml) {
+          senderLine =
+            'فرستنده: ' +
+            escapeHtmlBatch(sname) +
+            ' · <code>' +
+            escapeHtmlBatch(String(suid)) +
+            '</code>\n';
+        } else {
+          senderLine = 'فرستنده: ' + sname + ' · ' + suid + '\n';
+        }
       }
     } catch (_e) {}
     const bodyTxt =
-      '#' +
-      row.id +
-      ' | ' +
-      title +
-      '\n' +
-      senderLine +
-      '\n' +
-      String(row.content || '').slice(0, 3600);
-    const sent = await api.sendMessage({
+      '#' + row.id + ' | ' + title + '\n' + senderLine + '\n' + String(row.content || '').slice(0, 3600);
+    const payload = {
       chat_id: chatId,
       text: bodyTxt,
-      parse_mode: senderLine ? 'HTML' : undefined,
       reply_markup: sanitizeMarkup(reviewInline(row.id, false, bn)),
-    });
+    };
+    if (useHtml && senderLine) payload.parse_mode = 'HTML';
+    const sent = await api.sendMessage(payload);
     return sent && (sent.message_id || sent.messageId);
   }
 
   for (const row of live) {
+    if (Date.now() - t0 > TIME_BUDGET_MS) {
+      deferred = true;
+      batchLog('send_budget_stop', { adminId: adminId, batchNumber: bn, deliveredNow: deliveredNow.length });
+      break;
+    }
     let okMid = null;
-    try {
-      okMid = await sendOne(row);
-    } catch (e1) {
-      console.error('sendReviewBatch try1', row.id, e1);
+    let lastErr = null;
+    for (let attempt = 0; attempt <= BATCH_MAX_RETRIES_PER_MSG; attempt++) {
       try {
-        // یک بار دیگر با تأخیر کوتاه منطقی (بدون setTimeout در serverless: فقط retry فوری)
-        okMid = await sendOne(row);
-      } catch (e2) {
-        console.error('sendReviewBatch try2', row.id, e2);
+        okMid = await sendOne(row, true);
+        if (okMid) break;
+      } catch (e1) {
+        lastErr = e1;
+        if (isTelegram429(e1)) {
+          const ra = parseTelegramRetryAfter(e1) || 1;
+          batchLog('send_429', { adminId: adminId, msgId: Number(row.id), retryAfter: ra, attempt: attempt });
+          if (ra * 1000 > Math.max(500, TIME_BUDGET_MS - (Date.now() - t0))) {
+            deferred = true;
+            okMid = null;
+            break;
+          }
+          await sleepMs(Math.min(ra * 1000, 5000));
+          continue;
+        }
+        if (isPermanentTelegramError(e1)) {
+          try {
+            okMid = await sendOne(row, false);
+            if (okMid) break;
+          } catch (ePlain) {
+            lastErr = ePlain;
+            okMid = null;
+            break;
+          }
+        }
+        await sleepMs(80 * (attempt + 1));
       }
     }
+
     if (okMid) {
       uiIds.push(Number(okMid));
-      deliveredIds.push(Number(row.id));
-    }
-  }
-
-  // ۳) Batch را فقط با پیام‌هایی که واقعاً به ادمین رسید هم‌تراز کن
-  //    پیام‌های ارسال‌نشده در صف عمومی می‌مانند و Batch را قفل نمی‌کنند
-  if (adminId) {
-    try {
-      if (deliveredIds.length) {
-        const next = {
-          ids: deliveredIds,
-          batchNumber: bn || 1,
-          createdAt: (batch && batch.createdAt) || Date.now(),
-          periodDate: (batch && batch.periodDate) || periodDateStr(),
-        };
-        await saveReviewBatch(adminId, next);
-        batch.ids = deliveredIds;
-        batch.batchNumber = next.batchNumber;
-      } else {
-        await clearReviewBatch(adminId);
+      deliveredNow.push(Number(row.id));
+      if (adminId) {
+        try {
+          const cur = (await getReviewBatch(adminId)) || batch;
+          const delivered = Array.from(new Set((cur.delivered || []).map(Number).concat([Number(row.id)])));
+          const ids = Array.from(new Set((cur.ids || []).map(Number).concat([Number(row.id)])));
+          cur.ids = ids;
+          cur.delivered = delivered;
+          await saveReviewBatch(adminId, cur);
+          batch.delivered = delivered;
+          batch.ids = ids;
+        } catch (eSave) {
+          console.error('incremental persist', eSave);
+        }
       }
-    } catch (eSave) {
-      console.error('sendReviewBatch save ids', eSave);
+    } else if (!deferred) {
+      failedNow.push(Number(row.id));
+      batchLog('send_fail', {
+        adminId: adminId,
+        msgId: Number(row.id),
+        err: String((lastErr && (lastErr.description || lastErr.message)) || lastErr || '').slice(0, 120),
+      });
+      if (adminId) {
+        try {
+          await releaseReviewClaim(row.id, adminId);
+          const cur = (await getReviewBatch(adminId)) || batch;
+          cur.ids = (cur.ids || []).map(Number).filter(function (x) { return x !== Number(row.id); });
+          cur.failed = Array.from(new Set((cur.failed || []).map(Number).concat([Number(row.id)])));
+          await saveReviewBatch(adminId, cur);
+          batch.ids = cur.ids;
+          batch.failed = cur.failed;
+        } catch (_e) {}
+      }
     }
+    await sleepMs(BATCH_SEND_GAP_MS);
   }
 
   try {
     const adminKey = Number(adminId || chatId);
     const prevRaw = await settingGet('review_ui:' + adminKey, '[]');
     let prev = [];
-    try {
-      prev = JSON.parse(prevRaw) || [];
-    } catch (_e) {
-      prev = [];
-    }
+    try { prev = JSON.parse(prevRaw) || []; } catch (_e) { prev = []; }
     const merged = prev.concat(uiIds).filter(Boolean).slice(-80);
     await settingSet('review_ui:' + adminKey, JSON.stringify(merged));
   } catch (eUi) {
     console.error('review_ui save', eUi);
   }
 
-  // اگر هیچ پیام UI نرسید
-  if (!deliveredIds.length) {
+  batchLog('send_done', {
+    adminId: adminId,
+    batchNumber: bn,
+    attempted: live.length,
+    delivered: deliveredNow.length,
+    failed: failedNow.length,
+    deferred: deferred ? 1 : 0,
+    resumed: resumed ? 1 : 0,
+    ms: Date.now() - t0,
+  });
+
+  if (!deliveredNow.length && !resumed) {
+    try {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: deferred
+          ? '⏳ تلگرام موقتاً محدودیت ارسال گذاشت. چند ثانیه بعد دوباره «📥 پیام‌های در انتظار» را بزنید.'
+          : '⚠️ ارسال پیام‌های Batch ناموفق بود.\nچند ثانیه بعد دوباره «📥 پیام‌های در انتظار» را بزنید.',
+      });
+    } catch (_e) {}
+  } else if (deferred) {
     try {
       await api.sendMessage({
         chat_id: chatId,
         text:
-          '⚠️ ارسال پیام‌های Batch ناموفق بود (محدودیت تلگرام یا خطا).\nچند ثانیه بعد دوباره «📥 پیام‌های در انتظار» را بزنید.',
+          '⏳ بخشی از Batch به‌خاطر محدودیت/زمان به تعویق افتاد.\nتحویل‌شده: ' +
+          deliveredNow.length +
+          '\nدوباره «📥 پیام‌های در انتظار» را بزنید تا ادامه برسد.',
       });
     } catch (_e) {}
   }
 
-  return { sent: deliveredIds.length, batch: batch };
+  return { sent: deliveredNow.length, failed: failedNow.length, deferred: deferred, batch: batch };
 }
-
 
 /**
  * بررسی مجوز ادمین برای یک پیام.
