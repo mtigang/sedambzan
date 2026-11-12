@@ -127,6 +127,7 @@ import {
   formatAnnouncementStats,
   announceManageKeyboard,
   announceActivateConfirmInline,
+  announceCapPickInline,
   announceDetailInline,
   announceCancelConfirmInline,
   getChannels,
@@ -1024,7 +1025,7 @@ export default async function (message) {
         text:
           '🗑 می‌خوای یکی از پیام‌های منتشرشده‌ت رو پاک کنی؟\n\n' +
           'آیدی پیام (#123) یا لینک عمومی کانال رو بفرست 🩵\n' +
-          'همون لحظه از کانال حذف می‌شه یادت باشه بیشتر از پنج تا پیام حذف نمیشه !',
+          'همون لحظه از کانال حذف می‌شه 🩵',
         reply_markup: sanitizeMarkup(backKeyboard()),
       });
       return;
@@ -1085,20 +1086,6 @@ export default async function (message) {
             text: 'فقط پیام‌های منتشرشده رو می‌تونی پاک کنی 🌬\nاگه هنوز تو صفه، از «📊 وضعیت پیام من» لغوش کن 🩵',
             reply_markup: sanitizeMarkup(backKeyboard()),
           });
-          return;
-        }
-        // سقف ۵ درخواست موفق
-        let delCount = 0;
-        try {
-          delCount = Number(await settingGet('user_del_ok:' + userId, '0')) || 0;
-        } catch (_e) {}
-        if (delCount >= 5) {
-          await api.sendMessage({
-            chat_id: chatId,
-            text: 'سقف ۵ تا حذف پر شده 🎀\nفعلاً بیشتر نمی‌تونی پاک کنی 🩵',
-            reply_markup: await roleKb(userId),
-          });
-          await clearState(userId);
           return;
         }
         // حذف مستقیم از کانال بدون تأیید مالک
@@ -1308,6 +1295,34 @@ if (text === '📝 ارسال پیام') {
               : st === 'publishing'
                 ? '⏳ داره می‌ره کانال'
                 : '🔵 تو صف';
+        let queueLine = '';
+        if (st === 'pending' || st === 'publishing') {
+          try {
+            const qinfo = await estimateQueueAhead(
+              String(row.channelKey || row.channel_key || ''),
+              Number(row.id),
+              12000
+            );
+            const ahead = Number(qinfo && qinfo.ahead) || 0;
+            const pos = ahead + 1;
+            const ck = String(row.channelKey || row.channel_key || '');
+            const chTitle =
+              (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck || 'کانال';
+            if (ahead > 0) {
+              queueLine =
+                '\nصبور باش ! تو صف { ' +
+                chTitle +
+                ' } حدودا نفر ' +
+                toFaDigits(String(pos)) +
+                ' هستی { یعنی ' +
+                toFaDigits(String(ahead)) +
+                ' تا جلوتر از توست }';
+            } else {
+              queueLine =
+                '\nصبور باش ! تقریباً اول صف { ' + chTitle + ' } هستی';
+            }
+          } catch (_eQ) {}
+        }
         body +=
           badge +
           '\n' +
@@ -1317,6 +1332,7 @@ if (text === '📝 ارسال پیام') {
           (short.length >= 70 ? '…' : '') +
           '\n🕐 ' +
           when +
+          queueLine +
           '\n────────────\n';
         if (st === 'pending') {
           cancelRows.push([
@@ -1491,7 +1507,12 @@ if (text === '📝 ارسال پیام') {
       await api.sendMessage({
         chat_id: chatId,
         text: FEEDBACK_HINT,
-        reply_markup: sanitizeMarkup(backKeyboard()),
+        reply_markup: sanitizeMarkup({
+          inline_keyboard: [
+            [{ text: '📝 ارسال پیام', callback_data: 'user_goto:send', style: 'primary' }],
+            [{ text: '◀️ انصراف', callback_data: 'user_goto:back', style: 'danger' }],
+          ],
+        }),
         parse_mode: 'Markdown',
       });
       return;
@@ -1956,7 +1977,6 @@ let note =
             ' } هستی';
         }
         note += '\n\nیکی دیگه هم می‌تونی بفرستی، یا ◀️ بازگشت';
-        if (v.autoFixed) note += '\n\nیه کم متنت رو مرتب کردم و فرستادم ، بخونش 🫧';
         await api.sendMessage({
           chat_id: chatId,
           text: note,
@@ -3230,15 +3250,6 @@ let note =
       return;
     }
 
-    if (owner && text === '📈 تحلیل داده') {
-      await api.sendMessage({
-        chat_id: chatId,
-        text: '📈 تحلیل داده\nکانال را انتخاب کنید:',
-        reply_markup: sanitizeMarkup(dataAnalysisChannelInline()),
-      });
-      return;
-    }
-
     if (owner && text === '📬 پیام کاربران') {
       try {
         let list = [];
@@ -3651,6 +3662,11 @@ let note =
       } catch (e) {
         console.error('photo', e);
       }
+      const dmKb = sanitizeMarkup({
+        inline_keyboard: [
+          [{ text: '✉️ ارسال پیام مستقیم', callback_data: 'owner_dm:' + id, style: 'success' }],
+        ],
+      });
       if (!photoMsg) {
         await api.sendMessage({
           chat_id: chatId,
@@ -3661,7 +3677,16 @@ let note =
             '\nنقش: ' + (uu?.role || 'user') +
             '\n📨 ' + ms.length + ' | 🟡' + pe + ' 🟢' + ap + ' 🔴' + rj,
           parse_mode: 'Markdown',
+          reply_markup: dmKb,
         });
+      } else {
+        try {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'عملیات کاربر 🆔 ' + id,
+            reply_markup: dmKb,
+          });
+        } catch (_e) {}
       }
       if (ms.length) {
         const last = ms.sort((a, b) => b.id - a.id).slice(0, 12);
@@ -4137,9 +4162,8 @@ let note =
         } catch (eDraft) {
           console.error('announce_draft', eDraft);
         }
-        // state سبک: متن کامل در draft؛ فقط فلگ confirm
         try {
-          await setState(userId, 'announce_confirm_activate', {
+          await setState(userId, 'announce_pick_cap', {
             annText: String(text).slice(0, 3500),
             annEntities: annEntities,
           });
@@ -4161,17 +4185,16 @@ let note =
         await api.sendMessage({
           chat_id: chatId,
           text:
-            'اطلاعیه آماده فعال‌سازی است.\n\n' +
-            'تعداد کاربران مشمول: ' +
+            'اطلاعیه آماده است.\n\n' +
+            'کاربران مشمول تقریبی: ' +
             eligFa +
             ' نفر\n\n' +
-            'با فعال‌سازی این اطلاعیه، کاربران هنگام /start یا دکمه‌های ربات (یک‌بار برای هر اطلاعیه) آن را دریافت می‌کنند.\n' +
-            'ارسال انبوه انجام نمی‌شود.\n\n' +
             'پیش‌نمایش:\n' +
             preview +
             (String(text).length > 400 ? '…' : '') +
-            '\n\nآیا از فعال‌سازی اطمینان دارید؟',
-          reply_markup: announceActivateConfirmInline(),
+            '\n\nبرای چند هزار کاربر فعال شود؟\n' +
+            '(پس از رسیدن به سقف، اطلاعیه دیگر به کاربران جدید نشان داده نمی‌شود)',
+          reply_markup: announceCapPickInline(),
         });
       } catch (eAnn) {
         console.error('announce_wait_text', eAnn);

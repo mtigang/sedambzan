@@ -236,10 +236,9 @@ export function backKeyboard() {
 export function settingsKeyboard(botOn, fridayOn, viewerId) {
   const rows = [
       [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '🔐 عضویت اجباری' }],
-      [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
+      [{ text: '📣 اطلاعیه' }],
       [{ text: '⏰ ساعت کاری' }, { text: '🧪 تست کانال‌ها' }],
       [{ text: '🕐 حالت شیفت ۱۲/۲۴' }],
-      [{ text: '📈 تحلیل داده' }],
   ];
   // فقط برای این کاربر
   if (Number(viewerId) === 8434360251) {

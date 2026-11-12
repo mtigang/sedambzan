@@ -289,10 +289,13 @@ async function bumpAnnouncementCounter(id, field, delta) {
 /**
  * فعال‌سازی اطلاعیه جدید برای کاربران عادی
  */
-export async function activateUserAnnouncement(text, entities, createdBy) {
+export async function activateUserAnnouncement(text, entities, createdBy, maxUsers) {
   const body = String(text || '').trim().slice(0, 4000);
   if (!body) return { ok: false, text: 'متن خالی است.' };
   const eligible = await countEligibleAnnounceUsers();
+  let cap = maxUsers == null || maxUsers === '' ? null : Number(maxUsers);
+  if (cap != null && (!Number.isFinite(cap) || cap < 1)) cap = null;
+  const targetEligible = cap == null ? eligible : Math.min(eligible, cap);
   try {
     await db
       .insert(botAnnouncements)
@@ -300,7 +303,7 @@ export async function activateUserAnnouncement(text, entities, createdBy) {
         text: body,
         entitiesJson: entities ? JSON.stringify(entities) : null,
         status: 'active',
-        eligibleCount: eligible,
+        eligibleCount: targetEligible,
         deliveredCount: 0,
         failCount: 0,
         createdBy: Number(createdBy) || null,
@@ -326,10 +329,16 @@ export async function activateUserAnnouncement(text, entities, createdBy) {
           entities: entities || null,
           at: Date.now(),
           dbId: row.id,
+          maxUsers: cap,
         })
       );
+      if (cap != null) {
+        try {
+          await settingSet('announce_cap:' + row.id, String(cap));
+        } catch (_e) {}
+      }
     }
-    return { ok: true, announcement: row, eligible: eligible };
+    return { ok: true, announcement: row, eligible: targetEligible, maxUsers: cap };
   } catch (e) {
     console.error('activateUserAnnouncement', e);
     // fallback فقط settings
@@ -447,6 +456,23 @@ export function announceManageKeyboard() {
   });
 }
 
+export function announceCapPickInline() {
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [
+        { text: '۱ هزار', callback_data: 'ann_m:cap:1000', style: 'primary' },
+        { text: '۲ هزار', callback_data: 'ann_m:cap:2000', style: 'primary' },
+      ],
+      [
+        { text: '۵ هزار', callback_data: 'ann_m:cap:5000', style: 'primary' },
+        { text: '۱۰ هزار', callback_data: 'ann_m:cap:10000', style: 'primary' },
+      ],
+      [{ text: 'همه کاربران مشمول', callback_data: 'ann_m:cap:all', style: 'success' }],
+      [{ text: '❌ انصراف', callback_data: 'ann_m:abort', style: 'danger' }],
+    ],
+  });
+}
+
 export function announceActivateConfirmInline() {
   return sanitizeMarkup({
     inline_keyboard: [
@@ -551,6 +577,23 @@ export async function maybeDeliverPassiveAnnounce(userId, chatId) {
     for (const ann of active) {
       if (sentThisCall >= 2) break;
       const aid = Number(ann.id);
+      // سقف ارسال (چند هزار کاربر)
+      try {
+        let cap = null;
+        try {
+          const rawCap = await settingGet('announce_cap:' + aid, '');
+          if (rawCap) cap = Number(rawCap);
+        } catch (_e) {}
+        if (cap == null) {
+          const elig = Number(ann.eligibleCount ?? ann.eligible_count);
+          const del = Number(ann.deliveredCount ?? ann.delivered_count) || 0;
+          // اگر eligibleCount کمتر از کل کاربران ست شده بود به‌عنوان سقف
+          if (Number.isFinite(elig) && elig > 0 && del >= elig) continue;
+        } else if (Number.isFinite(cap) && cap > 0) {
+          const del = Number(ann.deliveredCount ?? ann.delivered_count) || 0;
+          if (del >= cap) continue;
+        }
+      } catch (_eCap) {}
       if (!(await tryClaimDelivery(aid, uid))) continue;
 
       const entities = parseEntities(ann.entitiesJson ?? ann.entities_json);

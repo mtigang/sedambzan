@@ -100,6 +100,7 @@ import {
   formatAnnouncementStats,
   announceManageKeyboard,
   announceActivateConfirmInline,
+  announceCapPickInline,
   announceDetailInline,
   announceCancelConfirmInline,
 } from 'lib/dbutil';
@@ -1006,6 +1007,118 @@ if (data.startsWith('ban_user:')) {
       } catch (_e) {}
       return;
     }
+
+
+    if (data === 'user_goto:back') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try { await clearState(userId); } catch (_e) {}
+      try {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text: 'برگشتی 🩵',
+          reply_markup: await roleKb(userId),
+        });
+      } catch (_e) {}
+      return;
+    }
+
+    if (data === 'user_goto:send') {
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      try {
+        await setState(userId, 'user_send', {});
+      } catch (_e) {}
+      try {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text:
+            '📝 پیام کانال را بفرست.\nبا پیشوند کانال شروع کن (مثل: صدام بزن ...)',
+          reply_markup: sanitizeMarkup(backKeyboard()),
+        });
+      } catch (_e) {}
+      return;
+    }
+
+    if (data.startsWith('owner_dm:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const tid = Number(data.slice('owner_dm:'.length));
+      if (!tid) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'آیدی نامعتبر', show_alert: true });
+        return;
+      }
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await setState(userId, 'owner_dm_content', { targetId: tid });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text: '✉️ پیام مستقیم برای کاربر ' + tid + ' را بفرستید:',
+        reply_markup: sanitizeMarkup(backKeyboard()),
+      });
+      return;
+    }
+
+    if (data.startsWith('ann_m:cap:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const capRaw = data.slice('ann_m:cap:'.length);
+      const st = await getState(userId);
+      let annText = st && (st.kind === 'announce_pick_cap' || st.kind === 'announce_confirm_activate') ? st.annText : null;
+      let annEntities = st && st.annEntities ? st.annEntities : null;
+      if (!annText) {
+        try {
+          const raw = await settingGet('announce_draft:' + userId, '');
+          if (raw) {
+            const d = JSON.parse(raw);
+            annText = d.text;
+            annEntities = d.entities;
+          }
+        } catch (_e) {}
+      }
+      if (!annText) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'متن پیدا نشد', show_alert: true });
+        return;
+      }
+      let maxUsers = null;
+      if (capRaw !== 'all') {
+        maxUsers = Number(capRaw) || 0;
+        if (maxUsers < 1) maxUsers = null;
+      }
+      await setState(userId, 'announce_confirm_activate', {
+        annText: annText,
+        annEntities: annEntities,
+        maxUsers: maxUsers,
+      });
+      let eligible = 0;
+      try {
+        eligible = await countEligibleAnnounceUsers();
+      } catch (_e) {}
+      const target = maxUsers == null ? eligible : Math.min(eligible, maxUsers);
+      let eligFa = String(eligible);
+      let tgtFa = String(target);
+      try {
+        eligFa = Number(eligible).toLocaleString('fa-IR');
+        tgtFa = Number(target).toLocaleString('fa-IR');
+      } catch (_e) {}
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          'اطلاعیه آماده فعال‌سازی است.\n\n' +
+          'مشمول کل: ' +
+          eligFa +
+          ' نفر\n' +
+          'سقف ارسال این اطلاعیه: ' +
+          (maxUsers == null ? 'همه مشمول‌ها' : tgtFa + ' نفر') +
+          '\n\nبا فعال‌سازی، کاربران هنگام /start یا دکمه‌های ربات (یک‌بار) دریافت می‌کنند.\n' +
+          'آیا تأیید می‌کنید؟',
+        reply_markup: announceActivateConfirmInline(),
+      });
+      return;
+    }
+
 
     // مشاهده کاربر از نتیجه جستجوی پیام
     if (data.startsWith('smsg_user:') || data.startsWith('smsg_more:')) {
@@ -4571,6 +4684,13 @@ if (data.startsWith('own_shift:')) {
       return;
     }
 
+
+    // تحلیل داده حذف شده از پنل
+    if (data === 'da:back' || data.startsWith('da:ch:') || data.startsWith('da:p:') || data.startsWith('da:m:')) {
+      await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'این بخش حذف شده است', show_alert: true });
+      return;
+    }
+
     // —— تحلیل داده ——
     if (data === 'da:back') {
       if (!isOwner(userId)) {
@@ -5685,7 +5805,13 @@ if (data.startsWith('sl_setch:')) {
         return;
       }
       await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فعال می‌شود…' });
-      const res = await activateUserAnnouncement(annText, annEntities, userId);
+      let maxUsers = st && st.maxUsers != null ? st.maxUsers : null;
+      try {
+        if (maxUsers == null && st && st.kind === 'announce_confirm_activate' && st.maxUsers != null) {
+          maxUsers = st.maxUsers;
+        }
+      } catch (_e) {}
+      const res = await activateUserAnnouncement(annText, annEntities, userId, maxUsers);
       await clearState(userId);
       if (!res.ok) {
         await api.sendMessage({ chat_id: cq.message.chat.id, text: res.text || 'خطا' });

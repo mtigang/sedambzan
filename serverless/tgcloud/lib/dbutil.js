@@ -2479,7 +2479,7 @@ export async function getStatsDashboardText() {
         })
         .from(messages)
         .orderBy(desc(messages.id))
-        .limit(4000)
+        .limit(15000)
         .all()) || [];
     for (const m of sample) {
       const subD = tehranDateOfTs(m.submittedAt);
@@ -2507,48 +2507,54 @@ export async function getStatsDashboardText() {
     '📊 داشبورد آماری' +
     _nl +
     _nl +
-    '📨 کل پیام‌ها: ' +
+    '① از اول تا الان (شمارش مستقیم)' +
+    _nl +
+    '• کل پیام‌ها: ' +
     total +
     _nl +
-    '🟡 در انتظار: ' +
+    '• در انتظار: ' +
     pe +
     _nl +
-    '🟢 تأیید شده: ' +
+    '• تأیید شده: ' +
     ap +
     _nl +
-    '🔴 رد شده: ' +
+    '• رد شده: ' +
     rj +
     _nl +
-    _nl +
-    '📅 امروز (تهران)' +
-    _nl +
-    '📨 جدید: ' +
-    todayNew +
-    ' | 🟡 صف: ' +
-    todayPe +
-    ' | 🟢' +
-    todayAp +
-    ' | 🔴' +
-    todayRj +
-    _nl +
-    _nl +
-    '👥 کاربران: ' +
+    '• کاربران: ' +
     userCount +
     _nl +
-    '👮 ادمین‌ها (یکتا): ' +
+    '• ادمین‌های یکتا: ' +
     adminUnique +
     _nl +
-    '⏰ شیفت فعال امروز: ' +
+    _nl +
+    '② نمونه ۱۵ هزار پیام اخیر' +
+    _nl +
+    '📅 امروز (تهران) از روی همین نمونه:' +
+    _nl +
+    '• جدید امروز: ' +
+    todayNew +
+    _nl +
+    '• صف امروز: ' +
+    todayPe +
+    _nl +
+    '• تأیید امروز: ' +
+    todayAp +
+    _nl +
+    '• رد امروز: ' +
+    todayRj +
+    _nl +
+    '• شیفت فعال امروز: ' +
     shToday +
     _nl +
     _nl +
-    '📺 تفکیک کانال:' +
+    '📺 تفکیک کانال (کل با count یا نمونه اخیر):' +
     _nl +
     by +
     _nl +
     (accurate
-      ? '✅ آمار کل و تفکیک کانال از شمارش واقعی دیتابیس.'
-      : 'ℹ️ بخشی از آمار از شمارش واقعی؛ در صورت محدودیت زمان، تفکیک/امروز از نمونهٔ اخیر.') +
+      ? '✅ بخش «از اول» و تفکیک کانال از count واقعی است. امروز از نمونه ۱۵هزارتایی اخیر.'
+      : 'ℹ️ بخش «از اول» count است؛ تفکیک/امروز از نمونه ۱۵هزارتایی اخیر.') +
     _nl;
 
   return text;
@@ -4966,6 +4972,7 @@ export {
   formatAnnouncementStats,
   announceManageKeyboard,
   announceActivateConfirmInline,
+  announceCapPickInline,
   announceDetailInline,
   announceCancelConfirmInline,
 } from 'lib/announcements';

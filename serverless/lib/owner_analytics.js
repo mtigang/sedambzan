@@ -713,6 +713,49 @@ export async function buildOwnerChannelDayReport(channelKey, dateStr) {
   const items = [];
   const adminSet = Object.create(null);
 
+  // نمونه سبک برای شمارش بررسی هر ادمین در بازه شیفت همان روز
+  let reviewSample = [];
+  try {
+    reviewSample =
+      (await db
+        .select({
+          id: messages.id,
+          reviewedBy: messages.reviewedBy,
+          reviewedAt: messages.reviewedAt,
+          status: messages.status,
+          channelKey: messages.channelKey,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(4000)
+        .all()) || [];
+  } catch (_e) {
+    reviewSample = [];
+  }
+  function countReviewsForShift(adminId, startHm, endHm) {
+    const aid = Number(adminId);
+    if (!aid) return 0;
+    let n = 0;
+    for (const m of reviewSample) {
+      if (Number(m.reviewedBy ?? m.reviewed_by) !== aid) continue;
+      const mck = String((m.channelKey ?? m.channel_key) || '');
+      if (mck && mck !== ck) continue;
+      const st = String(m.status || '');
+      if (st !== 'approved' && st !== 'rejected') continue;
+      const rd = tehranDateOfTs(m.reviewedAt);
+      if (rd !== day) continue;
+      const hm = tehranHmOfTs(m.reviewedAt);
+      if (!hm) continue;
+      try {
+        if (startHm && endHm && startHm !== endHm) {
+          if (!inRange(hm, startHm, endHm)) continue;
+        }
+      } catch (_e) {}
+      n++;
+    }
+    return n;
+  }
+
   let sumMins = 0;
   let nCompleted = 0;
   let nIncomplete = 0;
@@ -748,6 +791,7 @@ export async function buildOwnerChannelDayReport(channelKey, dateStr) {
       minutes: mins,
       logical: logical,
       statusDb: String(s.status || ''),
+      reviewCount: countReviewsForShift(aid, start, end),
     });
   }
 
@@ -831,6 +875,7 @@ export async function formatOwnerChannelDayReport(report) {
     const stFa = DAY_STATUS_FA[it.logical] || it.logical;
     const start = String(it.startHm || '').slice(0, 5);
     const end = String(it.endHm || '').slice(0, 5);
+    const reviews = Number(it.reviewCount) || 0;
     text +=
       '\n• ' +
       name +
@@ -840,7 +885,9 @@ export async function formatOwnerChannelDayReport(report) {
       end +
       '\n  مدت: ' +
       formatDurationFa(it.minutes) +
-      '\n  وضعیت: ' +
+      '\n  بررسی‌ها: ' +
+      reviews +
+      '\n  نتیجه شیفت: ' +
       stFa +
       '\n';
     if (text.length > 3500) {
