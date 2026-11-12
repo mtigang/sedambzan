@@ -2117,9 +2117,45 @@ let note =
         return;
       }
       if (res.status === 'empty') {
+        let extra = '';
+        try {
+          const d = res.diag;
+          if (d) {
+            const allow = (d.allowed || []).join(', ') || '—';
+            const shifts = (d.shiftKeys || []).join(', ') || '—';
+            let byAllow = '';
+            const pba = d.pendingByAllowed || {};
+            const keys = Object.keys(pba);
+            for (let i = 0; i < keys.length; i++) {
+              byAllow += '\n• ' + keys[i] + ': ' + pba[keys[i]];
+            }
+            let sample = '';
+            const pbs = d.pendingByChannelSample || {};
+            const sk = Object.keys(pbs);
+            for (let i = 0; i < Math.min(sk.length, 8); i++) {
+              sample += '\n• ' + sk[i] + ': ~' + pbs[sk[i]] + ' (نمونه)';
+            }
+            extra =
+              '\n\n—— تشخیص ——\n' +
+              'ساعت تهران: ' +
+              (d.nowHm || '') +
+              ' | تاریخ: ' +
+              (d.date || '') +
+              '\nشیفت فعال: ' +
+              shifts +
+              '\nکانال مجاز بررسی: ' +
+              allow +
+              '\nکل pending: ' +
+              (d.pendingTotal != null ? d.pendingTotal : '?') +
+              (byAllow ? '\npending کانال مجاز:' + byAllow : '') +
+              (sample ? '\nتوزیع نمونه اخیر:' + sample : '');
+          }
+        } catch (_e) {}
         await api.sendMessage({
           chat_id: chatId,
-          text: '📭 در حال حاضر پیام در انتظاری برای کانال شیفت فعال شما وجود ندارد.',
+          text:
+            '📭 در حال حاضر پیام در انتظاری برای کانال شیفت فعال شما وجود ندارد.' +
+            extra,
           reply_markup: await roleKb(userId),
         });
         return;

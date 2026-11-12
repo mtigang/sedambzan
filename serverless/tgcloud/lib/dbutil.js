@@ -2670,10 +2670,30 @@ export function shiftActiveNow(s, now, pdate) {
   if (!start || !end || start === end) return false;
   const sd = String(s.shiftDate ?? s.shift_date ?? '');
   if (sd === 'perm' || sd === 'permanent') return false;
-  // فقط دورهٔ تقویمی فعلی
-  if (sd !== String(pdate)) return false;
-  // هر ساعتی که مالک/سیستم ثبت کرده — فقط بازه زمانی چک می‌شود
-  return inRange(now.hm, start, end);
+  const today = String(pdate || now.date || '');
+  const calToday = String(now.date || today);
+  // تاریخ امروز (period یا تقویم)
+  if (sd === today || sd === calToday) {
+    return inRange(now.hm, start, end);
+  }
+  // شیفت overnight ثبت‌شده روی دیروز: اگر الان داخل بازه زمانی است بپذیر
+  if (inRange(now.hm, start, end)) {
+    try {
+      const parts = String(today).split('-').map(Number);
+      if (parts.length === 3 && parts[0]) {
+        const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+        dt.setUTCDate(dt.getUTCDate() - 1);
+        const y =
+          dt.getUTCFullYear() +
+          '-' +
+          String(dt.getUTCMonth() + 1).padStart(2, '0') +
+          '-' +
+          String(dt.getUTCDate()).padStart(2, '0');
+        if (sd === y) return true;
+      }
+    } catch (_e) {}
+  }
+  return false;
 }
 
 /** کلید کانال‌هایی که ادمین همین الان برایشان شیفت فعال دارد */
@@ -3550,8 +3570,102 @@ export async function isReviewBatchComplete(adminId) {
  * با ۵۰k+ ردیف، ASC از id=0 قبل از رسیدن به صف واقعی بودجه را تمام می‌کند.
  * مسیر پایدار: چند برش DESC روی PK (سریع) → فیلتر pending → sort ASC → FIFO در همان پنجره.
  */
+
+/** تشخیص صف pending برای یک بازبین — فقط خواندنی */
+export async function diagnoseReviewQueue(adminId) {
+  const aid = Number(adminId);
+  const now = tehranNow();
+  const pdate = periodDateStr(now);
+  const info = {
+    adminId: aid,
+    nowHm: now.hm,
+    date: now.date,
+    pdate: pdate,
+    isOwner: isOwner(aid),
+    shiftKeys: [],
+    allowed: [],
+    pendingTotal: null,
+    pendingByAllowed: {},
+    pendingByChannelSample: {},
+    claimHints: 0,
+  };
+  try {
+    info.shiftKeys = (await activeShiftChannelKeys(aid)) || [];
+  } catch (e) {
+    info.shiftKeysError = String((e && e.message) || e).slice(0, 120);
+  }
+  try {
+    info.allowed = (await allowedReviewChannels(aid)) || [];
+  } catch (e) {
+    info.allowedError = String((e && e.message) || e).slice(0, 120);
+  }
+  try {
+    const rows =
+      (await db
+        .select({ n: sql`count(*)` })
+        .from(messages)
+        .where(eq(messages.status, 'pending'))
+        .all()) || [];
+    info.pendingTotal = Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+  } catch (e) {
+    info.pendingTotalError = String((e && e.message) || e).slice(0, 120);
+  }
+  // نمونه pending اخیر برای توزیع کانال
+  try {
+    const sample =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+        })
+        .from(messages)
+        .where(eq(messages.status, 'pending'))
+        .orderBy(desc(messages.id))
+        .limit(500)
+        .all()) || [];
+    const by = Object.create(null);
+    for (const m of sample) {
+      const raw = String((m.channelKey ?? m.channel_key) || '');
+      const nk = normalizeChannelKey(raw) || raw || '?';
+      by[nk] = (by[nk] || 0) + 1;
+    }
+    info.pendingByChannelSample = by;
+  } catch (e) {
+    info.sampleError = String((e && e.message) || e).slice(0, 120);
+  }
+  // شمارش per allowed با variants
+  for (const ck of info.allowed || []) {
+    const nk = normalizeChannelKey(ck) || ck;
+    let n = 0;
+    const variants = [nk, ck];
+    const conf = DEFAULT_CHANNELS[nk];
+    if (conf) {
+      if (conf.key) variants.push(conf.key);
+      if (conf.title) variants.push(conf.title);
+    }
+    const seen = Object.create(null);
+    for (const v of variants) {
+      if (!v || seen[v]) continue;
+      seen[v] = 1;
+      try {
+        const rows =
+          (await db
+            .select({ n: sql`count(*)` })
+            .from(messages)
+            .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, v)))
+            .all()) || [];
+        n += Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+      } catch (_e) {}
+    }
+    info.pendingByAllowed[nk || ck] = n;
+  }
+  return info;
+}
+
 async function selectReviewablePending(adminId, limit) {
   const need = Math.min(Math.max(Number(limit) || REVIEW_BATCH_SIZE, 1), 80);
+  const perVariant = Math.min(Math.max(need * 3, 30), 150);
 
   let ownerCh = '';
   if (isOwner(adminId)) {
@@ -3562,26 +3676,20 @@ async function selectReviewablePending(adminId, limit) {
     } catch (_e) {}
   }
 
-  const allowSet = Object.create(null);
-  let restrictChannels = true;
+  // کانال‌های مجاز
+  let channelKeys = [];
   if (isOwner(adminId)) {
-    if (ownerCh) {
-      allowSet[ownerCh] = true;
-    } else {
-      restrictChannels = false;
-    }
+    if (ownerCh) channelKeys = [ownerCh];
+    else channelKeys = Object.keys(DEFAULT_CHANNELS || {});
   } else {
     try {
       const allowList = await allowedReviewChannels(adminId);
-      if (!allowList || !allowList.length) {
-        batchLog('select_no_allow', { adminId: Number(adminId) });
-        return [];
-      }
-      for (const k of allowList) {
-        const raw = String(k || '');
-        const nk = normalizeChannelKey(raw) || raw;
-        if (raw) allowSet[raw] = true;
-        if (nk) allowSet[nk] = true;
+      const seen = Object.create(null);
+      for (const k of allowList || []) {
+        const nk = normalizeChannelKey(k) || String(k || '');
+        if (!nk || seen[nk]) continue;
+        seen[nk] = true;
+        channelKeys.push(nk);
       }
     } catch (e) {
       console.error('selectReviewablePending allow', e);
@@ -3589,92 +3697,124 @@ async function selectReviewablePending(adminId, limit) {
     }
   }
 
-  // الگوی ثابت و تست‌شدهٔ شمارش صف (adminShiftCard): فقط status=pending، بدون orderBy
-  let light = [];
-  try {
-    light =
-      (await db
-        .select({
-          id: messages.id,
-          status: messages.status,
-          channelKey: messages.channelKey,
-        })
-        .from(messages)
-        .where(eq(messages.status, 'pending'))
-        .all()) || [];
-  } catch (e1) {
-    try {
-      const allm = (await db.select().from(messages).all()) || [];
-      light = [];
-      for (const m of allm) {
-        if (String(m.status || '') !== 'pending') continue;
-        light.push({
-          id: m.id,
-          status: m.status,
-          channelKey: m.channelKey ?? m.channel_key,
-        });
+  if (!channelKeys.length) {
+    batchLog('select_no_allow', { adminId: Number(adminId) });
+    return [];
+  }
+
+  function keyVariants(ck) {
+    const out = [];
+    const seen = Object.create(null);
+    function add(v) {
+      const s = String(v || '').trim();
+      if (!s || seen[s]) return;
+      seen[s] = true;
+      out.push(s);
+    }
+    add(ck);
+    const nk = normalizeChannelKey(ck) || ck;
+    add(nk);
+    const conf = (DEFAULT_CHANNELS && (DEFAULT_CHANNELS[nk] || DEFAULT_CHANNELS[ck])) || null;
+    if (conf) {
+      add(conf.key);
+      add(conf.title);
+    }
+    return out;
+  }
+
+  const collected = [];
+  const seenId = Object.create(null);
+  let queryErrors = 0;
+
+  for (let ci = 0; ci < channelKeys.length; ci++) {
+    const ck = channelKeys[ci];
+    const variants = keyVariants(ck);
+    for (let vi = 0; vi < variants.length; vi++) {
+      const variant = variants[vi];
+      let rows = [];
+      try {
+        rows =
+          (await db
+            .select()
+            .from(messages)
+            .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, variant)))
+            .orderBy(asc(messages.id))
+            .limit(perVariant)
+            .all()) || [];
+      } catch (eQ) {
+        queryErrors++;
+        rows = [];
       }
-    } catch (e2) {
-      console.error('selectReviewablePending load', e1, e2);
-      return [];
+      for (const r of rows) {
+        if (!r) continue;
+        const mid = Number(r.id);
+        if (!mid || seenId[mid]) continue;
+        if (String(r.status || '') !== 'pending') continue;
+        seenId[mid] = 1;
+        collected.push(r);
+      }
     }
   }
 
-  // FIFO در حافظه
-  light.sort(function (a, b) {
+  // Fallback: اگر per-channel چیزی نداد، نمونه pending اخیر (DESC) و فیلتر حافظه
+  // (pendingهای بسیار قدیمی کانال‌های دیگر نباید کل پنجره ASC را ببلعند)
+  if (!collected.length) {
+    let sample = [];
+    try {
+      sample =
+        (await db
+          .select()
+          .from(messages)
+          .where(eq(messages.status, 'pending'))
+          .orderBy(desc(messages.id))
+          .limit(800)
+          .all()) || [];
+    } catch (e1) {
+      try {
+        const allm = (await db.select().from(messages).orderBy(desc(messages.id)).limit(1200).all()) || [];
+        sample = allm.filter(function (m) {
+          return String(m.status || '') === 'pending';
+        });
+      } catch (e2) {
+        console.error('selectReviewablePending fallback', e1, e2);
+        sample = [];
+      }
+    }
+    const allowSet = Object.create(null);
+    for (const ck of channelKeys) {
+      for (const v of keyVariants(ck)) allowSet[v] = true;
+      allowSet[ck] = true;
+      const nk = normalizeChannelKey(ck) || ck;
+      if (nk) allowSet[nk] = true;
+    }
+    for (const r of sample) {
+      if (!r) continue;
+      const mid = Number(r.id);
+      if (!mid || seenId[mid]) continue;
+      if (String(r.status || '') !== 'pending') continue;
+      const raw = String((r.channelKey ?? r.channel_key) || '');
+      const nk = normalizeChannelKey(raw) || raw;
+      if (!(allowSet[raw] || allowSet[nk])) continue;
+      seenId[mid] = 1;
+      collected.push(r);
+    }
+  }
+
+  collected.sort(function (a, b) {
     return (Number(a.id) || 0) - (Number(b.id) || 0);
   });
 
-  // مهم: claim را اینجا فیلتر نکن — آزادسازی/اختصاص در createReviewBatch انجام می‌شود.
-  // فیلتر claim در این لایه باعث empty کاذب می‌شد وقتی صف پر ولی قفل یتیم بود.
-  const matched = [];
-  for (const m of light) {
-    if (!m) continue;
-    if (String(m.status || '') !== 'pending') continue;
-    const ck = String((m.channelKey ?? m.channel_key) || '');
-    const nk = normalizeChannelKey(ck) || ck;
-    if (restrictChannels) {
-      if (!(allowSet[ck] || allowSet[nk])) continue;
-    }
-    const mid = Number(m.id);
-    if (!mid) continue;
-    matched.push(mid);
-  }
+  const out = collected.slice(0, need);
 
   batchLog('select_pending', {
     adminId: Number(adminId),
-    pendingScanned: light.length,
-    matched: matched.length,
+    channels: channelKeys,
+    matched: collected.length,
+    returned: out.length,
     need: need,
-    channels: restrictChannels ? Object.keys(allowSet) : ['*'],
+    queryErrors: queryErrors,
   });
 
-  if (!matched.length) return [];
-
-  // ترجیح بدون claim دیگران، ولی در صورت نیاز claim‌دار هم برگردان
-  const preferred = [];
-  const fallback = [];
-  for (const mid of matched) {
-    let heldByOther = false;
-    try {
-      const claim = await getReviewClaim(mid);
-      if (claim && Number(claim.adminId) !== Number(adminId)) heldByOther = true;
-    } catch (_e) {}
-    if (heldByOther) fallback.push(mid);
-    else preferred.push(mid);
-  }
-  const ordered = preferred.concat(fallback);
-
-  const out = [];
-  for (const mid of ordered) {
-    if (out.length >= need) break;
-    try {
-      const row = await getMessageById(mid);
-      if (!row) continue;
-      if (String(row.status || '') !== 'pending') continue;
-      out.push(row);
-    } catch (_e) {}
-  }
   return out;
 }
 
@@ -4158,11 +4298,17 @@ export async function createReviewBatch(adminId) {
         ms: Date.now() - t0,
         candidates: candidates.length,
       });
-      // اگر pending برای کانال‌های مجاز هست ولی claim ممکن نشد
       if (candidates.length) {
         return { status: 'held', pendingCount: candidates.length };
       }
-      return { status: 'empty' };
+      let diag = null;
+      try {
+        diag = await diagnoseReviewQueue(adminId);
+        batchLog('create_empty_diag', diag);
+      } catch (eDiag) {
+        console.error('create_empty_diag', eDiag);
+      }
+      return { status: 'empty', diag: diag };
     }
     const batch = normalizeBatchState({
       ids: claimed.map(function (m) { return Number(m.id); }),

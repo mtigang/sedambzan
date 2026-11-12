@@ -2205,9 +2205,29 @@ if (data.startsWith('reject_menu:')) {
         return;
       }
       if (res.status === 'empty') {
+        let extra = '';
+        try {
+          const d = res.diag;
+          if (d) {
+            extra =
+              '\n\nکل pending: ' +
+              (d.pendingTotal != null ? d.pendingTotal : '?') +
+              '\nکانال مجاز: ' +
+              ((d.allowed || []).join(', ') || '—');
+            const pba = d.pendingByAllowed || {};
+            const keys = Object.keys(pba);
+            for (let i = 0; i < keys.length; i++) {
+              extra += '\n• ' + keys[i] + ': ' + pba[keys[i]];
+            }
+          }
+        } catch (_e) {}
         await api.sendMessage({
           chat_id: cq.message.chat.id,
-          text: '📭 پیام pending' + (chKey && chKey !== 'all' ? ' برای این کانال' : '') + ' وجود ندارد.',
+          text:
+            '📭 پیام pending' +
+            (chKey && chKey !== 'all' ? ' برای این کانال' : '') +
+            ' وجود ندارد.' +
+            extra,
         });
         return;
       }
