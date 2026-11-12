@@ -2611,9 +2611,15 @@ function escapeHtmlBatch(s) {
     .replace(/"/g, '&quot;');
 }
 function sleepMs(ms) {
+  // Telegram Serverless: setTimeout/global timers در دسترس نیستند.
+  // فاصله کوتاه بین sendها با busy-wait امن و سازگار با محیط است.
   const n = Math.max(0, Math.min(Number(ms) || 0, 8000));
   if (n <= 0) return Promise.resolve();
-  return new Promise(function (resolve) { setTimeout(resolve, n); });
+  const end = Date.now() + n;
+  while (Date.now() < end) {
+    /* spin */
+  }
+  return Promise.resolve();
 }
 function parseTelegramRetryAfter(err) {
   try {
