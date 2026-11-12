@@ -3317,10 +3317,31 @@ async function getReviewClaim(msgId) {
     if (!raw) return null;
     const c = JSON.parse(raw);
     if (!c || !c.adminId) return null;
-    if (c.expiresAt && Date.now() > Number(c.expiresAt)) {
+    const now = Date.now();
+    if (c.expiresAt && now > Number(c.expiresAt)) {
       try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run(); } catch (_e) {}
       return null;
     }
+    // اگر claim قدیمی است و batch نگهدارنده دیگر این پیام را ندارد → آزاد
+    try {
+      const claimedAt = Number(c.claimedAt) || 0;
+      if (claimedAt && now - claimedAt > 12 * 60 * 1000) {
+        const holderBatch = await getReviewBatch(c.adminId);
+        const ids = (holderBatch && holderBatch.ids) || [];
+        const mid = Number(msgId);
+        let still = false;
+        for (let i = 0; i < ids.length; i++) {
+          if (Number(ids[i]) === mid) {
+            still = true;
+            break;
+          }
+        }
+        if (!still) {
+          try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run(); } catch (_e) {}
+          return null;
+        }
+      }
+    } catch (_e) {}
     return c;
   } catch (_e) {
     return null;
@@ -3478,7 +3499,8 @@ export async function isReviewBatchComplete(adminId) {
  */
 async function selectReviewablePending(adminId, limit) {
   const need = Math.min(Math.max(Number(limit) || REVIEW_BATCH_SIZE, 1), 80);
-  const fetchLimit = Math.min(Math.max(need * 8, 24), 300);
+  // به ازای هر کانال بیش از need می‌گیریم تا claimهای دیگران باعث empty کاذب نشود
+  const perChannelLimit = Math.min(Math.max(need * 4, 24), 120);
 
   let ownerCh = '';
   if (isOwner(adminId)) {
@@ -3489,80 +3511,94 @@ async function selectReviewablePending(adminId, limit) {
     } catch (_e) {}
   }
 
-  let allowSet = null;
-  if (!isOwner(adminId)) {
+  let channelKeys = [];
+  if (isOwner(adminId)) {
+    if (ownerCh) {
+      channelKeys = [ownerCh];
+    } else {
+      channelKeys = Object.keys(DEFAULT_CHANNELS || {});
+    }
+  } else {
     try {
       const allowList = await allowedReviewChannels(adminId);
       if (!allowList || !allowList.length) return [];
-      allowSet = {};
+      const seen = Object.create(null);
       for (const k of allowList) {
-        const nk = normalizeChannelKey(k) || String(k);
-        if (nk) allowSet[nk] = true;
-        allowSet[String(k)] = true;
+        const nk = normalizeChannelKey(k) || String(k || '');
+        if (!nk || seen[nk]) continue;
+        seen[nk] = true;
+        channelKeys.push(nk);
       }
     } catch (e) {
       console.error('selectReviewablePending allow', e);
       return [];
     }
   }
+  if (!channelKeys.length) return [];
 
-  function passChannel(ckRaw) {
-    const ck = String(ckRaw || '');
-    const nk = normalizeChannelKey(ck) || ck;
-    if (ownerCh) {
-      if (ck !== ownerCh && nk !== ownerCh) return false;
-    }
-    if (allowSet) {
-      if (!(allowSet[ck] || allowSet[nk])) return false;
-    }
-    return true;
-  }
-
-  let rows = [];
-  try {
-    if (ownerCh) {
-      rows =
-        (await db
-          .select()
-          .from(messages)
-          .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, ownerCh)))
-          .orderBy(asc(messages.id))
-          .limit(fetchLimit)
-          .all()) || [];
-    } else {
-      rows =
-        (await db
-          .select()
-          .from(messages)
-          .where(eq(messages.status, 'pending'))
-          .orderBy(asc(messages.id))
-          .limit(allowSet ? Math.min(fetchLimit * 3, 300) : fetchLimit)
-          .all()) || [];
-    }
-  } catch (eFast) {
-    console.error('selectReviewablePending query', eFast);
-    rows = [];
-  }
-
-  const out = [];
-  for (const r of rows) {
-    if (!r) continue;
-    if (String(r.status || '') !== 'pending') continue;
-    const ck = String((r.channelKey ?? r.channel_key) || '');
-    if (!passChannel(ck)) continue;
-    const mid = Number(r.id);
+  const collected = [];
+  for (let ci = 0; ci < channelKeys.length; ci++) {
+    const ck = channelKeys[ci];
+    let rows = [];
     try {
-      const claim = await getReviewClaim(mid);
-      if (claim && Number(claim.adminId) !== Number(adminId)) continue;
-    } catch (_e) {}
+      rows =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, ck)))
+          .orderBy(asc(messages.id))
+          .limit(perChannelLimit)
+          .all()) || [];
+    } catch (eQ) {
+      // fallback: بدون where کانال (محدود) سپس فیلتر حافظه
+      try {
+        const broad =
+          (await db
+            .select()
+            .from(messages)
+            .where(eq(messages.status, 'pending'))
+            .orderBy(asc(messages.id))
+            .limit(500)
+            .all()) || [];
+        rows = broad.filter(function (r) {
+          const rck = String((r.channelKey ?? r.channel_key) || '');
+          const nk = normalizeChannelKey(rck) || rck;
+          return rck === ck || nk === ck;
+        });
+      } catch (e2) {
+        console.error('selectReviewablePending query', ck, eQ, e2);
+        rows = [];
+      }
+    }
+    for (const r of rows) {
+      if (!r) continue;
+      if (String(r.status || '') !== 'pending') continue;
+      const mid = Number(r.id);
+      if (!mid) continue;
+      try {
+        const claim = await getReviewClaim(mid);
+        if (claim && Number(claim.adminId) !== Number(adminId)) continue;
+      } catch (_e) {}
+      collected.push(r);
+    }
+  }
+
+  collected.sort(function (a, b) {
+    return (Number(a.id) || 0) - (Number(b.id) || 0);
+  });
+  // یکتا
+  const out = [];
+  const seenId = Object.create(null);
+  for (const r of collected) {
+    const mid = Number(r.id);
+    if (!mid || seenId[mid]) continue;
+    seenId[mid] = 1;
     out.push(r);
     if (out.length >= need) break;
   }
-  out.sort(function (a, b) {
-    return (Number(a.id) || 0) - (Number(b.id) || 0);
-  });
   return out;
 }
+
 
 export async function hasEligiblePending(adminId) {
   try {
