@@ -2104,10 +2104,22 @@ let note =
         });
         return;
       }
+      if (res.status === 'held') {
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '⏳ ' +
+            (res.pendingCount || '') +
+            ' پیام در صف کانال شیفت شما هست، ولی فعلاً توسط ادمین دیگر در حال بررسی است.\n' +
+            'چند دقیقه بعد دوباره «📥 پیام‌های در انتظار» را بزنید.',
+          reply_markup: await roleKb(userId),
+        });
+        return;
+      }
       if (res.status === 'empty') {
         await api.sendMessage({
           chat_id: chatId,
-          text: '📭 در حال حاضر پیام در انتظاری وجود ندارد.',
+          text: '📭 در حال حاضر پیام در انتظاری برای کانال شیفت فعال شما وجود ندارد.',
           reply_markup: await roleKb(userId),
         });
         return;

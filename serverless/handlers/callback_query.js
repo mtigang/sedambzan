@@ -2194,6 +2194,16 @@ if (data.startsWith('reject_menu:')) {
         }
       } catch (_e) {}
             const res = await createReviewBatch(userId);
+      if (res.status === 'held') {
+        await api.sendMessage({
+          chat_id: cq.message.chat.id,
+          text:
+            '⏳ ' +
+            (res.pendingCount || '') +
+            ' پیام pending هست ولی claim ادمین دیگر آزاد نشد. چند دقیقه بعد دوباره تلاش کنید.',
+        });
+        return;
+      }
       if (res.status === 'empty') {
         await api.sendMessage({
           chat_id: cq.message.chat.id,

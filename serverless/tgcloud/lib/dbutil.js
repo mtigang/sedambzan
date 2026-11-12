@@ -3362,25 +3362,68 @@ async function tryClaimReviewMessage(msgId, adminId, batchNumber) {
   const id = Number(msgId);
   const aid = Number(adminId);
   if (!id || !aid) return { ok: false, code: 'bad' };
+
+  async function writeClaim() {
+    const payload = JSON.stringify({
+      adminId: aid,
+      batchNumber: Number(batchNumber) || 0,
+      claimedAt: Date.now(),
+      expiresAt: Date.now() + REVIEW_CLAIM_TTL_MS,
+    });
+    try {
+      await db.insert(settings).values({ key: reviewClaimKey(id), value: payload }).run();
+      return { ok: true };
+    } catch (_e) {
+      try {
+        await db
+          .update(settings)
+          .set({ value: payload })
+          .where(eq(settings.key, reviewClaimKey(id)))
+          .run();
+        return { ok: true, stolen: true };
+      } catch (_e2) {
+        const again = await getReviewClaim(id);
+        if (again && Number(again.adminId) === aid) return { ok: true, renewed: true };
+        return { ok: false, code: 'held', holder: again ? Number(again.adminId) : null };
+      }
+    }
+  }
+
   const existing = await getReviewClaim(id);
   if (existing) {
     if (Number(existing.adminId) === aid) return { ok: true, renewed: true };
-    return { ok: false, code: 'held', holder: Number(existing.adminId) };
+    // آیا می‌توان claim یتیم/کهنه را گرفت؟
+    let canSteal = false;
+    try {
+      const holderBatch = await getReviewBatch(existing.adminId);
+      const ids = (holderBatch && holderBatch.ids) || [];
+      let inBatch = false;
+      for (let i = 0; i < ids.length; i++) {
+        if (Number(ids[i]) === id) {
+          inBatch = true;
+          break;
+        }
+      }
+      const age = Date.now() - (Number(existing.claimedAt) || 0);
+      const batchAge =
+        holderBatch && holderBatch.createdAt
+          ? Date.now() - Number(holderBatch.createdAt)
+          : Number.POSITIVE_INFINITY;
+      // آزاد: در batch نیست، یا batch/claim بیش از ۲۰ دقیقه مانده
+      if (!inBatch || age > 20 * 60 * 1000 || batchAge > 20 * 60 * 1000) {
+        canSteal = true;
+      }
+    } catch (_e) {
+      canSteal = true;
+    }
+    if (!canSteal) {
+      return { ok: false, code: 'held', holder: Number(existing.adminId) };
+    }
+    try {
+      await db.delete(settings).where(eq(settings.key, reviewClaimKey(id))).run();
+    } catch (_e) {}
   }
-  const payload = JSON.stringify({
-    adminId: aid,
-    batchNumber: Number(batchNumber) || 0,
-    claimedAt: Date.now(),
-    expiresAt: Date.now() + REVIEW_CLAIM_TTL_MS,
-  });
-  try {
-    await db.insert(settings).values({ key: reviewClaimKey(id), value: payload }).run();
-    return { ok: true };
-  } catch (_e) {
-    const again = await getReviewClaim(id);
-    if (again && Number(again.adminId) === aid) return { ok: true, renewed: true };
-    return { ok: false, code: 'held', holder: again ? Number(again.adminId) : null };
-  }
+  return await writeClaim();
 }
 
 async function releaseReviewClaim(msgId, adminId) {
@@ -3519,14 +3562,13 @@ async function selectReviewablePending(adminId, limit) {
     } catch (_e) {}
   }
 
-  // مجموعه کانال‌های مجاز — همان منطق allowedReviewChannels / شیفت فعال
   const allowSet = Object.create(null);
   let restrictChannels = true;
   if (isOwner(adminId)) {
     if (ownerCh) {
       allowSet[ownerCh] = true;
     } else {
-      restrictChannels = false; // همه کانال‌ها
+      restrictChannels = false;
     }
   } else {
     try {
@@ -3536,9 +3578,10 @@ async function selectReviewablePending(adminId, limit) {
         return [];
       }
       for (const k of allowList) {
-        const nk = normalizeChannelKey(k) || String(k || '');
+        const raw = String(k || '');
+        const nk = normalizeChannelKey(raw) || raw;
+        if (raw) allowSet[raw] = true;
         if (nk) allowSet[nk] = true;
-        if (k) allowSet[String(k)] = true;
       }
     } catch (e) {
       console.error('selectReviewablePending allow', e);
@@ -3546,8 +3589,7 @@ async function selectReviewablePending(adminId, limit) {
     }
   }
 
-  // همان الگوی adminShiftCard که در پروداکشن جواب می‌دهد:
-  // فقط status=pending، فیلتر کانال در حافظه
+  // الگوی ثابت و تست‌شدهٔ شمارش صف (adminShiftCard): فقط status=pending، بدون orderBy
   let light = [];
   try {
     light =
@@ -3559,29 +3601,33 @@ async function selectReviewablePending(adminId, limit) {
         })
         .from(messages)
         .where(eq(messages.status, 'pending'))
-        .orderBy(asc(messages.id))
         .all()) || [];
   } catch (e1) {
     try {
-      const allm = (await db.select().from(messages).orderBy(asc(messages.id)).all()) || [];
-      light = allm
-        .filter(function (m) {
-          return String(m.status || '') === 'pending';
-        })
-        .map(function (m) {
-          return {
-            id: m.id,
-            status: m.status,
-            channelKey: m.channelKey ?? m.channel_key,
-          };
+      const allm = (await db.select().from(messages).all()) || [];
+      light = [];
+      for (const m of allm) {
+        if (String(m.status || '') !== 'pending') continue;
+        light.push({
+          id: m.id,
+          status: m.status,
+          channelKey: m.channelKey ?? m.channel_key,
         });
+      }
     } catch (e2) {
       console.error('selectReviewablePending load', e1, e2);
       return [];
     }
   }
 
-  const candidateIds = [];
+  // FIFO در حافظه
+  light.sort(function (a, b) {
+    return (Number(a.id) || 0) - (Number(b.id) || 0);
+  });
+
+  // مهم: claim را اینجا فیلتر نکن — آزادسازی/اختصاص در createReviewBatch انجام می‌شود.
+  // فیلتر claim در این لایه باعث empty کاذب می‌شد وقتی صف پر ولی قفل یتیم بود.
+  const matched = [];
   for (const m of light) {
     if (!m) continue;
     if (String(m.status || '') !== 'pending') continue;
@@ -3592,28 +3638,35 @@ async function selectReviewablePending(adminId, limit) {
     }
     const mid = Number(m.id);
     if (!mid) continue;
-    // claim دیگران را رد کن؛ claim خودت OK
-    try {
-      const claim = await getReviewClaim(mid);
-      if (claim && Number(claim.adminId) !== Number(adminId)) continue;
-    } catch (_e) {}
-    candidateIds.push(mid);
-    if (candidateIds.length >= need * 3) break; // حاشیه برای claim fail
+    matched.push(mid);
   }
 
   batchLog('select_pending', {
     adminId: Number(adminId),
     pendingScanned: light.length,
-    matched: candidateIds.length,
+    matched: matched.length,
     need: need,
     channels: restrictChannels ? Object.keys(allowSet) : ['*'],
   });
 
-  if (!candidateIds.length) return [];
+  if (!matched.length) return [];
 
-  // هیدراته کردن ردیف کامل به‌ترتیب FIFO
+  // ترجیح بدون claim دیگران، ولی در صورت نیاز claim‌دار هم برگردان
+  const preferred = [];
+  const fallback = [];
+  for (const mid of matched) {
+    let heldByOther = false;
+    try {
+      const claim = await getReviewClaim(mid);
+      if (claim && Number(claim.adminId) !== Number(adminId)) heldByOther = true;
+    } catch (_e) {}
+    if (heldByOther) fallback.push(mid);
+    else preferred.push(mid);
+  }
+  const ordered = preferred.concat(fallback);
+
   const out = [];
-  for (const mid of candidateIds) {
+  for (const mid of ordered) {
     if (out.length >= need) break;
     try {
       const row = await getMessageById(mid);
@@ -3716,9 +3769,14 @@ export async function adminShiftCard(adminId) {
   }
   try {
     const allowed = await allowedReviewChannels(adminId);
-    const allow = {};
-    for (const k of allowed || []) allow[String(k)] = true;
-    // شمارش سبک pending
+    const allow = Object.create(null);
+    for (const k of allowed || []) {
+      const raw = String(k || '');
+      const nk = normalizeChannelKey(raw) || raw;
+      if (raw) allow[raw] = true;
+      if (nk) allow[nk] = true;
+    }
+    // شمارش سبک pending — همان منبع حقیقت selectReviewablePending
     let light = [];
     try {
       light =
@@ -3737,7 +3795,8 @@ export async function adminShiftCard(adminId) {
     }
     for (const m of light) {
       const ck = String((m.channelKey ?? m.channel_key) || '');
-      if (isOwner(adminId) || allow[ck]) out.pendingTotal += 1;
+      const nk = normalizeChannelKey(ck) || ck;
+      if (isOwner(adminId) || allow[ck] || allow[nk]) out.pendingTotal += 1;
     }
   } catch (e) {
     console.error('adminShiftCard pending', e);
@@ -4039,7 +4098,8 @@ export async function createReviewBatch(adminId) {
       await clearReviewBatch(adminId);
     }
 
-    let candidates = ((await selectReviewablePending(adminId, REVIEW_BATCH_SIZE)) || []).filter(function (m) {
+    // حاشیه بیشتر از اندازه Batch تا claim fail باعث empty نشود
+    let candidates = ((await selectReviewablePending(adminId, REVIEW_BATCH_SIZE * 3)) || []).filter(function (m) {
       return m && String(m.status || '') === 'pending';
     });
     {
@@ -4061,17 +4121,30 @@ export async function createReviewBatch(adminId) {
       if (!cl.ok) continue;
       claimed.push(m);
     }
-    // اگر همه claimها گیر دیگران بود — آزادسازی اجباری و یک‌بار تلاش مجدد
-    if (!claimed.length && candidates.length) {
+    // تلاش مجدد با آزادسازی اجباری claim روی کاندیدها
+    if (claimed.length < Math.min(REVIEW_BATCH_SIZE, candidates.length) && candidates.length) {
       batchLog('create_claim_retry', {
         adminId: Number(adminId),
         candidates: candidates.length,
+        claimed: claimed.length,
       });
       for (const m of candidates) {
+        const mid = Number(m.id);
+        if (!mid) continue;
+        // اگر همین ادمین قبلاً claim کرده، نگه دار
+        let mine = false;
+        for (let i = 0; i < claimed.length; i++) {
+          if (Number(claimed[i].id) === mid) {
+            mine = true;
+            break;
+          }
+        }
+        if (mine) continue;
         try {
-          await db.delete(settings).where(eq(settings.key, reviewClaimKey(Number(m.id)))).run();
+          await db.delete(settings).where(eq(settings.key, reviewClaimKey(mid))).run();
         } catch (_e) {}
       }
+      claimed = [];
       for (const m of candidates) {
         if (claimed.length >= REVIEW_BATCH_SIZE) break;
         const cl2 = await tryClaimReviewMessage(m.id, adminId, batchNumber);
@@ -4085,6 +4158,10 @@ export async function createReviewBatch(adminId) {
         ms: Date.now() - t0,
         candidates: candidates.length,
       });
+      // اگر pending برای کانال‌های مجاز هست ولی claim ممکن نشد
+      if (candidates.length) {
+        return { status: 'held', pendingCount: candidates.length };
+      }
       return { status: 'empty' };
     }
     const batch = normalizeBatchState({
