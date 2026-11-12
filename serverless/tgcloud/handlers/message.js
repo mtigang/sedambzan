@@ -1509,7 +1509,6 @@ if (text === '📝 ارسال پیام') {
         text: FEEDBACK_HINT,
         reply_markup: sanitizeMarkup({
           inline_keyboard: [
-            [{ text: '📝 ارسال پیام', callback_data: 'user_goto:send', style: 'primary' }],
             [{ text: '◀️ انصراف', callback_data: 'user_goto:back', style: 'danger' }],
           ],
         }),

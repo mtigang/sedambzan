@@ -2323,118 +2323,124 @@ export async function getStatsDashboardText() {
     }
   }
 
-  async function countByStatus(st) {
-    try {
-      const rows =
-        (await db.select({ n: sql`count(*)` }).from(messages).where(eq(messages.status, st)).all()) || [];
-      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
-    } catch (e) {
-      console.error('stats status', st, e);
-      return null;
-    }
-  }
-
-  async function countByStatusChannel(st, ck) {
-    try {
-      const rows =
-        (await db
-          .select({ n: sql`count(*)` })
-          .from(messages)
-          .where(and(eq(messages.status, st), eq(messages.channelKey, ck)))
-          .all()) || [];
-      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
-    } catch (e) {
-      console.error('stats ch', st, ck, e);
-      return null;
-    }
-  }
-
-  const total = await countAll();
-  let pe = await countByStatus('pending');
-  const pePub = await countByStatus('publishing');
-  let ap = await countByStatus('approved');
-  let rj = await countByStatus('rejected');
-  let accurate = pe != null && ap != null && rj != null;
-
-  if (pe == null || ap == null || rj == null) {
-    // fallback نمونهٔ سبک فقط در صورت timeout
-    try {
-      const sample =
-        (await db
-          .select({ status: messages.status, channelKey: messages.channelKey })
-          .from(messages)
-          .orderBy(desc(messages.id))
-          .limit(8000)
-          .all()) || [];
-      let sPe = 0, sAp = 0, sRj = 0;
-      for (const x of sample) {
-        const st = String(x.status || '');
-        if (st === 'pending' || st === 'publishing') sPe++;
-        else if (st === 'approved') sAp++;
-        else if (st === 'rejected') sRj++;
-      }
-      if (pe == null) pe = sPe;
-      if (ap == null) ap = sAp;
-      if (rj == null) rj = sRj;
-      accurate = false;
-    } catch (e) {
-      console.error('stats fallback', e);
-      pe = pe || 0;
-      ap = ap || 0;
-      rj = rj || 0;
-      accurate = false;
-    }
-  } else {
-    pe = Number(pe) + Number(pePub || 0);
-  }
-
+  // شمارش مستقیم با یک GROUP BY — بدون نمونه و بدون مقیاس
+  // (count(*) WHERE status روی ۱۰۰k+ گاهی timeout می‌دهد؛ groupBy یک اسکن است)
+  let pe = 0;
+  let ap = 0;
+  let rj = 0;
+  let accurate = false;
   const byCh = {};
   for (const c of Object.values(DEFAULT_CHANNELS || {})) {
     byCh[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
   }
 
-  if (accurate) {
-    for (const c of Object.values(DEFAULT_CHANNELS || {})) {
-      const ck = c.key;
-      const cPe = await countByStatusChannel('pending', ck);
-      const cPub = await countByStatusChannel('publishing', ck);
-      const cAp = await countByStatusChannel('approved', ck);
-      const cRj = await countByStatusChannel('rejected', ck);
-      if (cPe == null || cAp == null || cRj == null) {
-        accurate = false;
-        break;
-      }
-      const peN = Number(cPe) + Number(cPub || 0);
-      const apN = Number(cAp);
-      const rjN = Number(cRj);
-      byCh[ck] = { total: peN + apN + rjN, pe: peN, ap: apN, rj: rjN, title: c.title };
-    }
-  }
-
-  if (!accurate) {
+  async function loadStatusCounts() {
+    // مسیر ۱: groupBy روی status
     try {
-      const sample =
+      const rows =
         (await db
-          .select({ status: messages.status, channelKey: messages.channelKey })
+          .select({
+            status: messages.status,
+            n: sql`count(*)`,
+          })
           .from(messages)
-          .orderBy(desc(messages.id))
-          .limit(8000)
+          .groupBy(messages.status)
           .all()) || [];
-      for (const key of Object.keys(byCh)) {
-        byCh[key] = { total: 0, pe: 0, ap: 0, rj: 0, title: byCh[key].title };
-      }
-      for (const x of sample) {
-        const st = String(x.status || '');
-        const ck = String((x.channelKey ?? x.channel_key) || '');
-        if (!byCh[ck]) continue;
-        byCh[ck].total++;
-        if (st === 'pending' || st === 'publishing') byCh[ck].pe++;
-        else if (st === 'approved') byCh[ck].ap++;
-        else if (st === 'rejected') byCh[ck].rj++;
+      if (rows && rows.length) {
+        let p = 0,
+          a = 0,
+          r = 0;
+        for (const row of rows) {
+          const st = String(row.status || '');
+          const n = Number(row.n != null ? row.n : Object.values(row)[1]) || 0;
+          if (st === 'pending' || st === 'publishing') p += n;
+          else if (st === 'approved') a += n;
+          else if (st === 'rejected') r += n;
+        }
+        return { pe: p, ap: a, rj: r, ok: true };
       }
     } catch (e) {
-      console.error('stats byCh fallback', e);
+      console.error('stats groupBy status', e);
     }
+    // مسیر ۲: چهار count جدا (fallback)
+    async function one(st) {
+      try {
+        const rows =
+          (await db.select({ n: sql`count(*)` }).from(messages).where(eq(messages.status, st)).all()) ||
+          [];
+        return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+      } catch (e) {
+        console.error('stats status', st, e);
+        return null;
+      }
+    }
+    const p1 = await one('pending');
+    const p2 = await one('publishing');
+    const a1 = await one('approved');
+    const r1 = await one('rejected');
+    if (p1 == null || a1 == null || r1 == null) return { pe: 0, ap: 0, rj: 0, ok: false };
+    return { pe: Number(p1) + Number(p2 || 0), ap: Number(a1), rj: Number(r1), ok: true };
+  }
+
+  async function loadChannelCounts() {
+    try {
+      const rows =
+        (await db
+          .select({
+            status: messages.status,
+            channelKey: messages.channelKey,
+            n: sql`count(*)`,
+          })
+          .from(messages)
+          .groupBy(messages.status, messages.channelKey)
+          .all()) || [];
+      if (rows && rows.length) {
+        const out = {};
+        for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+          out[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
+        }
+        for (const row of rows) {
+          const st = String(row.status || '');
+          const ck = String((row.channelKey ?? row.channel_key) || '');
+          if (!out[ck]) continue;
+          const n = Number(row.n != null ? row.n : Object.values(row)[2]) || 0;
+          out[ck].total += n;
+          if (st === 'pending' || st === 'publishing') out[ck].pe += n;
+          else if (st === 'approved') out[ck].ap += n;
+          else if (st === 'rejected') out[ck].rj += n;
+        }
+        return { byCh: out, ok: true };
+      }
+    } catch (e) {
+      console.error('stats groupBy channel', e);
+    }
+    return { byCh: null, ok: false };
+  }
+
+  const total = await countAll();
+  const sc = await loadStatusCounts();
+  pe = sc.pe;
+  ap = sc.ap;
+  rj = sc.rj;
+  accurate = sc.ok;
+
+  const chRes = await loadChannelCounts();
+  if (chRes.ok && chRes.byCh) {
+    for (const k of Object.keys(chRes.byCh)) byCh[k] = chRes.byCh[k];
+  } else if (accurate) {
+    // اگر groupBy کانال نشد ولی status دقیق بود، تفکیک را از نسبت کل نگه می‌داریم
+    accurate = true;
+  } else {
+    accurate = false;
+  }
+
+  // اگر groupBy هم شکست خورد، هرگز نمونه ۸هزارتایی را به عنوان «از اول تا الان» نشان نده
+  // pe/ap/rj روی ۰ می‌مانند و note می‌گوید شمارش مستقیم ممکن نشد
+  if (!sc.ok) {
+    pe = 0;
+    ap = 0;
+    rj = 0;
+    accurate = false;
   }
 
   let userCount = 0;
@@ -2553,8 +2559,8 @@ export async function getStatsDashboardText() {
     by +
     _nl +
     (accurate
-      ? '✅ بخش «از اول» و تفکیک کانال از count واقعی است. امروز از نمونه ۱۵هزارتایی اخیر.'
-      : 'ℹ️ بخش «از اول» count است؛ تفکیک/امروز از نمونه ۱۵هزارتایی اخیر.') +
+      ? '✅ بخش «از اول» و تفکیک کانال از شمارش مستقیم (GROUP BY) است. امروز از نمونه اخیر.'
+      : '⚠️ شمارش مستقیم status ممکن نشد؛ اعداد pe/ap/rj بخش ۱ صفر شده‌اند تا با نمونه اشتباه گرفته نشوند. امروز از نمونه اخیر.') +
     _nl;
 
   return text;
