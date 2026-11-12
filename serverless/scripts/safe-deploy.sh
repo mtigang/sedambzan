@@ -21,8 +21,6 @@ REQUIRED=(
   lib/subleader.js
   lib/submit_user_message.js
   lib/resolve.js
-  endpoints/submitMessage.js
-  endpoints/getMyMessages.js
 )
 
 echo "==> بررسی فایل‌های ضروری"

@@ -837,47 +837,20 @@ export async function setPublishStickerFileId(fileId) {
   return true;
 }
 
-/** ارسال استیکر بعد از انتشار؛ در صورت خطا به مالک‌ها گزارش می‌دهد */
+/** ارسال استیکر بعد از انتشار — خطا (بلاک کاربر و …) فقط لاگ می‌شود، به مالک پیام نمی‌رود */
 export async function sendPublishStickerToUser(uid) {
   if (!uid) return { ok: false, error: 'no uid' };
   const fileId = await getPublishStickerFileId();
   if (!fileId) {
-    const err =
-      'file_id استیکر تنظیم نشده. یک مالک باید استیکر را با متن «ستیکر انتشار» برای ربات بفرستد.';
-    try {
-      for (const oid of OWNER_IDS || []) {
-        await api.sendMessage({
-          chat_id: Number(oid),
-          text:
-            '⚠️ استیکر بعد از انتشار ارسال نشد\nکاربر: ' +
-            uid +
-            '\nخطا: ' +
-            err,
-        });
-      }
-    } catch (_e) {}
-    return { ok: false, error: err };
+    console.error('publish sticker: file_id not set');
+    return { ok: false, error: 'no sticker file_id' };
   }
   try {
     await api.sendSticker({ chat_id: Number(uid), sticker: fileId });
     return { ok: true };
   } catch (e) {
     const detail = String((e && (e.message || e.description)) || e || 'unknown').slice(0, 300);
-    console.error('publish sticker fail', detail);
-    try {
-      for (const oid of OWNER_IDS || []) {
-        await api.sendMessage({
-          chat_id: Number(oid),
-          text:
-            '⚠️ استیکر بعد از انتشار ارسال نشد\nکاربر: ' +
-            uid +
-            '\nfile_id: ' +
-            String(fileId).slice(0, 80) +
-            '\nخطا: ' +
-            detail,
-        });
-      }
-    } catch (_e) {}
+    console.error('publish sticker fail uid=' + uid, detail);
     return { ok: false, error: detail };
   }
 }
