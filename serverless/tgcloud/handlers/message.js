@@ -2161,10 +2161,62 @@ let note =
         return;
       }
       if (res.status === 'incomplete') {
-        await sendReviewBatch(chatId, res.batch, res.messages, { adminId: userId, resumed: true });
+        let sendRes = null;
+        try {
+          sendRes = await sendReviewBatch(chatId, res.batch, res.messages, {
+            adminId: userId,
+            resumed: true,
+          });
+        } catch (eSend) {
+          console.error('sendReviewBatch incomplete', eSend);
+        }
+        if (sendRes && sendRes.sent) return;
+        // batch گیر کرده — پاک و از نو
+        try {
+          await clearReviewBatch(userId);
+        } catch (_e) {}
+        try {
+          const res2 = await createReviewBatch(userId);
+          if (res2.status === 'created' || res2.status === 'incomplete') {
+            await sendReviewBatch(chatId, res2.batch, res2.messages, {
+              adminId: userId,
+              resumed: false,
+            });
+          } else if (res2.status === 'empty') {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '📭 پیام pending بیشتری برای کانال شیفت شما نیست.',
+              reply_markup: await roleKb(userId),
+            });
+          } else if (res2.status === 'held') {
+            await api.sendMessage({
+              chat_id: chatId,
+              text: '⏳ پیام‌ها در صف هستند ولی claim آزاد نشد. چند دقیقه بعد دوباره بزنید.',
+              reply_markup: await roleKb(userId),
+            });
+          }
+        } catch (e2) {
+          console.error('recreate batch', e2);
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '⚠️ خطا در ادامه Batch. دوباره تلاش کنید.',
+            reply_markup: await roleKb(userId),
+          });
+        }
         return;
       }
-      await sendReviewBatch(chatId, res.batch, res.messages, { adminId: userId, resumed: false });
+      try {
+        await sendReviewBatch(chatId, res.batch, res.messages, { adminId: userId, resumed: false });
+      } catch (eSend) {
+        console.error('sendReviewBatch created', eSend);
+        try {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '⚠️ خطا در ارسال Batch. دوباره «📥 پیام‌های در انتظار» را بزنید.',
+            reply_markup: await roleKb(userId),
+          });
+        } catch (_e) {}
+      }
       return;
     }
 

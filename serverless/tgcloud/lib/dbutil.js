@@ -2611,14 +2611,7 @@ function escapeHtmlBatch(s) {
     .replace(/"/g, '&quot;');
 }
 function sleepMs(ms) {
-  // Telegram Serverless: setTimeout/global timers در دسترس نیستند.
-  // فاصله کوتاه بین sendها با busy-wait امن و سازگار با محیط است.
-  const n = Math.max(0, Math.min(Number(ms) || 0, 8000));
-  if (n <= 0) return Promise.resolve();
-  const end = Date.now() + n;
-  while (Date.now() < end) {
-    /* spin */
-  }
+  // Serverless: بدون timer. فاصله بین send لازم نیست — await متوالی کافی است.
   return Promise.resolve();
 }
 function parseTelegramRetryAfter(err) {
@@ -4457,10 +4450,10 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
 
   async function sendOne(row, useHtml) {
     const ck = String((row.channelKey ?? row.channel_key) || '');
-    const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+    const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck || 'کانال';
     let senderLine = '';
     try {
-      if (isOwner(Number(chatId))) {
+      if (adminId && isOwner(Number(adminId))) {
         const suid = Number(row.userId ?? row.user_id);
         let sname = String(suid || '');
         try {
@@ -4480,7 +4473,14 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
       }
     } catch (_e) {}
     const bodyTxt =
-      '#' + row.id + ' | ' + title + '\n' + senderLine + '\n' + String(row.content || '').slice(0, 3600);
+      '#' +
+      row.id +
+      ' | ' +
+      title +
+      '\n' +
+      senderLine +
+      '\n' +
+      String(row.content || '').slice(0, 3600);
     const payload = {
       chat_id: chatId,
       text: bodyTxt,
@@ -4491,91 +4491,94 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
     return sent && (sent.message_id || sent.messageId);
   }
 
-  for (const row of live) {
+  for (let ri = 0; ri < live.length; ri++) {
+    const row = live[ri];
+    if (!row) continue;
     if (Date.now() - t0 > TIME_BUDGET_MS) {
       deferred = true;
-      batchLog('send_budget_stop', { adminId: adminId, batchNumber: bn, deliveredNow: deliveredNow.length });
+      batchLog('send_budget_stop', {
+        adminId: adminId,
+        batchNumber: bn,
+        deliveredNow: deliveredNow.length,
+        left: live.length - ri,
+      });
       break;
     }
     let okMid = null;
-    let lastErr = null;
-    for (let attempt = 0; attempt <= BATCH_MAX_RETRIES_PER_MSG; attempt++) {
+    try {
       try {
         okMid = await sendOne(row, true);
-        if (okMid) break;
-      } catch (e1) {
-        lastErr = e1;
-        if (isTelegram429(e1)) {
-          const ra = parseTelegramRetryAfter(e1) || 1;
-          batchLog('send_429', { adminId: adminId, msgId: Number(row.id), retryAfter: ra, attempt: attempt });
-          if (ra * 1000 > Math.max(500, TIME_BUDGET_MS - (Date.now() - t0))) {
-            deferred = true;
-            okMid = null;
-            break;
-          }
-          await sleepMs(Math.min(ra * 1000, 5000));
-          continue;
-        }
-        if (isPermanentTelegramError(e1)) {
+      } catch (eHtml) {
+        try {
+          okMid = await sendOne(row, false);
+        } catch (ePlain) {
+          // یک‌بار دیگر بدون reply_markup
           try {
-            okMid = await sendOne(row, false);
-            if (okMid) break;
-          } catch (ePlain) {
-            lastErr = ePlain;
-            okMid = null;
-            break;
+            const ck = String((row.channelKey ?? row.channel_key) || '');
+            const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck || '';
+            const sent = await api.sendMessage({
+              chat_id: chatId,
+              text:
+                '#' +
+                row.id +
+                ' | ' +
+                title +
+                '\n\n' +
+                String(row.content || '').slice(0, 3600),
+            });
+            okMid = sent && (sent.message_id || sent.messageId);
+          } catch (e3) {
+            console.error('sendReviewBatch item', row && row.id, e3);
+            failedNow.push(Number(row.id));
+            try {
+              if (adminId) await releaseReviewClaim(Number(row.id), adminId);
+            } catch (_e) {}
+            continue;
           }
         }
-        await sleepMs(80 * (attempt + 1));
       }
+    } catch (eOuter) {
+      console.error('sendReviewBatch outer', row && row.id, eOuter);
+      failedNow.push(Number(row.id));
+      continue;
     }
 
-    if (okMid) {
-      uiIds.push(Number(okMid));
-      deliveredNow.push(Number(row.id));
-      if (adminId) {
-        try {
-          const cur = (await getReviewBatch(adminId)) || batch;
-          const delivered = Array.from(new Set((cur.delivered || []).map(Number).concat([Number(row.id)])));
-          const ids = Array.from(new Set((cur.ids || []).map(Number).concat([Number(row.id)])));
-          cur.ids = ids;
-          cur.delivered = delivered;
-          await saveReviewBatch(adminId, cur);
-          batch.delivered = delivered;
-          batch.ids = ids;
-        } catch (eSave) {
-          console.error('incremental persist', eSave);
-        }
-      }
-    } else if (!deferred) {
+    if (!okMid) {
       failedNow.push(Number(row.id));
-      batchLog('send_fail', {
-        adminId: adminId,
-        msgId: Number(row.id),
-        err: String((lastErr && (lastErr.description || lastErr.message)) || lastErr || '').slice(0, 120),
-      });
-      if (adminId) {
-        try {
-          await releaseReviewClaim(row.id, adminId);
-          const cur = (await getReviewBatch(adminId)) || batch;
-          cur.ids = (cur.ids || []).map(Number).filter(function (x) { return x !== Number(row.id); });
-          cur.failed = Array.from(new Set((cur.failed || []).map(Number).concat([Number(row.id)])));
-          await saveReviewBatch(adminId, cur);
-          batch.ids = cur.ids;
-          batch.failed = cur.failed;
-        } catch (_e) {}
+      continue;
+    }
+
+    uiIds.push(Number(okMid));
+    deliveredNow.push(Number(row.id));
+    if (adminId) {
+      try {
+        const cur = (await getReviewBatch(adminId)) || batch;
+        const delivered = Array.from(
+          new Set((cur.delivered || []).map(Number).concat([Number(row.id)]))
+        );
+        const ids = Array.from(new Set((cur.ids || []).map(Number).concat([Number(row.id)])));
+        cur.ids = ids;
+        cur.delivered = delivered;
+        await saveReviewBatch(adminId, cur);
+        batch.delivered = delivered;
+        batch.ids = ids;
+      } catch (eSave) {
+        console.error('incremental persist', eSave);
       }
     }
-    await sleepMs(BATCH_SEND_GAP_MS);
   }
 
   try {
-    const adminKey = Number(adminId || chatId);
-    const prevRaw = await settingGet('review_ui:' + adminKey, '[]');
-    let prev = [];
-    try { prev = JSON.parse(prevRaw) || []; } catch (_e) { prev = []; }
-    const merged = prev.concat(uiIds).filter(Boolean).slice(-80);
-    await settingSet('review_ui:' + adminKey, JSON.stringify(merged));
+    const rawUi = await settingGet('review_ui:' + (adminId || chatId), '{}');
+    let merged = {};
+    try {
+      merged = JSON.parse(rawUi || '{}') || {};
+    } catch (_e) {
+      merged = {};
+    }
+    merged.ids = Array.from(new Set([].concat(merged.ids || [], uiIds)));
+    merged.at = Date.now();
+    await settingSet('review_ui:' + (adminId || chatId), JSON.stringify(merged));
   } catch (eUi) {
     console.error('review_ui save', eUi);
   }
@@ -4591,13 +4594,14 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
     ms: Date.now() - t0,
   });
 
-  if (!deliveredNow.length && !resumed) {
+  if (!deliveredNow.length && live.length) {
     try {
       await api.sendMessage({
         chat_id: chatId,
-        text: deferred
-          ? '⏳ تلگرام موقتاً محدودیت ارسال گذاشت. چند ثانیه بعد دوباره «📥 پیام‌های در انتظار» را بزنید.'
-          : '⚠️ ارسال پیام‌های Batch ناموفق بود.\nچند ثانیه بعد دوباره «📥 پیام‌های در انتظار» را بزنید.',
+        text:
+          '⚠️ ارسال پیام‌های Batch ناموفق بود (' +
+          live.length +
+          ' مورد).\nدوباره «📥 پیام‌های در انتظار» را بزنید.',
       });
     } catch (_e) {}
   } else if (deferred) {
@@ -4605,9 +4609,18 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
       await api.sendMessage({
         chat_id: chatId,
         text:
-          '⏳ بخشی از Batch به‌خاطر محدودیت/زمان به تعویق افتاد.\nتحویل‌شده: ' +
+          '⏳ بخشی از Batch ارسال شد: ' +
           deliveredNow.length +
-          '\nدوباره «📥 پیام‌های در انتظار» را بزنید تا ادامه برسد.',
+          ' از ' +
+          live.length +
+          '.\nدوباره «📥 پیام‌های در انتظار» را بزنید تا ادامه برسد.',
+      });
+    } catch (_e) {}
+  } else if (deliveredNow.length) {
+    try {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '✅ ' + deliveredNow.length + ' پیام برای بررسی ارسال شد.',
       });
     } catch (_e) {}
   }
