@@ -6,9 +6,10 @@ import { api, db } from 'sdk';
 import { eq, and } from 'sdk/db';
 import { messages } from 'schema';
 import { DEFAULT_CHANNELS } from 'lib/config';
-import { settingGet, settingSet, acquireLock, releaseLock, toBoldHtml, dropMessageFromAllReviewBatches } from 'lib/dbutil';
+import { settingGet, settingSet,
+  rememberChannelMessage, acquireLock, releaseLock, toBoldHtml, dropMessageFromAllReviewBatches } from 'lib/dbutil';
 import { exactBodyKey } from 'lib/validation';
-import { channelMessageLink } from 'lib/resolve';
+import { channelMessageLink, resolveChannelMessageLink } from 'lib/resolve';
 import { flushProgressInline, sanitizeMarkup } from 'lib/keyboards';
 
 export const HOLE_BATCH = 10;
@@ -188,14 +189,24 @@ export async function drainHoleWave(opts) {
           continue;
         }
 
-        // رزرو اتمیک
+        // رزرو اتمیک + reviewedBy مالک سوراخ
+        const ownerId = Number(job.ownerId) || 0;
         await db
           .update(messages)
-          .set({ status: 'publishing' })
+          .set({
+            status: 'publishing',
+            reviewedBy: ownerId || null,
+            reviewedAt: new Date(),
+          })
           .where(and(eq(messages.id, row.id), eq(messages.status, 'pending')))
           .run();
         const chk = (await db.select().from(messages).where(eq(messages.id, row.id)).all()) || [];
         if (!chk[0] || String(chk[0].status) !== 'publishing') {
+          processed += 1;
+          continue;
+        }
+        const holder = Number(chk[0].reviewedBy ?? chk[0].reviewed_by) || 0;
+        if (ownerId && holder && holder !== ownerId) {
           processed += 1;
           continue;
         }
@@ -234,7 +245,7 @@ export async function drainHoleWave(opts) {
         }
 
         try {
-          await settingSet('chmsg:' + channelKey + ':' + mid, String(row.id));
+          await rememberChannelMessage(channelKey, mid, row.id);
         } catch (_e) {}
 
         await db
@@ -257,15 +268,14 @@ export async function drainHoleWave(opts) {
 
         // اطلاع کاربر — شکست آن پیام را ناموفق نمی‌کند
         try {
-          const link = channelMessageLink(conf.chatId, mid, channelKey);
-          let txt = '✅ پیام شما تأیید و منتشر شد.';
-          if (link) {
-            txt += '\n\nمشاهده در کانال «' + (conf.title || channelKey) + '»:\n' + link;
-          }
+          if (!mid) throw new Error('no mid');
+          const link = await resolveChannelMessageLink(conf.chatId, mid, channelKey);
+          if (!link) throw new Error('no link');
+          let txt = 'عزیزدلم ! پیامتو توی چنل قرار دادیم لینک پیامت : ' + link;
           await api.sendMessage({
             chat_id: row.userId,
             text: txt,
-            link_preview_options: link ? { is_disabled: false, url: link } : undefined,
+            link_preview_options: { is_disabled: false, url: link },
           });
         } catch (_e) {}
       } catch (e) {

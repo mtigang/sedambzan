@@ -1,7 +1,48 @@
-/** زمان تهران — دوره شیفت ۱۲:۰۰ تا ۰۰:۰۰ (نیمه‌شب) + شمسی */
+/** زمان تهران — دوره شیفت بر اساس ساعت کاری مالک + شمسی */
 
-const PERIOD_START_MIN = 12 * 60; // ۱۲ ظهر
-const PERIOD_END_MIN = 0 * 60; // ۰۰:۰۰ نیمه‌شب
+// پیش‌فرض؛ با setWorkHoursConfig از settings به‌روز می‌شود
+let WORK_START_HM = '12:00';
+let WORK_END_HM = '00:00';
+let PERIOD_START_MIN = 12 * 60;
+/** '12' = ۱۲ ظهر تا ۱۲ شب | '24' = تمام شبانه‌روز */
+let SHIFT_DAY_MODE = '12';
+
+function _padHm(hm) {
+  const p = String(hm || '0:0').split(':');
+  const h = Math.max(0, Math.min(23, Number(p[0]) || 0));
+  const m = Math.max(0, Math.min(59, Number(p[1]) || 0));
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+
+/** تنظیم ساعت کاری سراسری (مالک) */
+export function setWorkHoursConfig(startHm, endHm) {
+  if (startHm) WORK_START_HM = _padHm(startHm);
+  if (endHm) WORK_END_HM = _padHm(endHm);
+  // مبدأ ترتیب دوره = شروع ساعت کاری (نه همیشه ۱۲)
+  PERIOD_START_MIN = hmToMin(WORK_START_HM);
+}
+
+export function getWorkHoursConfig() {
+  return { start: WORK_START_HM, end: WORK_END_HM, mode: SHIFT_DAY_MODE };
+}
+
+export function getShiftDayMode() {
+  return SHIFT_DAY_MODE === '24' ? '24' : '12';
+}
+
+/** حالت شیفت: 12 (۱۲–۰۰) یا 24 (تمام روز) */
+export function setShiftDayMode(mode) {
+  SHIFT_DAY_MODE = mode === '24' ? '24' : '12';
+  if (SHIFT_DAY_MODE === '24') {
+    WORK_START_HM = '00:00';
+    WORK_END_HM = '00:00';
+    PERIOD_START_MIN = 0;
+  } else {
+    WORK_START_HM = '12:00';
+    WORK_END_HM = '00:00';
+    PERIOD_START_MIN = 12 * 60;
+  }
+}
 
 export function tehranNow() {
   const fmt = new Intl.DateTimeFormat('en-GB', {
@@ -100,33 +141,64 @@ function addDays(iso, delta) {
 
 export function isWorkHours(now) {
   if (!now) now = tehranNow();
-  // ۱۲:۰۰ تا ۰۰:۰۰ (نیمه‌شب) — نه بعد از نیمه‌شب
-  return inRange(now.hm, '12:00', '00:00');
+  if (SHIFT_DAY_MODE === '24') return true;
+  return inRange(now.hm, WORK_START_HM, WORK_END_HM);
 }
 
 /**
- * شیفت‌های قابل انتخاب: ۱۲:۰۰–۱۳:۰۰ … ۲۳:۰۰–۰۰:۰۰
+ * شیفت‌های قابل انتخاب ادمین — دقیقاً داخل بازه ساعت کاری مالک (WORK_START → WORK_END)
+ * هر اسلات یک‌ساعته؛ اسلات‌های گذشتهٔ همان دوره حذف می‌شوند.
  */
 export function buildAvailableShiftSlots(now) {
   if (!now) now = tehranNow();
   const slots = [];
   const pad = (n) => String(n).padStart(2, '0');
-  const inWork = isWorkHours(now);
-  const nowOrd = periodOrd(now.hm);
-  // دوره رسمی: ۱۲:۰۰–۱۳:۰۰ … ۲۳:۰۰–۰۰:۰۰
-  for (let h = 12; h <= 23; h++) {
+  const nOrd = periodOrd(now.hm);
+  // حالت ۲۴ ساعته: تمام ساعات روز — اسلات‌های کاملاً گذشته حذف می‌شوند
+  if (SHIFT_DAY_MODE === '24') {
+    for (let h = 0; h < 24; h++) {
+      const start = pad(h) + ':00';
+      const end = pad((h + 1) % 24) + ':00';
+      if (h < now.hour) continue; // گذشته
+      slots.push({ start: start, end: end, label: start + '–' + end, hourKey: start });
+    }
+    if (!slots.length) {
+      const h = now.hour;
+      slots.push({
+        start: pad(h) + ':00',
+        end: pad((h + 1) % 24) + ':00',
+        label: pad(h) + ':00–' + pad((h + 1) % 24) + ':00',
+        hourKey: pad(h) + ':00',
+      });
+    }
+    return slots;
+  }
+  const startH = Math.floor(hmToMin(WORK_START_HM) / 60);
+  let endH = Math.floor(hmToMin(WORK_END_HM) / 60);
+  // اگر end = 00:00 یعنی تا نیمه‌شب → آخرین اسلات ۲۳–۰۰
+  const hours = [];
+  if (WORK_END_HM === '00:00' || endH === 0) {
+    for (let h = startH; h <= 23; h++) hours.push(h);
+  } else if (startH < endH) {
+    for (let h = startH; h < endH; h++) hours.push(h);
+  } else {
+    for (let h = startH; h < 24; h++) hours.push(h);
+    for (let h = 0; h < endH; h++) hours.push(h);
+  }
+  for (const h of hours) {
     const start = pad(h) + ':00';
     const end = pad((h + 1) % 24) + ':00';
-    if (inWork) {
-      const endOrd = periodOrd(end);
-      if (nowOrd >= endOrd) continue; // بازه تمام شده
+    // رد کردن اسلات‌های گذشته در همان دوره
+    if (isWorkHours(now)) {
+      const eOrd = periodOrd(end) || 24 * 60;
+      const sOrd = periodOrd(start);
+      if (sOrd < eOrd && nOrd >= eOrd) continue;
+      if (sOrd > eOrd) {
+        // اسلات عبوری از نیمه‌شب
+        if (nOrd >= eOrd && nOrd < sOrd) continue;
+      }
     }
-    slots.push({
-      start: start,
-      end: end,
-      label: start + '–' + end,
-      hourKey: start,
-    });
+    slots.push({ start: start, end: end, label: start + '–' + end, hourKey: start });
   }
   return slots;
 }
@@ -240,23 +312,25 @@ export function hoursUntilWorkOpen(now) {
   if (!now) now = tehranNow();
   if (isWorkHours(now)) return 0;
   const nowM = hmToMin(now.hm);
-  const openM = 12 * 60;
-  // ۰۰:۰۰–۱۱:۵۹ تا ظهر
-  if (nowM < openM) return Math.max(1, Math.ceil((openM - nowM) / 60));
-  // بعد از نیمه‌شب از مسیر دیگر نمی‌آید چون isWorkHours تا ۰۰:۰۰ است
+  const openM = hmToMin(WORK_START_HM);
+  if (nowM <= openM) return Math.max(1, Math.ceil((openM - nowM) / 60));
   return Math.max(1, Math.ceil((openM + 24 * 60 - nowM) / 60));
 }
 
 export function workHoursClosedText() {
   const h = hoursUntilWorkOpen();
+  const cfg = getWorkHoursConfig();
   return (
-    '⏰ ساعت کاری از ' +
-    toFaDigits('12:00') +
+    '🌬 فعلاً خارج از ساعت کاریمه…\n\n' +
+    'ساعت کارم از ' +
+    toFaDigits(cfg.start) +
     ' تا ' +
-    toFaDigits('00:00') +
-    ' است.\nالان خارج از ساعت کاری هستید.\nحدود ' +
+    toFaDigits(cfg.end) +
+    ' هست 🌟\n' +
+    'پیامت ثبت نشد؛ نگران نباش، ربات خراب نیست 🩵\n\n' +
+    'حدود ' +
     toFaDigits(h) +
-    ' ساعت تا شروع کار مانده.'
+    ' ساعت دیگه دوباره باز می‌شم 🎀'
   );
 }
 

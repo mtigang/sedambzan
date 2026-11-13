@@ -1,14 +1,14 @@
 import { api, db } from 'sdk';
 import {  channels, channelAdmins, shifts, settings, users, messages, subLeaders } from 'schema';
 // subLeaders used for role
-import { eq, and, sql, desc } from 'sdk/db';
+import { eq, and, sql, desc, asc } from 'sdk/db';
 import {
   DEFAULT_CHANNELS,
   OWNER_IDS,
   CHANNEL_IDS,
   ADMIN_GROUP_IDS,
 } from 'lib/config';
-import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf, periodOrd, isWorkHours } from 'lib/time';
+import { tehranNow, inRange, periodDateStr, normHm, hourKeyOf, periodOrd, isWorkHours, setWorkHoursConfig, setShiftDayMode, getShiftDayMode, buildAvailableShiftSlots } from 'lib/time';
 import { exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { reviewInline, sanitizeMarkup } from 'lib/keyboards';
 
@@ -102,12 +102,19 @@ export async function getChannels() {
 }
 
 export async function getChannel(key) {
+  let globalWh = null;
+  try {
+    const { getWorkHoursConfig } = await import('lib/time');
+    globalWh = getWorkHoursConfig();
+  } catch (_e) {}
   try {
     const rows = await db.select().from(channels).where(eq(channels.key, key)).all();
     if (rows?.[0]) {
       const r = rows[0];
       return {
         ...r,
+        workStart: (globalWh && globalWh.start) || r.workStart || '12:00',
+        workEnd: (globalWh && globalWh.end) || r.workEnd || '00:00',
         chatId: CHANNEL_IDS[key] || Number(r.link) || null,
         adminGroupId: ADMIN_GROUP_IDS[key] || null,
       };
@@ -122,8 +129,8 @@ export async function getChannel(key) {
     title: d.title,
     link: String(d.chatId),
     enabled: 1,
-    workStart: d.workStart,
-    workEnd: d.workEnd,
+    workStart: (globalWh && globalWh.start) || d.workStart,
+    workEnd: (globalWh && globalWh.end) || d.workEnd,
     chatId: d.chatId,
     adminGroupId: d.adminGroupId,
   };
@@ -138,6 +145,7 @@ export async function settingGet(key, def = null) {
   }
 }
 
+
 export async function settingSet(key, value) {
   const v = String(value);
   try {
@@ -150,6 +158,700 @@ export async function settingSet(key, value) {
     }
   } catch (e) {
     console.error('settingSet', e);
+  }
+}
+
+/** ایندکس سبک آخرین پیام‌های هر کاربر در settings (بدون تغییر schema) */
+export async function rememberUserMessageId(userId, msgId) {
+  const uid = Number(userId);
+  const mid = Number(msgId);
+  if (!Number.isFinite(uid) || !Number.isFinite(mid) || mid <= 0) return;
+  const key = 'umsg:' + uid;
+  let ids = [];
+  try {
+    const raw = await settingGet(key, '[]');
+    const parsed = JSON.parse(String(raw || '[]'));
+    if (Array.isArray(parsed)) ids = parsed.map(Number).filter(function (x) { return Number.isFinite(x) && x > 0; });
+  } catch (_e) {}
+  ids = [mid].concat(ids.filter(function (x) { return x !== mid; })).slice(0, 400);
+  try {
+    await settingSet(key, JSON.stringify(ids));
+  } catch (_e) {}
+}
+
+/**
+ * بارگذاری امن پیام‌های یک کاربر بدون WHERE روی userId روی کل جدول
+ * (جلوگیری از Sqlite rows_read limit exceeded)
+ * @returns {Promise<Array>}
+ */
+export async function loadUserMessagesPage(userId, limit, opts) {
+  const uid = Number(userId);
+  const lim = Math.max(1, Math.min(Number(limit) || 30, 50));
+  const beforeId =
+    opts && opts.beforeId != null && Number.isFinite(Number(opts.beforeId))
+      ? Number(opts.beforeId)
+      : null;
+  const maxScan = Math.max(800, Math.min(Number((opts && opts.maxScan) || 4000), 8000));
+  const batchSize = 500;
+  const maxRounds = Math.min(
+    Number((opts && opts.maxRounds) || Math.ceil(maxScan / batchSize)),
+    Math.ceil(maxScan / batchSize)
+  );
+  const out = [];
+  const seen = Object.create(null);
+  let indexTotal = 0;
+
+  if (!Number.isFinite(uid) || uid <= 0) {
+    return { rows: out, hasMore: false, indexTotal: 0 };
+  }
+
+  try {
+    const raw = await settingGet('umsg:' + uid, '');
+    if (raw) {
+      const ids = JSON.parse(String(raw));
+      if (Array.isArray(ids)) {
+        indexTotal = ids.length;
+        const sorted = ids
+          .map(Number)
+          .filter(function (x) {
+            return Number.isFinite(x) && x > 0 && (beforeId == null || x < beforeId);
+          })
+          .sort(function (a, b) {
+            return b - a;
+          });
+        for (const id of sorted) {
+          if (seen[id]) continue;
+          try {
+            const rows =
+              (await db
+                .select({
+                  id: messages.id,
+                  userId: messages.userId,
+                  status: messages.status,
+                  content: messages.content,
+                  channelKey: messages.channelKey,
+                  submittedAt: messages.submittedAt,
+                  reviewedAt: messages.reviewedAt,
+                  reviewedBy: messages.reviewedBy,
+                  rejectReason: messages.rejectReason,
+                })
+                .from(messages)
+                .where(eq(messages.id, id))
+                .limit(1)
+                .all()) || [];
+            if (rows[0] && Number(rows[0].userId ?? rows[0].user_id) === uid) {
+              seen[id] = 1;
+              out.push(rows[0]);
+            }
+          } catch (_e) {}
+          if (out.length >= lim) break;
+        }
+      }
+    }
+  } catch (_e) {}
+
+  if (out.length >= lim) {
+    const rows = out
+      .sort(function (a, b) {
+        return Number(b.id) - Number(a.id);
+      })
+      .slice(0, lim);
+    return { rows: rows, hasMore: true, indexTotal: indexTotal };
+  }
+
+  let cursor =
+    beforeId != null && Number.isFinite(beforeId)
+      ? beforeId
+      : out.length
+        ? Math.min.apply(
+            null,
+            out.map(function (r) {
+              return Number(r.id);
+            })
+          )
+        : Number.MAX_SAFE_INTEGER;
+
+  for (let round = 0; round < maxRounds && out.length < lim; round++) {
+    let batch = [];
+    try {
+      if (cursor < Number.MAX_SAFE_INTEGER) {
+        batch =
+          (await db
+            .select({
+              id: messages.id,
+              userId: messages.userId,
+              status: messages.status,
+              content: messages.content,
+              channelKey: messages.channelKey,
+              submittedAt: messages.submittedAt,
+              reviewedAt: messages.reviewedAt,
+              reviewedBy: messages.reviewedBy,
+              rejectReason: messages.rejectReason,
+            })
+            .from(messages)
+            .where(sql`${messages.id} < ${cursor}`)
+            .orderBy(desc(messages.id))
+            .limit(batchSize)
+            .all()) || [];
+      } else {
+        batch =
+          (await db
+            .select({
+              id: messages.id,
+              userId: messages.userId,
+              status: messages.status,
+              content: messages.content,
+              channelKey: messages.channelKey,
+              submittedAt: messages.submittedAt,
+              reviewedAt: messages.reviewedAt,
+              reviewedBy: messages.reviewedBy,
+              rejectReason: messages.rejectReason,
+            })
+            .from(messages)
+            .orderBy(desc(messages.id))
+            .limit(batchSize)
+            .all()) || [];
+      }
+    } catch (e) {
+      console.error('loadUserMessagesPage batch', round, e);
+      break;
+    }
+    if (!batch.length) break;
+    for (const row of batch) {
+      const id = Number(row.id);
+      if (id < cursor) cursor = id;
+      if (Number(row.userId ?? row.user_id) !== uid) continue;
+      if (seen[id]) continue;
+      seen[id] = 1;
+      out.push(row);
+      if (out.length >= lim) break;
+    }
+    const lastId = Number(batch[batch.length - 1].id);
+    if (!Number.isFinite(lastId) || lastId <= 1) break;
+    cursor = lastId;
+    if (batch.length < batchSize) break;
+  }
+
+  const rows = out
+    .sort(function (a, b) {
+      return Number(b.id) - Number(a.id);
+    })
+    .slice(0, lim);
+  return { rows: rows, hasMore: rows.length >= lim, indexTotal: indexTotal };
+}
+
+/** سازگاری با فراخوانی‌های قدیمی — فقط آرایه ردیف‌ها */
+export async function loadUserMessages(userId, limit, opts) {
+  const page = await loadUserMessagesPage(userId, limit, opts);
+  return page.rows || [];
+}
+
+
+export async function estimateQueueAhead(channelKey, msgId, maxScan) {
+  const ck = String(channelKey || '');
+  const mid = Number(msgId);
+  if (!ck || !Number.isFinite(mid)) return { ahead: 0, scanned: 0, totalPendingSeen: 0 };
+  const scan = Math.max(1000, Math.min(Number(maxScan) || 12000, 20000));
+  let ahead = 0;
+  let totalPendingSeen = 0;
+  try {
+    const rows =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(scan)
+        .all()) || [];
+    for (const r of rows) {
+      const rck = String((r.channelKey ?? r.channel_key) || '');
+      if (rck !== ck) continue;
+      const st = String(r.status || '');
+      if (st !== 'pending' && st !== 'publishing') continue;
+      totalPendingSeen++;
+      if (Number(r.id) < mid) ahead++;
+    }
+    return { ahead: ahead, scanned: rows.length, totalPendingSeen: totalPendingSeen };
+  } catch (e) {
+    console.error('estimateQueueAhead', e);
+    return { ahead: 0, scanned: 0, totalPendingSeen: 0 };
+  }
+}
+
+export async function countRecentByStatus(maxScan) {
+  const scan = Math.max(500, Math.min(Number(maxScan) || 12000, 20000));
+  const byCh = Object.create(null);
+  let pe = 0, ap = 0, rj = 0, other = 0;
+  try {
+    const rows =
+      (await db
+        .select({
+          status: messages.status,
+          channelKey: messages.channelKey,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(scan)
+        .all()) || [];
+    for (const x of rows) {
+      const st = String(x.status || '');
+      const ck = String((x.channelKey ?? x.channel_key) || '');
+      if (!byCh[ck]) byCh[ck] = { pe: 0, ap: 0, rj: 0, total: 0 };
+      byCh[ck].total++;
+      if (st === 'pending' || st === 'publishing') {
+        pe++;
+        byCh[ck].pe++;
+      } else if (st === 'approved') {
+        ap++;
+        byCh[ck].ap++;
+      } else if (st === 'rejected') {
+        rj++;
+        byCh[ck].rj++;
+      } else other++;
+    }
+    return { pe: pe, ap: ap, rj: rj, other: other, scanned: rows.length, byCh: byCh };
+  } catch (e) {
+    console.error('countRecentByStatus', e);
+    return { pe: 0, ap: 0, rj: 0, other: 0, scanned: 0, byCh: byCh };
+  }
+}
+
+
+
+/** ذخیره نگاشت دوطرفه message_id کانال ↔ آیدی داخلی */
+export async function rememberChannelMessage(channelKey, channelMsgId, internalId) {
+  const ck = String(channelKey || '');
+  const mid = Number(channelMsgId);
+  const id = Number(internalId);
+  if (!ck || !Number.isFinite(mid) || !Number.isFinite(id)) return;
+  try {
+    await settingSet('chmsg:' + ck + ':' + mid, String(id));
+  } catch (_e) {}
+  try {
+    await settingSet('msgch:' + id, ck + ':' + mid);
+  } catch (_e) {}
+}
+
+/**
+ * پیدا کردن message_id کانال از روی آیدی داخلی پیام
+ * @returns {{ channelKey: string, channelMsgId: number, chatId: number|null } | null}
+ */
+export async function findChannelMessageByInternalId(internalId) {
+  const id = Number(internalId);
+  if (!Number.isFinite(id)) return null;
+  try {
+    const rev = await settingGet('msgch:' + id, '');
+    if (rev && String(rev).includes(':')) {
+      const parts = String(rev).split(':');
+      const ck = parts[0];
+      const mid = Number(parts[1]);
+      if (ck && Number.isFinite(mid)) {
+        const chatId = (CHANNEL_IDS && CHANNEL_IDS[ck]) != null ? Number(CHANNEL_IDS[ck]) : null;
+        return { channelKey: ck, channelMsgId: mid, chatId: chatId };
+      }
+    }
+  } catch (_e) {}
+  // بدون اسکن کل settings (timeout روی approve)
+  return null;
+}
+
+/**
+ * حذف امن پیام از کانال.
+ * اگر deleteMessage رد شد، یک‌بار edit به «حذف شد» را امتحان می‌کند.
+ */
+export async function deleteChannelMessageSafe(chatId, messageId) {
+  const cid = Number(chatId);
+  const mid = Number(messageId);
+  if (!Number.isFinite(cid) || !cid || !Number.isFinite(mid) || mid <= 0) {
+    return { ok: false, error: 'شناسه کانال یا پیام نامعتبر است.' };
+  }
+  const attempts = [
+    { chat_id: cid, message_id: mid },
+    { chat_id: String(cid), message_id: mid },
+  ];
+  let lastErr = '';
+  for (const a of attempts) {
+    try {
+      await api.deleteMessage(a);
+      return { ok: true, method: 'delete' };
+    } catch (e) {
+      lastErr = String((e && (e.description || e.message)) || e || '');
+    }
+  }
+  // اگر حذف ممکن نبود، محتوا را خنثی کن (اگر ربات نویسنده باشد)
+  try {
+    await api.editMessageText({
+      chat_id: cid,
+      message_id: mid,
+      text: '🗑 این پیام حذف شد.',
+    });
+    return { ok: true, method: 'edit' };
+  } catch (_e2) {
+    try {
+      await api.editMessageText({
+        chat_id: String(cid),
+        message_id: mid,
+        text: '🗑 این پیام حذف شد.',
+      });
+      return { ok: true, method: 'edit' };
+    } catch (_e3) {}
+  }
+  let hint = lastErr || 'حذف ناموفق';
+  if (/can.?t be deleted|can't be deleted|message to delete not found|message not found/i.test(lastErr)) {
+    hint =
+      'تلگرام اجازه حذف نداد.\n' +
+      '• ربات را در کانال ادمین کنید و تیک Delete messages را روشن کنید\n' +
+      '• یا پیام از قبل پاک شده / آیدی اشتباه است\n' +
+      '• لینک عمومی همان پیام کانال را بفرستید\n' +
+      '(' +
+      lastErr.slice(0, 80) +
+      ')';
+  }
+  return { ok: false, error: hint };
+}
+
+
+
+/** سقف تقریبی حجم جدول messages ≈ ۵ مگابایت */
+
+/**
+ * چک تکراری سبک و مقیاس‌پذیر (بدون .all روی کل pending)
+ * 1) ایندکس settings
+ * 2) حداکثر N pending اخیر همان کانال
+ * 3) حداکثر M approved اخیر
+ * در خطا: null برمی‌گرداند تا caller تصمیم بگیرد (fail-open ترجیح داده می‌شود)
+ */
+export async function findBodyDuplicate(channelKey, bodyKey) {
+  const ck = String(channelKey || '');
+  const key = String(bodyKey || '');
+  if (!ck || !key) return { dup: null, dupIsPending: false, queuePos: 0, error: null };
+
+  const bIdx = bodyIndexSettingKey(ck, key);
+
+  // ۱) ایندکس settings — سریع
+  try {
+    const hit = await settingGet(bIdx, '');
+    if (hit) {
+      const hid = Number(String(hit).split('|')[0]);
+      const hst = String(hit).split('|')[1] || 'pending';
+      if (hid && (hst === 'pending' || hst === 'approved' || hst === 'publishing')) {
+        try {
+          const row = await getMessageById(hid);
+          if (row) {
+            const st = String(row.status || '');
+            if (st === 'pending' || st === 'publishing' || st === 'approved') {
+              return {
+                dup: { id: hid, status: st },
+                dupIsPending: st === 'pending' || st === 'publishing',
+                queuePos: 0,
+                error: null,
+              };
+            }
+          }
+          try {
+            await settingSet(bIdx, '');
+          } catch (_e) {}
+        } catch (_e) {}
+      }
+    }
+  } catch (e) {
+    console.error('findBodyDuplicate index', e);
+  }
+
+  // ۲) فقط ۱۰۰ pending اخیر + ۱۰۰ approved اخیر (اسکن از id نزولی — بدون WHERE سنگین)
+  try {
+    const recent =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+          content: messages.content,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(800)
+        .all()) || [];
+
+    let pendChecked = 0;
+    let apprChecked = 0;
+    for (const row of recent) {
+      const rck = String((row.channelKey ?? row.channel_key) || '');
+      if (rck !== ck) continue;
+      const st = String(row.status || '');
+      if (st === 'pending' || st === 'publishing') {
+        if (pendChecked >= 100) continue;
+        pendChecked++;
+        const other = exactBodyKey(row.content);
+        if (other && other === key) {
+          try {
+            await settingSet(bIdx, String(row.id) + '|pending');
+          } catch (_e) {}
+          return {
+            dup: row,
+            dupIsPending: true,
+            queuePos: 0,
+            error: null,
+          };
+        }
+      } else if (st === 'approved') {
+        if (apprChecked >= 100) continue;
+        apprChecked++;
+        const other = exactBodyKey(row.content);
+        if (other && other === key) {
+          try {
+            await settingSet(bIdx, String(row.id) + '|approved');
+          } catch (_e) {}
+          return {
+            dup: row,
+            dupIsPending: false,
+            queuePos: 0,
+            error: null,
+          };
+        }
+      }
+      if (pendChecked >= 100 && apprChecked >= 100) break;
+    }
+  } catch (e) {
+    console.error('findBodyDuplicate scan', e);
+  }
+
+  return { dup: null, dupIsPending: false, queuePos: 0, error: null };
+}
+
+export const MESSAGES_SIZE_BUDGET_BYTES = 5 * 1024 * 1024;
+const MSG_ROW_OVERHEAD = 200;
+
+/**
+ * اگر برآورد حجم messages از ۵MB بیشتر باشد، قدیمی‌ترین پیام را حذف می‌کند.
+ * با هر پیام جدید یک‌بار صدا زده شود تا حجم به‌مرور پایین بیاید.
+ * @returns {{ pruned: number, id?: number, estimate?: number }}
+ */
+export async function pruneOldestMessageIfOverBudget() {
+  try {
+    let contentBytes = 0;
+    let n = 0;
+    try {
+      const rows =
+        (await db
+          .select({
+            n: sql`count(*)`,
+            bytes: sql`coalesce(sum(length(content)), 0)`,
+          })
+          .from(messages)
+          .all()) || [];
+      n = Number(rows[0] && (rows[0].n != null ? rows[0].n : rows[0].count)) || 0;
+      contentBytes = Number(rows[0] && rows[0].bytes) || 0;
+    } catch (e1) {
+      // fallback: فقط تعداد
+      try {
+        const c = (await db.select({ n: sql`count(*)` }).from(messages).all()) || [];
+        n = Number(c[0] && c[0].n) || 0;
+        contentBytes = n * 400;
+      } catch (_e) {
+        return { pruned: 0 };
+      }
+    }
+    const estimate = contentBytes + n * MSG_ROW_OVERHEAD;
+    if (estimate <= MESSAGES_SIZE_BUDGET_BYTES || n <= 0) {
+      return { pruned: 0, estimate: estimate, n: n };
+    }
+    let oldestId = null;
+    async function pickOldestByStatus(st) {
+      try {
+        const rows =
+          (await db
+            .select({ id: messages.id })
+            .from(messages)
+            .where(eq(messages.status, st))
+            .orderBy(asc(messages.id))
+            .limit(1)
+            .all()) || [];
+        if (rows[0] && rows[0].id != null) return Number(rows[0].id);
+      } catch (_e) {}
+      return null;
+    }
+    try {
+      oldestId = await pickOldestByStatus('rejected');
+      if (!oldestId) oldestId = await pickOldestByStatus('approved');
+      // فقط اگر هیچ rejected/approved نبود، از pending قدیمی حذف کن
+      if (!oldestId) {
+      // بودجه پر است ولی فقط rejected/approved قابل حذف‌اند — pending حفظ می‌شود
+      return { pruned: 0, estimate: estimate, n: n, skippedPending: true };
+    }
+    } catch (_e) {
+      try {
+        const all = (await db.select({ id: messages.id, status: messages.status }).from(messages).limit(800).all()) || [];
+        const rej = all.filter(function (r) { return String(r.status) === 'rejected'; });
+        const ap = all.filter(function (r) { return String(r.status) === 'approved'; });
+        const pool = rej.length ? rej : ap; // هرگز pending را برای بودجه حذف نکن
+        if (pool.length) {
+          oldestId = Math.min.apply(null, pool.map(function (r) { return Number(r.id); }));
+        }
+      } catch (_e2) {
+        return { pruned: 0, estimate: estimate };
+      }
+    }
+    if (!oldestId || !Number.isFinite(oldestId)) {
+      return { pruned: 0, estimate: estimate };
+    }
+    await db.delete(messages).where(eq(messages.id, oldestId)).run();
+    return { pruned: 1, id: oldestId, estimate: estimate, n: n };
+  } catch (e) {
+    console.error('pruneOldestMessageIfOverBudget', e);
+    return { pruned: 0 };
+  }
+}
+
+export async function loadWorkHoursFromSettings() {
+  try {
+    const mode = (await settingGet('shift_day_mode', '12')) || '12';
+    setShiftDayMode(mode);
+    if (String(mode) === '24') {
+      const s = '00:00';
+      const e = '00:00';
+      try {
+        for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+          if (DEFAULT_CHANNELS[k]) {
+            DEFAULT_CHANNELS[k].workStart = s;
+            DEFAULT_CHANNELS[k].workEnd = e;
+          }
+        }
+      } catch (_e) {}
+      return { start: s, end: e, mode: '24' };
+    }
+    const s = (await settingGet('work_start_hm', '12:00')) || '12:00';
+    const e = (await settingGet('work_end_hm', '00:00')) || '00:00';
+    setWorkHoursConfig(s, e);
+    try {
+      for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+        if (DEFAULT_CHANNELS[k]) {
+          DEFAULT_CHANNELS[k].workStart = s;
+          DEFAULT_CHANNELS[k].workEnd = e;
+        }
+      }
+    } catch (_e) {}
+    return { start: s, end: e, mode: '12' };
+  } catch (e) {
+    console.error('loadWorkHoursFromSettings', e);
+    return { start: '12:00', end: '00:00', mode: '12' };
+  }
+}
+
+export async function saveWorkHours(startHm, endHm) {
+  const s = String(startHm || '12:00');
+  const e = String(endHm || '00:00');
+  await settingSet('work_start_hm', s);
+  await settingSet('work_end_hm', e);
+  try {
+    setWorkHoursConfig(s, e);
+  } catch (_e) {}
+  // همگام‌سازی ساعت کاری هر کانال (لیست شیفت + پیام‌های ساعت کاری)
+  try {
+    for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+      if (DEFAULT_CHANNELS[k]) {
+        DEFAULT_CHANNELS[k].workStart = s;
+        DEFAULT_CHANNELS[k].workEnd = e;
+      }
+    }
+  } catch (_e) {}
+  try {
+    const rows = (await db.select().from(channels).all()) || [];
+    for (const row of rows) {
+      const key = row.key || row.channelKey;
+      if (!key) continue;
+      try {
+        await db
+          .update(channels)
+          .set({ workStart: s, workEnd: e })
+          .where(eq(channels.key, key));
+      } catch (_e) {}
+    }
+  } catch (e) {
+    console.error('saveWorkHours channel sync', e);
+  }
+}
+
+/** حالت شیفت روزانه: '12' یا '24' */
+export async function saveShiftDayMode(mode) {
+  const m = mode === '24' ? '24' : '12';
+  await settingSet('shift_day_mode', m);
+  try {
+    setShiftDayMode(m);
+  } catch (_e) {}
+  if (m === '24') {
+    await settingSet('work_start_hm', '00:00');
+    await settingSet('work_end_hm', '00:00');
+    try {
+      for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+        if (DEFAULT_CHANNELS[k]) {
+          DEFAULT_CHANNELS[k].workStart = '00:00';
+          DEFAULT_CHANNELS[k].workEnd = '00:00';
+        }
+      }
+    } catch (_e) {}
+  } else {
+    await settingSet('work_start_hm', '12:00');
+    await settingSet('work_end_hm', '00:00');
+    try {
+      for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+        if (DEFAULT_CHANNELS[k]) {
+          DEFAULT_CHANNELS[k].workStart = '12:00';
+          DEFAULT_CHANNELS[k].workEnd = '00:00';
+        }
+      }
+    } catch (_e) {}
+  }
+  return m;
+}
+
+export async function getShiftDayModeSetting() {
+  try {
+    const m = (await settingGet('shift_day_mode', '12')) || '12';
+    return m === '24' ? '24' : '12';
+  } catch (_e) {
+    return '12';
+  }
+}
+
+
+const PUBLISH_STICKER_SETTING = 'publish_sticker_file_id';
+/** fallback قدیمی — معمولاً نامعتبر است تا مالک یک‌بار استیکر را برای ربات بفرستد */
+const PUBLISH_STICKER_FALLBACK = '';
+
+export async function getPublishStickerFileId() {
+  try {
+    const v = await settingGet(PUBLISH_STICKER_SETTING, '');
+    if (v && String(v).trim()) return String(v).trim();
+  } catch (_e) {}
+  return PUBLISH_STICKER_FALLBACK || '';
+}
+
+export async function setPublishStickerFileId(fileId) {
+  const id = String(fileId || '').trim();
+  if (!id) return false;
+  await settingSet(PUBLISH_STICKER_SETTING, id);
+  return true;
+}
+
+/** ارسال استیکر بعد از انتشار — خطا (بلاک کاربر و …) فقط لاگ می‌شود، به مالک پیام نمی‌رود */
+export async function sendPublishStickerToUser(uid) {
+  if (!uid) return { ok: false, error: 'no uid' };
+  const fileId = await getPublishStickerFileId();
+  if (!fileId) {
+    console.error('publish sticker: file_id not set');
+    return { ok: false, error: 'no sticker file_id' };
+  }
+  try {
+    await api.sendSticker({ chat_id: Number(uid), sticker: fileId });
+    return { ok: true };
+  } catch (e) {
+    const detail = String((e && (e.message || e.description)) || e || 'unknown').slice(0, 300);
+    console.error('publish sticker fail uid=' + uid, detail);
+    return { ok: false, error: detail };
   }
 }
 
@@ -188,26 +890,58 @@ export async function setFridayMode(on) {
 }
 
 export const FRIDAY_MODE_TEXT =
-  '🌙 امروز جمعه‌ست…\n\n' +
-  'همه خوابیم 😴\n' +
-  'تکست و این حرفا کنسله.\n\n' +
-  'شنبه برگرد، با انرژی بیشتر منتظرتیم 🌸';
+  '🌙 امروز جمعه است.\n\n' +
+  'ارسال پیام به کانال‌ها امروز متوقف شده (تنظیم مدیریت).\n' +
+  'پیام شما ثبت نشد — ربات خراب نیست.\n' +
+  'شنبه از ساعت کاری دوباره می‌توانید بفرستید.';
 
-/** صف شلوغ — کاربر پیام نمی‌فرستد؛ ادمین تأیید/رد می‌کند */
-export async function isQueueBusyMode() {
-  return (await settingGet('queue_busy_mode', '0')) === '1';
+/** صف شلوغ — کاربر پیام نمی‌فرستد؛ ادمین تأیید/رد می‌کند
+ * بدون آرگومان: آیا حداقل یک کانال (یا فلگ سراسری قدیمی) شلوغ است؟
+ * با channelKey: فقط همان کانال
+ */
+export async function isQueueBusyMode(channelKey) {
+  try {
+    // با channelKey: فقط همان کانال — هرگز به فلگ سراسری سقوط نکن
+    // (باگ قبلی: کانال بدون ch_queue از queue_busy_mode سراسری ارث می‌برد)
+    if (channelKey) {
+      const ck = String(channelKey);
+      return (await settingGet('ch_queue:' + ck, '0')) === '1';
+    }
+    // بدون آرگومان: آیا حداقل یک کانال شلوغ است؟
+    for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
+      if ((await settingGet('ch_queue:' + ck, '0')) === '1') return true;
+    }
+    return false;
+  } catch (_e) {
+    return false;
+  }
 }
 
 export async function setQueueBusyMode(on) {
+  // سراسری (همه کانال‌ها)
   await settingSet('queue_busy_mode', on ? '1' : '0');
+  for (const ck of Object.keys(DEFAULT_CHANNELS || {})) {
+    await settingSet('ch_queue:' + ck, on ? '1' : '0');
+  }
+}
+
+export async function setChannelQueueBusy(channelKey, on) {
+  await settingSet('ch_queue:' + String(channelKey), on ? '1' : '0');
+}
+
+export async function isChannelQueueBusy(channelKey) {
+  return (await settingGet('ch_queue:' + String(channelKey), '0')) === '1';
 }
 
 export const QUEUE_BUSY_TEXT =
-  '⏳ حجم پیام‌های در انتظار زیاد است.\n\n' +
-  'لطفاً کمی صبر کنید و بعداً دوباره امتحان کنید.';
+  '⏳ صف پیام این کانال شلوغ است.\n\n' +
+  'مدیریت موقتاً دریافت پیام جدید را برای این کانال بسته تا ادمین‌ها به صف برسند.\n' +
+  'پیام شما ثبت نشد — ربات سالم است.\n' +
+  'لطفاً کمی بعد دوباره تلاش کنید.';
 
 // ——— عضویت اجباری ———
 const FJ_ACTIVE_KEY = 'force_join_active';
+const FJ_QUEUE_KEY = 'force_join_queue';
 const FJ_HISTORY_KEY = 'force_join_history';
 
 export async function getForceJoinCampaign() {
@@ -228,6 +962,56 @@ export async function saveForceJoinCampaign(camp) {
     return;
   }
   await settingSet(FJ_ACTIVE_KEY, JSON.stringify(camp));
+}
+
+export async function getForceJoinQueue() {
+  try {
+    const raw = await settingGet(FJ_QUEUE_KEY, '[]');
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch (_e) {
+    return [];
+  }
+}
+
+export async function saveForceJoinQueue(arr) {
+  const list = Array.isArray(arr) ? arr : [];
+  if (list.length > 40) list.length = 40;
+  await settingSet(FJ_QUEUE_KEY, JSON.stringify(list));
+}
+
+/** افزودن کمپین به صف نوبتی (هنوز active نیست) */
+export async function enqueueForceJoinCampaign(camp) {
+  const q = await getForceJoinQueue();
+  const item = Object.assign({}, camp, { active: false, queuedAt: new Date().toISOString() });
+  q.push(item);
+  await saveForceJoinQueue(q);
+  return q.length;
+}
+
+/** بعد از پایان کمپین فعلی، نفر اول صف را فعال کن */
+export async function promoteNextForceJoinFromQueue() {
+  const q = await getForceJoinQueue();
+  if (!q.length) {
+    await saveForceJoinCampaign(null);
+    return null;
+  }
+  const next = q.shift();
+  await saveForceJoinQueue(q);
+  if (!next) {
+    await saveForceJoinCampaign(null);
+    return null;
+  }
+  next.active = true;
+  next.confirmedCount = Number(next.confirmedCount) || 0;
+  next.startedAt = new Date().toISOString();
+  delete next.queuedAt;
+  await saveForceJoinCampaign(next);
+  return next;
+}
+
+export async function clearForceJoinQueue() {
+  await saveForceJoinQueue([]);
 }
 
 export async function getForceJoinHistory() {
@@ -292,12 +1076,127 @@ export function parseChannelLinkInput(input) {
   return null;
 }
 
+function normalizeInviteUrl(u) {
+  return String(u || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+}
+
+/** جمع‌آوری chatIdهای شناخته‌شده برای تطبیق لینک خصوصی */
+async function collectKnownChatIdsForForceJoin() {
+  const set = new Set();
+  try {
+    for (const v of Object.values(CHANNEL_IDS || {})) {
+      if (v == null || v === '' || v === 0) continue;
+      const n = Number(v);
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
+    }
+  } catch (_e) {}
+  try {
+    for (const v of Object.values(ADMIN_GROUP_IDS || {})) {
+      if (v == null || v === '' || v === 0) continue;
+      const n = Number(v);
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
+    }
+  } catch (_e) {}
+  try {
+    const rows = (await db.select().from(channels).all()) || [];
+    for (const r of rows) {
+      const n = Number(r && (r.chatId != null ? r.chatId : r.link));
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
+    }
+  } catch (_e) {}
+  try {
+    const hist = await getForceJoinHistory();
+    for (const h of hist || []) {
+      const n = Number(h && h.chatId);
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
+      if (Array.isArray(h && h.channels)) {
+        for (const c of h.channels) {
+          const cn = Number(c && c.chatId);
+          if (Number.isFinite(cn) && Math.abs(cn) > 1000) set.add(cn);
+        }
+      }
+    }
+  } catch (_e) {}
+  try {
+    const camp = await getForceJoinCampaign();
+    if (camp) {
+      const n = Number(camp.chatId);
+      if (Number.isFinite(n) && Math.abs(n) > 1000) set.add(n);
+      if (Array.isArray(camp.channels)) {
+        for (const c of camp.channels) {
+          const cn = Number(c && c.chatId);
+          if (Number.isFinite(cn) && Math.abs(cn) > 1000) set.add(cn);
+        }
+      }
+    }
+  } catch (_e) {}
+  return Array.from(set);
+}
+
+/**
+ * اگر لینک خصوصی بود و getChat مستقیم شکست خورد،
+ * بین چت‌هایی که ربات از قبل ادمین است جستجو می‌کند.
+ */
+async function resolvePrivateInviteViaAdminChats(inviteLink) {
+  const target = normalizeInviteUrl(inviteLink);
+  if (!target) return null;
+  const candidates = await collectKnownChatIdsForForceJoin();
+  let adminOnlyMatch = null;
+  let adminOnlyCount = 0;
+
+  for (const cid of candidates) {
+    try {
+      const chat = await api.getChat({ chat_id: cid });
+      if (!chat || chat.id == null) continue;
+
+      // تطبیق لینک ذخیره‌شده در خود چت
+      if (chat.invite_link && normalizeInviteUrl(chat.invite_link) === target) {
+        return chat;
+      }
+
+      // لینک اصلی صادر‌شده توسط ربات
+      try {
+        const exp = await api.exportChatInviteLink({ chat_id: cid });
+        const expUrl = typeof exp === 'string' ? exp : exp && exp.invite_link;
+        if (expUrl && normalizeInviteUrl(expUrl) === target) {
+          return chat;
+        }
+      } catch (_e) {}
+
+      // ربات ادمین است؟ به‌عنوان کاندید ضعیف نگه دار
+      try {
+        const me = await api.getMe();
+        const mem = await api.getChatMember({ chat_id: cid, user_id: me.id });
+        const st = String(mem && mem.status ? mem.status : '');
+        if (st === 'administrator' || st === 'creator') {
+          adminOnlyCount += 1;
+          adminOnlyMatch = chat;
+        }
+      } catch (_e) {}
+    } catch (_e) {}
+  }
+
+  // اگر فقط یک چت شناخته‌شده وجود داشت که ربات ادمینش است، همان را بپذیر
+  // (سناریوی رایج: مالک لینک خصوصی همان کانال را می‌فرستد)
+  if (adminOnlyCount === 1 && adminOnlyMatch) {
+    return adminOnlyMatch;
+  }
+  return null;
+}
+
 /** بررسی عضویت و ادمین بودن ربات در کانال + تعداد اعضا */
 export async function inspectChannelForForceJoin(parsed) {
-  let chatId = parsed.chatId;
+  let chatId = parsed.chatId != null ? Number(parsed.chatId) : null;
+  if (chatId != null && !Number.isFinite(chatId)) chatId = null;
   let title = '';
   let username = parsed.username || null;
   let inviteLink = parsed.inviteLink || null;
+  const invStr = String(inviteLink || '');
+  const hadPrivateInvite = !!(invStr && (/t\.me\/\+/i.test(invStr) || /joinchat\//i.test(invStr)));
   try {
     let chat = null;
     if (chatId) {
@@ -305,13 +1204,36 @@ export async function inspectChannelForForceJoin(parsed) {
     } else if (username) {
       chat = await api.getChat({ chat_id: '@' + username });
     } else if (inviteLink) {
+      // ۱) تلاش مستقیم (گاهی روی بعضی سرورها کار می‌کند)
       try {
         chat = await api.getChat({ chat_id: inviteLink });
-      } catch (_e) {
+      } catch (_e1) {
+        try {
+          chat = await api.getChat({ chat_id: String(inviteLink).replace(/^https?:\/\//i, '') });
+        } catch (_e2) {
+          chat = null;
+        }
+      }
+      // ۲) اگر ربات از قبل ادمین کانال/گروه‌های شناخته‌شده است → resolve
+      if (!chat || !chat.id) {
+        try {
+          chat = await resolvePrivateInviteViaAdminChats(inviteLink);
+        } catch (eRes) {
+          console.error('resolvePrivateInviteViaAdminChats', eRes);
+          chat = null;
+        }
+      }
+      if (!chat || !chat.id) {
         return {
           ok: false,
+          needChatId: true,
+          inviteLink: inviteLink,
           error:
-            'لینک خصوصی است یا ربات داخل کانال نیست.\nربات را به کانال اضافه و ادمین کنید (دسترسی مشاهدهٔ اعضا)، سپس دوباره لینک یا @یوزرنیم کانال را بفرستید.',
+            'لینک خصوصی کانال/گروه شناسایی شد.\n\n' +
+            'اگر ربات همین الان ادمین همان کانال یا گروه است، یکی از این‌ها را بفرستید:\n' +
+            '• آیدی عددی (مثل -1001234567890)\n' +
+            '• یا یک پیام از همان کانال/گروه را فوروارد کنید\n\n' +
+            'لینک دعوت برای دکمهٔ «عضویت» کاربران ذخیره می‌ماند.',
         };
       }
     }
@@ -319,20 +1241,24 @@ export async function inspectChannelForForceJoin(parsed) {
       return {
         ok: false,
         error:
-          'کانال پیدا نشد.\nربات را به کانال اضافه و ادمین کنید، بعد لینک یا @یوزرنیم را بفرستید.',
+          'کانال/گروه پیدا نشد.\nربات را عضو و ادمین کنید (دسترسی مشاهده اعضا)، بعد لینک / @یوزرنیم / آیدی عددی یا فوروارد پیام بفرستید.',
       };
     }
     chatId = chat.id;
     title = chat.title || chat.username || String(chatId);
+    const chatType = String(chat.type || '');
+    // channel | group | supergroup — همه برای عضویت اجباری مجازند
     if (chat.username) {
       username = chat.username;
-      inviteLink = 'https://t.me/' + chat.username;
+      if (!hadPrivateInvite) {
+        inviteLink = 'https://t.me/' + chat.username;
+      }
     }
   } catch (e) {
     return {
       ok: false,
       error:
-        'ربات به این کانال دسترسی ندارد.\nربات را اضافه کنید، ادمین کنید و فقط دسترسی «مشاهده اعضا» بدهید.\n\n' +
+        'ربات به این کانال/گروه دسترسی ندارد.\nربات را اضافه کنید، ادمین کنید و دسترسی «مشاهده اعضا» بدهید.\n\n' +
         ((e && (e.message || e.description)) || ''),
     };
   }
@@ -345,14 +1271,14 @@ export async function inspectChannelForForceJoin(parsed) {
       return {
         ok: false,
         error:
-          'ربات داخل کانال عضو است ولی ادمین نیست.\nربات را ادمین کنید و دسترسی مشاهدهٔ اعضا را بدهید.',
+          'ربات داخل کانال/گروه عضو است ولی ادمین نیست.\nربات را ادمین کنید و دسترسی مشاهدهٔ اعضا را بدهید.',
       };
     }
   } catch (e) {
     return {
       ok: false,
       error:
-        'ربات داخل کانال عضو نیست یا دسترسی ندارد.\nربات را به کانال اضافه و ادمین کنید (مشاهده اعضا).\n\n' +
+        'ربات داخل کانال/گروه عضو نیست یا دسترسی ندارد.\nربات را عضو و ادمین کنید (مشاهده اعضا).\n\n' +
         ((e && (e.message || e.description)) || ''),
     };
   }
@@ -380,13 +1306,77 @@ export async function inspectChannelForForceJoin(parsed) {
 }
 
 export async function isUserMemberOfChat(chatId, userId) {
-  try {
-    const mem = await api.getChatMember({ chat_id: chatId, user_id: userId });
-    const st = String(mem && mem.status ? mem.status : '');
-    return st === 'member' || st === 'administrator' || st === 'creator' || st === 'restricted';
-  } catch (_e) {
-    return false;
+  const uid = Number(userId);
+  if (!Number.isFinite(uid) || uid <= 0) {
+    return { member: false, status: null, error: 'آیدی کاربر نامعتبر', checked: false };
   }
+  // فقط همان chatId ذخیره‌شده در کمپین — بدون حدس -100 (منبع false-positive)
+  let cid = chatId;
+  if (typeof cid === 'string' && /^-?\d+$/.test(String(cid).trim())) {
+    cid = Number(String(cid).trim());
+  }
+  if (cid == null || cid === '' || (typeof cid === 'number' && !Number.isFinite(cid))) {
+    return { member: false, status: null, error: 'آیدی کانال نامعتبر', checked: false };
+  }
+
+  const attempts = [cid];
+  if (String(cid) !== String(chatId)) attempts.push(String(chatId));
+  else attempts.push(String(cid));
+
+  let lastErr = null;
+  let sawLeft = false;
+  for (const chatArg of attempts) {
+    try {
+      const mem = await api.getChatMember({ chat_id: chatArg, user_id: uid });
+      if (!mem || typeof mem !== 'object') {
+        lastErr = 'پاسخ خالی از تلگرام';
+        continue;
+      }
+      const st = String(mem.status || '').toLowerCase().trim();
+      if (!st) {
+        lastErr = 'وضعیت خالی';
+        continue;
+      }
+      if (st === 'left' || st === 'kicked') {
+        sawLeft = true;
+        return { member: false, status: st, error: null, checked: true };
+      }
+      // فقط وضعیت‌های قطعی عضویت
+      if (st === 'member' || st === 'administrator' || st === 'creator') {
+        return { member: true, status: st, error: null, checked: true };
+      }
+      // restricted = هنوز داخل چت است (گروه) — قبول
+      if (st === 'restricted') {
+        return { member: true, status: st, error: null, checked: true };
+      }
+      lastErr = 'وضعیت نامعتبر: ' + st;
+    } catch (e) {
+      const msg = String((e && (e.description || e.message)) || e);
+      lastErr = msg.slice(0, 180);
+      const low = msg.toLowerCase();
+      // تلگرام صریحاً می‌گوید عضو نیست
+      if (
+        low.includes('user_not_participant') ||
+        low.includes('member not found') ||
+        low.includes('user not found') ||
+        low.includes('chat not found') ||
+        low.includes('peer_id_invalid')
+      ) {
+        return { member: false, status: 'left', error: null, checked: true };
+      }
+      console.error('isUserMemberOfChat', chatArg, uid, lastErr);
+    }
+  }
+  if (sawLeft) {
+    return { member: false, status: 'left', error: null, checked: true };
+  }
+  // خطای API ≠ عضو بودن
+  return {
+    member: false,
+    status: null,
+    error: lastErr || 'بررسی عضویت ناموفق',
+    checked: false,
+  };
 }
 
 /** لیست کانال/گروه‌های کمپین (پشتیبانی از فرمت قدیمی تک‌کاناله) */
@@ -441,51 +1431,110 @@ export async function confirmForceJoinUser(userId) {
   if (!channels.length) {
     return { ok: false, message: 'کمپین نامعتبر است.' };
   }
+
+  // بررسی قطعی عضویت در همه کانال‌های کمپین — بدون حدس
   const missing = [];
+  const apiErrors = [];
   for (const ch of channels) {
-    const member = await isUserMemberOfChat(ch.chatId, userId);
-    if (!member) {
-      missing.push(ch.title || ch.username || String(ch.chatId));
+    if (!ch || ch.chatId == null || ch.chatId === '') {
+      apiErrors.push('کانال بدون chatId در کمپین');
+      continue;
     }
+    const label = ch.title || ch.username || String(ch.chatId);
+    let res;
+    try {
+      res = await isUserMemberOfChat(ch.chatId, userId);
+    } catch (e) {
+      res = { member: false, checked: false, error: String(e.message || e).slice(0, 120) };
+    }
+    if (res === true) {
+      // فقط اگر صریحاً true بود (نباید از این مسیر بیاید)
+      continue;
+    }
+    if (res === false) {
+      missing.push(label);
+      continue;
+    }
+    if (res && res.member === true && res.checked === true) {
+      continue;
+    }
+    if (res && res.checked === true && res.member === false) {
+      missing.push(label);
+      continue;
+    }
+    // checked !== true → خطای API / عدم اطمینان → تأیید نکن
+    apiErrors.push(label + ': ' + ((res && res.error) || 'بررسی ناموفق'));
+  }
+  if (apiErrors.length) {
+    return {
+      ok: false,
+      message:
+        '⚠️ عضویت تأیید نشد — بررسی API ناموفق بود.\n' +
+        'ربات باید ادمین باشد و دسترسی «مشاهده اعضا» داشته باشد.\n' +
+        apiErrors.slice(0, 3).join('\n'),
+    };
   }
   if (missing.length) {
     return {
       ok: false,
       message:
         missing.length === 1
-          ? 'هنوز عضو «' + missing[0] + '» نیستید. عضو شوید، بعد تأیید کنید.'
-          : 'هنوز عضو این‌ها نیستید: ' + missing.join('، ') + '\nعضو شوید، بعد تأیید کنید.',
+          ? 'هنوز عضو «' + missing[0] + '» نیستید. اول عضو شوید، بعد «تأیید عضویت» را بزنید.'
+          : 'هنوز عضو این‌ها نیستید:\n• ' + missing.join('\n• ') + '\nعضو شوید، بعد تأیید کنید.',
     };
   }
-  await markForceJoinUserOk(camp.id, userId);
-  camp.confirmedCount = (Number(camp.confirmedCount) || 0) + 1;
-  if (camp.confirmedCount >= Number(camp.targetCount)) {
-    camp.active = false;
-    camp.endedAt = new Date().toISOString();
+
+  // قفل ساده ضد دابل‌کلیک
+  const lockKey = 'fj_lock:' + camp.id + ':' + userId;
+  const locked = await settingGet(lockKey, '');
+  if (locked === '1') {
+    return { ok: true, already: true, camp };
+  }
+  await settingSet(lockKey, '1');
+
+  // دوباره کمپین را بخوان (ممکن است هم‌زمان تمام شده باشد)
+  const camp2 = await getForceJoinCampaign();
+  if (!camp2 || !camp2.active || String(camp2.id) !== String(camp.id)) {
+    return { ok: true, done: true, message: 'عضویت اجباری فعال نیست.' };
+  }
+  if (await isForceJoinUserOk(camp2.id, userId)) {
+    return { ok: true, already: true, camp: camp2 };
+  }
+
+  await markForceJoinUserOk(camp2.id, userId);
+  camp2.confirmedCount = (Number(camp2.confirmedCount) || 0) + 1;
+
+  if (camp2.confirmedCount >= Number(camp2.targetCount)) {
+    camp2.active = false;
+    camp2.endedAt = new Date().toISOString();
+    const channels2 = forceJoinChannelList(camp2);
     await pushForceJoinHistory({
-      id: camp.id,
-      title: forceJoinTitlesText(camp),
-      channels: channels.map(function (c) {
+      id: camp2.id,
+      title: forceJoinTitlesText(camp2),
+      channels: channels2.map(function (c) {
         return { chatId: c.chatId, title: c.title, username: c.username };
       }),
-      chatId: channels[0] && channels[0].chatId,
-      targetCount: camp.targetCount,
-      confirmedCount: camp.confirmedCount,
-      startMembers: camp.startMembers,
-      endedAt: camp.endedAt,
+      chatId: channels2[0] && channels2[0].chatId,
+      targetCount: camp2.targetCount,
+      confirmedCount: camp2.confirmedCount,
+      startMembers: camp2.startMembers,
+      endedAt: camp2.endedAt,
     });
     await saveForceJoinCampaign(null);
+    const next = await promoteNextForceJoinFromQueue();
     return {
       ok: true,
       finished: true,
-      camp,
+      camp: camp2,
+      nextCamp: next || null,
       message: '✅ عضویت تأیید شد.',
     };
   }
-  await saveForceJoinCampaign(camp);
+
+  await saveForceJoinCampaign(camp2);
   return {
     ok: true,
-    camp,
+    camp: camp2,
     message: '✅ عضویت تأیید شد.',
   };
 }
@@ -634,26 +1683,28 @@ export async function getActiveSubLeaderChannel(userId) {
 
 /** نرمال‌سازی کلید کانال: title/alias → key استاندارد */
 export function normalizeChannelKey(raw) {
-  let s = String(raw == null ? '' : raw).trim();
-  if (!s) return '';
+  if (raw == null || raw === '') return '';
+  let s = String(raw).trim();
   if (DEFAULT_CHANNELS && DEFAULT_CHANNELS[s]) return s;
+  // تطبیق دقیق با title یا key (بدون indexOf زیررشته)
   try {
+    const low = s.toLowerCase();
     for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
       const c = DEFAULT_CHANNELS[k];
       if (!c) continue;
-      if (String(c.title || '') === s) return k;
-      if (String(c.key || '') === s) return k;
-      const prefs = c.prefixes || [];
-      for (const p of prefs) {
-        if (String(p) === s) return k;
-      }
+      if (String(c.key || '').toLowerCase() === low) return k;
+      if (String(c.title || '').trim() === s) return k;
+      if (String(c.title || '').toLowerCase() === low) return k;
     }
-    // شامل‌بودن عنوان داخل رشته (دکمه کوتاه‌شده و …)
-    for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
-      const c = DEFAULT_CHANNELS[k];
-      if (!c) continue;
-      const t = String(c.title || '');
-      if (t && (s.indexOf(t) >= 0 || t.indexOf(s) >= 0)) return k;
+  } catch (_e) {}
+  // تطبیق با chatId عددی
+  try {
+    const num = Number(s);
+    if (Number.isFinite(num)) {
+      for (const k of Object.keys(DEFAULT_CHANNELS || {})) {
+        const c = DEFAULT_CHANNELS[k];
+        if (c && Number(c.chatId) === num) return k;
+      }
     }
   } catch (_e) {}
   return s;
@@ -714,11 +1765,10 @@ export async function adminChannels(userId) {
 
 export async function addChannelAdmin(userId, channelKey) {
   const uid = Number(userId);
-  const ck = String(channelKey || '');
+  let ck = normalizeChannelKey(channelKey) || String(channelKey || '');
   if (!uid || !ck) return { ok: false, reason: 'bad_args' };
   if (isOwner(uid)) return { ok: true, reason: 'owner' };
 
-  // همیشه فلگ حذف را بردار تا دوباره قابل‌افزودن باشد
   try {
     await settingSet('admin_removed:' + ck + ':' + uid, '0');
   } catch (_e) {}
@@ -730,15 +1780,23 @@ export async function addChannelAdmin(userId, channelKey) {
 
   let exists = false;
   try {
-    const all = (await db.select().from(channelAdmins).all()) || [];
-    exists = all.some(function (r) {
-      return (
-        Number(r.userId ?? r.user_id) === uid &&
-        String(r.channelKey ?? r.channel_key) === ck
-      );
-    });
+    const rows =
+      (await db
+        .select()
+        .from(channelAdmins)
+        .where(and(eq(channelAdmins.userId, uid), eq(channelAdmins.channelKey, ck)))
+        .all()) || [];
+    exists = rows.length > 0;
   } catch (e) {
-    console.error('addChannelAdmin list', e);
+    console.error('addChannelAdmin exists', e);
+    try {
+      const all = (await db.select().from(channelAdmins).all()) || [];
+      exists = all.some(function (r) {
+        return Number(r.userId ?? r.user_id) === uid && String(r.channelKey ?? r.channel_key) === ck;
+      });
+    } catch (e2) {
+      console.error('addChannelAdmin list fallback', e2);
+    }
   }
 
   if (!exists) {
@@ -746,14 +1804,20 @@ export async function addChannelAdmin(userId, channelKey) {
       await db.insert(channelAdmins).values({ userId: uid, channelKey: ck }).run();
     } catch (e) {
       console.error('addChannelAdmin insert', e);
+      // ممکن است رکورد از قبل باشد
       try {
-        await db.insert(channelAdmins).values({ userId: uid, channelKey: ck }).run();
-      } catch (e2) {
-        console.error('addChannelAdmin retry', e2);
+        const again =
+          (await db
+            .select()
+            .from(channelAdmins)
+            .where(and(eq(channelAdmins.userId, uid), eq(channelAdmins.channelKey, ck)))
+            .all()) || [];
+        if (!again.length) return { ok: false, reason: 'insert_fail' };
+        exists = true;
+      } catch (_e3) {
         return { ok: false, reason: 'insert_fail' };
       }
     }
-    // زمان ادمین‌شدن برای گزارش‌ها
     try {
       await settingSet('admin_since:' + ck + ':' + uid, String(Date.now()));
     } catch (_e) {}
@@ -766,12 +1830,21 @@ export async function addChannelAdmin(userId, channelKey) {
         await db.update(users).set({ role: 'admin' }).where(eq(users.userId, uid)).run();
       }
     } else {
-      await db.insert(users).values({ userId: uid, role: 'admin', started: 0 }).run();
+      try {
+        await db
+          .insert(users)
+          .values({ userId: uid, role: 'admin', started: 0, blocked: 0 })
+          .run();
+      } catch (_ins) {
+        try {
+          await db.update(users).set({ role: 'admin' }).where(eq(users.userId, uid)).run();
+        } catch (_e) {}
+      }
     }
   } catch (e) {
     console.error('addChannelAdmin role', e);
   }
-  return { ok: true, reason: exists ? 'already' : 'added' };
+  return { ok: true, reason: exists ? 'already' : 'added', channelKey: ck, userId: uid };
 }
 
 export async function removeChannelAdmin(userId, channelKey) {
@@ -802,6 +1875,24 @@ export async function removeChannelAdmin(userId, channelKey) {
     try {
       await settingSet('admin_removed:' + ck + ':' + uid, '1');
     } catch (_e) {}
+    // لغو شیفت‌های فعال این ادمین در همین کانال
+    try {
+      const allSh = (await db.select().from(shifts).all()) || [];
+      for (const s of allSh) {
+        const sid = Number(s.adminId ?? s.admin_id);
+        const sck = String((s.channelKey ?? s.channel_key) || '');
+        const sst = String(s.status || 'active');
+        if (sid === uid && sck === ck && sst === 'active') {
+          try {
+            if (s.id != null) {
+              await db.update(shifts).set({ status: 'cancelled' }).where(eq(shifts.id, s.id)).run();
+            }
+          } catch (_e) {}
+        }
+      }
+    } catch (eSh) {
+      console.error('removeChannelAdmin cancel shifts', eSh);
+    }
     const left = await adminChannels(uid);
     if (!left.length) {
       try {
@@ -912,71 +2003,441 @@ export async function activeShiftAdmins(channelKey) {
  */
 
 /** داشبورد آماری سبک — بدون خواندن content پیام‌ها */
-export async function getStatsDashboardText() {
-  async function safeCount(label, fn) {
-    try {
-      const n = await fn();
-      return { ok: true, n: Number(n) || 0, err: null };
-    } catch (e) {
-      console.error('stats ' + label, e);
-      return { ok: false, n: 0, err: e };
+
+/** تاریخ تهران YYYY-MM-DD از timestamp (دقیق با Intl) */
+export function tehranDateOfTs(ts) {
+  if (ts == null || ts === '') return null;
+  try {
+    let v = ts;
+    if (v instanceof Date) {
+      /* ok */
+    } else if (typeof v === 'string' && /^\d+$/.test(v)) {
+      v = Number(v);
     }
+    if (typeof v === 'number') {
+      if (v < 1e12) v = v * 1000;
+      v = new Date(v);
+    } else if (!(v instanceof Date)) {
+      v = new Date(v);
+    }
+    const ms = v.getTime();
+    if (!Number.isFinite(ms)) return null;
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Tehran',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    return fmt.format(new Date(ms));
+  } catch (_e) {
+    return null;
   }
-  async function countAll(table) {
-    const r = (await db.select({ n: sql`count(*)` }).from(table).all()) || [];
-    const row = r[0] || {};
-    return Number(row.n != null ? row.n : Object.values(row)[0]) || 0;
+}
+
+
+/** ساعت:دقیقه تهران از timestamp بررسی */
+export function tehranHmOfTs(ts) {
+  if (ts == null || ts === '') return null;
+  try {
+    let v = ts;
+    if (v instanceof Date) {
+      /* ok */
+    } else if (typeof v === 'string' && /^\d+$/.test(v)) {
+      v = Number(v);
+    }
+    if (typeof v === 'number') {
+      if (v < 1e12) v = v * 1000;
+      v = new Date(v);
+    } else if (!(v instanceof Date)) {
+      v = new Date(v);
+    }
+    const ms = v.getTime();
+    if (!Number.isFinite(ms)) return null;
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Tehran',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = Object.fromEntries(fmt.formatToParts(new Date(ms)).map(function (p) {
+      return [p.type, p.value];
+    }));
+    const h = String(parts.hour || '0').padStart(2, '0');
+    const m = String(parts.minute || '0').padStart(2, '0');
+    return h + ':' + m;
+  } catch (_e) {
+    return null;
   }
-  async function countStatus(st) {
-    const r =
-      (await db
-        .select({ n: sql`count(*)` })
-        .from(messages)
-        .where(eq(messages.status, st))
-        .all()) || [];
-    const row = r[0] || {};
-    return Number(row.n != null ? row.n : Object.values(row)[0]) || 0;
-  }
-  async function countChannel(key) {
-    const r =
-      (await db
-        .select({ n: sql`count(*)` })
-        .from(messages)
-        .where(eq(messages.channelKey, key))
-        .all()) || [];
-    const row = r[0] || {};
-    return Number(row.n != null ? row.n : Object.values(row)[0]) || 0;
-  }
-  async function countChannelStatus(key, st) {
+}
+
+/**
+ * آیا بررسی در بازهٔ یکی از شیفت‌های ثبت‌شده (فعال یا لغوشده) همان روز/کانال بوده؟
+ * شیفت لغوشده هم شمرده می‌شود چون در زمان بررسی ممکن است فعال بوده باشد.
+ */
+export function reviewMatchedShift(adminId, channelKey, reviewedAt, allShifts) {
+  const aid = Number(adminId);
+  const ck = normalizeChannelKey(channelKey) || String(channelKey || '');
+  if (!aid || !ck || reviewedAt == null) return false;
+  const day = tehranDateOfTs(reviewedAt);
+  const hm = tehranHmOfTs(reviewedAt);
+  if (!day || !hm) return false;
+  const list = allShifts || [];
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i];
+    if (Number(s.adminId ?? s.admin_id) !== aid) continue;
+    const sck = normalizeChannelKey(s.channelKey || s.channel_key) || String(s.channelKey || s.channel_key || '');
+    if (sck !== ck) continue;
+    const st = String(s.status || 'active');
+    if (st !== 'active' && st !== 'cancelled') continue;
+    const sd = String(s.shiftDate ?? s.shift_date ?? '');
+    if (sd === 'perm' || sd === 'permanent') {
+      // دائم حذف شده؛ نادیده
+      continue;
+    }
+    if (sd !== day) continue;
+    const sh = String(s.startHm ?? s.start_hm ?? '');
+    const eh = String(s.endHm ?? s.end_hm ?? '');
+    if (!sh || !eh || sh === eh) continue;
     try {
-      const r =
-        (await db
-          .select({ n: sql`count(*)` })
-          .from(messages)
-          .where(and(eq(messages.channelKey, key), eq(messages.status, st)))
-          .all()) || [];
-      const row = r[0] || {};
-      return Number(row.n != null ? row.n : Object.values(row)[0]) || 0;
-    } catch (_e) {
+      if (inRange(hm, sh, eh)) return true;
+    } catch (_e) {}
+  }
+  return false;
+}
+
+function escHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * آمار ادمین‌ها برای یک روز تهران — داده واقعی از messages + shifts + channel_admins
+ * @returns {{ day: string, channels: Array<{key,title,admins:Array}> }}
+ */
+export async function buildAdminStatsPayload(day, channelScope) {
+  const scopeKeys = channelScope
+    ? [channelScope]
+    : Object.keys(DEFAULT_CHANNELS || {});
+
+  let allMsg = [];
+  try {
+    allMsg =
+      (await db
+        .select({
+          id: messages.id,
+          status: messages.status,
+          channelKey: messages.channelKey,
+          reviewedBy: messages.reviewedBy,
+          reviewedAt: messages.reviewedAt,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(12000)
+        .all()) || [];
+  } catch (e) {
+    console.error('buildAdminStatsPayload msgs', e);
+    allMsg = [];
+  }
+
+  let allSh = [];
+  try {
+    allSh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(4000).all()) || [];
+  } catch (_e) {
+    allSh = [];
+  }
+
+  let caRows = [];
+  try {
+    caRows = (await db.select().from(channelAdmins).all()) || [];
+  } catch (_e) {
+    caRows = [];
+  }
+
+  // فقط پیام‌های بررسی‌شده همان روز (تقویم تهران)
+  const dayMsg = allMsg.filter(function (m) {
+    if (!m || !m.reviewedBy) return false;
+    const st = String(m.status || '');
+    if (st !== 'approved' && st !== 'rejected') return false;
+    return tehranDateOfTs(m.reviewedAt) === day;
+  });
+
+  const channels = [];
+  for (const key of scopeKeys) {
+    const conf = DEFAULT_CHANNELS[key];
+    if (!conf) continue;
+
+    const validAdminIds = {};
+    for (const ca of caRows) {
+      if (String(ca.channelKey || ca.channel_key) !== key) continue;
+      const aid = Number(ca.userId || ca.user_id);
+      if (aid && Number.isFinite(aid) && !isOwner(aid)) validAdminIds[aid] = true;
+    }
+
+    // شیفت‌های همان روز — فعال و لغوشده (برای شفافیت تاریخچه)
+    const dayShifts = allSh.filter(function (s) {
+      const ck = normalizeChannelKey(s.channelKey || s.channel_key) || String(s.channelKey || s.channel_key || '');
+      const st = String(s.status || '');
+      const sd = String(s.shiftDate || s.shift_date || '');
+      if (ck !== key) return false;
+      if (st !== 'active' && st !== 'cancelled') return false;
+      if (sd === 'perm' || sd === 'permanent') return false;
+      return sd === day;
+    });
+
+    const byAdmin = {};
+    function ensure(aid) {
+      if (!byAdmin[aid]) {
+        byAdmin[aid] = {
+          aid: Number(aid),
+          ap: 0,
+          rj: 0,
+          inShift: 0,
+          outShift: 0,
+          shifts: [],
+          shiftsCancelled: [],
+        };
+      }
+      return byAdmin[aid];
+    }
+
+    for (const aidStr of Object.keys(validAdminIds)) {
+      ensure(Number(aidStr));
+    }
+
+    for (const s of dayShifts) {
+      const aid = Number(s.adminId || s.admin_id);
+      if (!aid || !validAdminIds[aid]) continue;
+      const o = ensure(aid);
+      const label =
+        String(s.startHm || s.start_hm || '').slice(0, 5) +
+        '–' +
+        String(s.endHm || s.end_hm || '').slice(0, 5);
+      if (String(s.status) === 'cancelled') {
+        o.shiftsCancelled.push(label);
+      } else {
+        o.shifts.push(label);
+      }
+    }
+
+    for (const m of dayMsg) {
+      const mck = normalizeChannelKey(m.channelKey || m.channel_key) || String(m.channelKey || '');
+      if (mck !== key) continue;
+      const aid = Number(m.reviewedBy);
+      if (!aid || !validAdminIds[aid]) continue;
+      const o = ensure(aid);
+      if (String(m.status) === 'approved') o.ap++;
+      else if (String(m.status) === 'rejected') o.rj++;
+      if (reviewMatchedShift(aid, key, m.reviewedAt, allSh)) o.inShift++;
+      else o.outShift++;
+    }
+
+    const admins = Object.values(byAdmin)
+      .map(function (o) {
+        return {
+          aid: o.aid,
+          ap: o.ap,
+          rj: o.rj,
+          total: o.ap + o.rj,
+          inShift: o.inShift,
+          outShift: o.outShift,
+          shifts: o.shifts,
+          shiftsCancelled: o.shiftsCancelled,
+        };
+      })
+      .filter(function (o) {
+        // فقط کسانی که شیفت (فعال/لغو) یا بررسی دارند
+        return (
+          o.total > 0 ||
+          (o.shifts && o.shifts.length) ||
+          (o.shiftsCancelled && o.shiftsCancelled.length)
+        );
+      })
+      .sort(function (a, b) {
+        return b.total - a.total || a.aid - b.aid;
+      });
+
+    const activeShiftCount = dayShifts.filter(function (s) {
+      return String(s.status) === 'active';
+    }).length;
+
+    channels.push({
+      key: key,
+      title: conf.title || key,
+      admins: admins,
+      shiftCount: activeShiftCount,
+      shiftCancelledCount: dayShifts.length - activeShiftCount,
+      reviewTotal: admins.reduce(function (s, a) {
+        return s + a.total;
+      }, 0),
+      reviewInShift: admins.reduce(function (s, a) {
+        return s + (a.inShift || 0);
+      }, 0),
+      reviewOutShift: admins.reduce(function (s, a) {
+        return s + (a.outShift || 0);
+      }, 0),
+    });
+  }
+
+  return { day: day, channels: channels };
+}
+
+export async function getStatsDashboardText() {
+  const _nl = String.fromCharCode(10);
+
+  async function countAll() {
+    try {
+      const rows = (await db.select({ n: sql`count(*)` }).from(messages).all()) || [];
+      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+    } catch (e) {
+      console.error('stats total', e);
       return 0;
     }
   }
 
-  const total = await safeCount('messages', function () { return countAll(messages); });
-  const pe = await safeCount('pending', function () { return countStatus('pending'); });
-  const ap = await safeCount('approved', function () { return countStatus('approved'); });
-  const rj = await safeCount('rejected', function () { return countStatus('rejected'); });
-  const us = await safeCount('users', function () { return countAll(users); });
-  const adsC = await safeCount('admins', async function () {
-    const ads = (await db.select().from(channelAdmins).all()) || [];
-    const set = new Set(ads.map(function (a) { return Number(a.userId || a.user_id); }).filter(Boolean));
-    return set.size;
-  });
+  // شمارش مستقیم با یک GROUP BY — بدون نمونه و بدون مقیاس
+  // (count(*) WHERE status روی ۱۰۰k+ گاهی timeout می‌دهد؛ groupBy یک اسکن است)
+  let pe = 0;
+  let ap = 0;
+  let rj = 0;
+  let accurate = false;
+  const byCh = {};
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    byCh[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
+  }
+
+  async function loadStatusCounts() {
+    // مسیر ۱: groupBy روی status
+    try {
+      const rows =
+        (await db
+          .select({
+            status: messages.status,
+            n: sql`count(*)`,
+          })
+          .from(messages)
+          .groupBy(messages.status)
+          .all()) || [];
+      if (rows && rows.length) {
+        let p = 0,
+          a = 0,
+          r = 0;
+        for (const row of rows) {
+          const st = String(row.status || '');
+          const n = Number(row.n != null ? row.n : Object.values(row)[1]) || 0;
+          if (st === 'pending' || st === 'publishing') p += n;
+          else if (st === 'approved') a += n;
+          else if (st === 'rejected') r += n;
+        }
+        return { pe: p, ap: a, rj: r, ok: true };
+      }
+    } catch (e) {
+      console.error('stats groupBy status', e);
+    }
+    // مسیر ۲: چهار count جدا (fallback)
+    async function one(st) {
+      try {
+        const rows =
+          (await db.select({ n: sql`count(*)` }).from(messages).where(eq(messages.status, st)).all()) ||
+          [];
+        return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+      } catch (e) {
+        console.error('stats status', st, e);
+        return null;
+      }
+    }
+    const p1 = await one('pending');
+    const p2 = await one('publishing');
+    const a1 = await one('approved');
+    const r1 = await one('rejected');
+    if (p1 == null || a1 == null || r1 == null) return { pe: 0, ap: 0, rj: 0, ok: false };
+    return { pe: Number(p1) + Number(p2 || 0), ap: Number(a1), rj: Number(r1), ok: true };
+  }
+
+  async function loadChannelCounts() {
+    try {
+      const rows =
+        (await db
+          .select({
+            status: messages.status,
+            channelKey: messages.channelKey,
+            n: sql`count(*)`,
+          })
+          .from(messages)
+          .groupBy(messages.status, messages.channelKey)
+          .all()) || [];
+      if (rows && rows.length) {
+        const out = {};
+        for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+          out[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
+        }
+        for (const row of rows) {
+          const st = String(row.status || '');
+          const ck = String((row.channelKey ?? row.channel_key) || '');
+          if (!out[ck]) continue;
+          const n = Number(row.n != null ? row.n : Object.values(row)[2]) || 0;
+          out[ck].total += n;
+          if (st === 'pending' || st === 'publishing') out[ck].pe += n;
+          else if (st === 'approved') out[ck].ap += n;
+          else if (st === 'rejected') out[ck].rj += n;
+        }
+        return { byCh: out, ok: true };
+      }
+    } catch (e) {
+      console.error('stats groupBy channel', e);
+    }
+    return { byCh: null, ok: false };
+  }
+
+  const total = await countAll();
+  const sc = await loadStatusCounts();
+  pe = sc.pe;
+  ap = sc.ap;
+  rj = sc.rj;
+  accurate = sc.ok;
+
+  const chRes = await loadChannelCounts();
+  if (chRes.ok && chRes.byCh) {
+    for (const k of Object.keys(chRes.byCh)) byCh[k] = chRes.byCh[k];
+  } else if (accurate) {
+    // اگر groupBy کانال نشد ولی status دقیق بود، تفکیک را از نسبت کل نگه می‌داریم
+    accurate = true;
+  } else {
+    accurate = false;
+  }
+
+  // اگر groupBy هم شکست خورد، هرگز نمونه ۸هزارتایی را به عنوان «از اول تا الان» نشان نده
+  // pe/ap/rj روی ۰ می‌مانند و note می‌گوید شمارش مستقیم ممکن نشد
+  if (!sc.ok) {
+    pe = 0;
+    ap = 0;
+    rj = 0;
+    accurate = false;
+  }
+
+  let userCount = 0;
+  try {
+    const ur = (await db.select({ n: sql`count(*)` }).from(users).all()) || [];
+    userCount = Number((ur[0] && (ur[0].n != null ? ur[0].n : Object.values(ur[0])[0])) || 0);
+  } catch (_e) {}
+
+  let adminUnique = 0;
+  try {
+    const ar = (await db.select().from(channelAdmins).all()) || [];
+    const set = {};
+    for (const a of ar) {
+      const id = Number(a.userId ?? a.user_id);
+      if (id) set[id] = 1;
+    }
+    adminUnique = Object.keys(set).length;
+  } catch (_e) {}
+
   let shToday = 0;
   try {
     const now = tehranNow();
     const pdate = periodDateStr(now);
-    const sh = (await db.select().from(shifts).all()) || [];
+    const sh = (await db.select().from(shifts).limit(800).all()) || [];
     shToday = sh.filter(function (s) {
       if (String(s.status) !== 'active') return false;
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
@@ -984,39 +2445,100 @@ export async function getStatsDashboardText() {
     }).length;
   } catch (_e) {}
 
+  // امروز: نمونهٔ جدیدترین‌ها (بدون ایندکس زمانی دقیق‌تر ممکن نیست)
+  let todayPe = 0, todayAp = 0, todayRj = 0, todayNew = 0;
+  try {
+    const today = tehranNow().date;
+    const sample =
+      (await db
+        .select({
+          status: messages.status,
+          submittedAt: messages.submittedAt,
+          reviewedAt: messages.reviewedAt,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(15000)
+        .all()) || [];
+    for (const m of sample) {
+      const subD = tehranDateOfTs(m.submittedAt);
+      const revD = tehranDateOfTs(m.reviewedAt);
+      if (subD === today) {
+        todayNew++;
+        if (String(m.status) === 'pending' || String(m.status) === 'publishing') todayPe++;
+      }
+      if (revD === today) {
+        const st = String(m.status || '');
+        if (st === 'approved') todayAp++;
+        else if (st === 'rejected') todayRj++;
+      }
+    }
+  } catch (_e) {}
+
   let by = '';
-  for (const c of Object.values(DEFAULT_CHANNELS)) {
-    const tot = await safeCount('ch:' + c.key, function () { return countChannel(c.key); });
-    const p = await countChannelStatus(c.key, 'pending');
-    const a = await countChannelStatus(c.key, 'approved');
-    const r = await countChannelStatus(c.key, 'rejected');
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    const b = byCh[c.key] || { total: 0, pe: 0, ap: 0, rj: 0 };
     by +=
-      '• ' + c.title + ': ' + tot.n +
-      ' (🟡' + p + ' 🟢' + a + ' 🔴' + r + ')\n';
+      '• ' + c.title + ': ' + b.total + ' (🟡' + b.pe + ' 🟢' + b.ap + ' 🔴' + b.rj + ')' + _nl;
   }
 
   let text =
-    '📊 داشبورد آماری\n\n' +
-    '📨 کل پیام‌ها: ' + total.n + '\n' +
-    '🟡 در انتظار: ' + pe.n + '\n' +
-    '🟢 تأیید شده: ' + ap.n + '\n' +
-    '🔴 رد شده: ' + rj.n + '\n\n' +
-    '👥 کاربران: ' + us.n + '\n' +
-    '👮 ادمین‌ها (یکتا): ' + adsC.n + '\n' +
-    '⏰ شیفت فعال امروز: ' + shToday + '\n\n' +
-    '📺 تفکیک کانال:\n' + by;
+    '📊 داشبورد آماری' +
+    _nl +
+    _nl +
+    '① از اول تا الان (شمارش مستقیم)' +
+    _nl +
+    '• کل پیام‌ها: ' +
+    total +
+    _nl +
+    '• در انتظار: ' +
+    pe +
+    _nl +
+    '• تأیید شده: ' +
+    ap +
+    _nl +
+    '• رد شده: ' +
+    rj +
+    _nl +
+    '• کاربران: ' +
+    userCount +
+    _nl +
+    '• ادمین‌های یکتا: ' +
+    adminUnique +
+    _nl +
+    _nl +
+    '② نمونه ۱۵ هزار پیام اخیر' +
+    _nl +
+    '📅 امروز (تهران) از روی همین نمونه:' +
+    _nl +
+    '• جدید امروز: ' +
+    todayNew +
+    _nl +
+    '• صف امروز: ' +
+    todayPe +
+    _nl +
+    '• تأیید امروز: ' +
+    todayAp +
+    _nl +
+    '• رد امروز: ' +
+    todayRj +
+    _nl +
+    '• شیفت فعال امروز: ' +
+    shToday +
+    _nl +
+    _nl +
+    '📺 تفکیک کانال (کل با count یا نمونه اخیر):' +
+    _nl +
+    by +
+    _nl +
+    (accurate
+      ? '✅ بخش «از اول» و تفکیک کانال از شمارش مستقیم (GROUP BY) است. امروز از نمونه اخیر.'
+      : '⚠️ شمارش مستقیم status ممکن نشد؛ اعداد pe/ap/rj بخش ۱ صفر شده‌اند تا با نمونه اشتباه گرفته نشوند. امروز از نمونه اخیر.') +
+    _nl;
 
-  const errs = [total, pe, ap, rj, us, adsC].filter(function (x) { return !x.ok; });
-  if (errs.length) {
-    const sample = errs[0].err;
-    const msg = String((sample && (sample.message || sample.description)) || sample || 'Sqlite error');
-    text +=
-      '\n\n⚠️ خطا در خواندن بعضی جداول:\n' +
-      msg.slice(0, 220) +
-      '\n\nاگر «no such table» دیدید در سرور بزنید:\nnpx tgcloud migrate';
-  }
   return text;
 }
+
 
 export async function checkInactiveShiftAndCancel(channelKey, opts) {
   // disabled — do nothing
@@ -1032,18 +2554,89 @@ export async function restoreMistakenlyCancelledShifts() {
 /* ============================================================
  *  سیستم Batch بررسی پیام‌ها (Serverless-safe)
  *  - هیچ Pending ای خودکار برای ادمین ارسال نمی‌شود (No Push).
- *  - ادمین با دکمه‌ی «📥 پیام‌های در انتظار» یک Batch ده‌تایی می‌گیرد.
+ *  - ادمین با دکمه‌ی «📥 پیام‌های در انتظار» یک Batch به اندازه REVIEW_BATCH_SIZE می‌گیرد.
  *  - IDهای Batch در settings با کلید review_batch:<adminId> ذخیره می‌شوند.
- *  - Lock با Timestamp در DB (بدون setTimeout)؛ TTL کوتاه.
- *  - Batch state ≠ Message state: حذف Batch هیچ پیامی را تغییر نمی‌دهد.
+ *  - پیشرفت تحویل پس از هر sendMessage موفق به‌صورت افزایشی ذخیره می‌شود.
+ *  - Claim نرم (review_claim:<msgId>) از اختصاص هم‌زمان به چند بازبین جلوگیری می‌کند.
+ *  - Lock با Timestamp در DB (بدون worker دائمی)؛ TTL کوتاه.
+ *  - Batch state ≠ Message status: حذف Batch پیام را approve/reject نمی‌کند.
  * ============================================================ */
 
-export const REVIEW_BATCH_SIZE = 16;
-const REVIEW_LOCK_TTL_MS = 10 * 1000;
+export const REVIEW_BATCH_SIZE = 18;
+/** همیشه برابر REVIEW_BATCH_SIZE */
+export const REVIEW_BATCH_HARD = REVIEW_BATCH_SIZE;
+const REVIEW_LOCK_TTL_MS = 12 * 1000;
+const REVIEW_CLAIM_TTL_MS = 90 * 60 * 1000;
+const PUBLISHING_STUCK_MS = 20 * 60 * 1000;
+const BATCH_SEND_GAP_MS = 45;
+const BATCH_MAX_RETRIES_PER_MSG = 2;
 
 function reviewBatchKey(adminId) {
   return 'review_batch:' + Number(adminId);
 }
+function reviewClaimKey(msgId) {
+  return 'review_claim:' + Number(msgId);
+}
+function batchLog(event, fields) {
+  try {
+    console.log(JSON.stringify(Object.assign({ evt: 'batch', at: Date.now(), event: event }, fields || {})));
+  } catch (_e) {}
+}
+function escapeHtmlBatch(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function sleepMs(ms) {
+  // Serverless: بدون timer. فاصله بین send لازم نیست — await متوالی کافی است.
+  return Promise.resolve();
+}
+function parseTelegramRetryAfter(err) {
+  try {
+    if (!err) return 0;
+    if (err.parameters && err.parameters.retry_after != null) return Number(err.parameters.retry_after) || 0;
+    const resp = err.response || err;
+    if (resp && resp.parameters && resp.parameters.retry_after != null) return Number(resp.parameters.retry_after) || 0;
+    const msg = String(err.description || err.message || err || '');
+    const m = msg.match(/retry after (\d+)/i);
+    if (m) return Number(m[1]) || 0;
+  } catch (_e) {}
+  return 0;
+}
+function isTelegram429(err) {
+  try {
+    const code = Number(err && (err.error_code || err.code || err.statusCode)) || 0;
+    if (code === 429) return true;
+    const msg = String((err && (err.description || err.message)) || err || '').toLowerCase();
+    return msg.includes('too many requests') || msg.includes('retry after');
+  } catch (_e) { return false; }
+}
+function isPermanentTelegramError(err) {
+  try {
+    const code = Number(err && (err.error_code || err.code)) || 0;
+    if (code === 400 || code === 403 || code === 404) return true;
+    const msg = String((err && (err.description || err.message)) || '').toLowerCase();
+    if (msg.includes('chat not found') || msg.includes('blocked by the user')) return true;
+    if (msg.includes("can't parse entities") || msg.includes('parse entities')) return true;
+  } catch (_e) {}
+  return false;
+}
+function normalizeBatchState(raw, adminId) {
+  const b = raw && typeof raw === 'object' ? raw : {};
+  return {
+    ids: Array.isArray(b.ids) ? b.ids.map(Number).filter(Boolean) : [],
+    delivered: Array.isArray(b.delivered) ? b.delivered.map(Number).filter(Boolean) : [],
+    failed: Array.isArray(b.failed) ? b.failed.map(Number).filter(Boolean) : [],
+    batchNumber: Number(b.batchNumber) || 1,
+    createdAt: Number(b.createdAt) || Date.now(),
+    periodDate: b.periodDate || periodDateStr(),
+    version: Number(b.version) || 1,
+    adminId: Number(b.adminId || adminId) || Number(adminId) || 0,
+  };
+}
+
 
 /** آیا این رکورد shift همین الان (تهران) فعال است؟ */
 export function shiftActiveNow(s, now, pdate) {
@@ -1055,10 +2648,30 @@ export function shiftActiveNow(s, now, pdate) {
   if (!start || !end || start === end) return false;
   const sd = String(s.shiftDate ?? s.shift_date ?? '');
   if (sd === 'perm' || sd === 'permanent') return false;
-  // فقط دورهٔ تقویمی فعلی
-  if (sd !== String(pdate)) return false;
-  // هر ساعتی که مالک/سیستم ثبت کرده — فقط بازه زمانی چک می‌شود
-  return inRange(now.hm, start, end);
+  const today = String(pdate || now.date || '');
+  const calToday = String(now.date || today);
+  // تاریخ امروز (period یا تقویم)
+  if (sd === today || sd === calToday) {
+    return inRange(now.hm, start, end);
+  }
+  // شیفت overnight ثبت‌شده روی دیروز: اگر الان داخل بازه زمانی است بپذیر
+  if (inRange(now.hm, start, end)) {
+    try {
+      const parts = String(today).split('-').map(Number);
+      if (parts.length === 3 && parts[0]) {
+        const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+        dt.setUTCDate(dt.getUTCDate() - 1);
+        const y =
+          dt.getUTCFullYear() +
+          '-' +
+          String(dt.getUTCMonth() + 1).padStart(2, '0') +
+          '-' +
+          String(dt.getUTCDate()).padStart(2, '0');
+        if (sd === y) return true;
+      }
+    } catch (_e) {}
+  }
+  return false;
 }
 
 /** کلید کانال‌هایی که ادمین همین الان برایشان شیفت فعال دارد */
@@ -1513,6 +3126,7 @@ export async function hasActiveShift(adminId, channelKey) {
  * ساب‌لیدر «این کاربر» بود و شیفت «صدام بزن» داشت، پیام هر دو را می‌گرفت.
  */
 export async function allowedReviewChannels(userId) {
+  // مالک: همه کانال‌ها بدون نیاز به شیفت
   if (isOwner(userId)) return Object.keys(DEFAULT_CHANNELS || {});
   try {
     const keys = await activeShiftChannelKeys(userId);
@@ -1529,6 +3143,8 @@ export async function allowedReviewChannels(userId) {
       return out;
     }
   } catch (_e) {}
+  // ساب‌لیدر بدون شیفت فعال: دسترسی مدیریتی به کانال خودش (عمدی).
+  // این بررسی‌ها در آمار به‌عنوان «خارج شیفت» شمارش می‌شوند.
   try {
     const sl = await getActiveSubLeaderChannel(userId);
     if (sl) {
@@ -1605,59 +3221,235 @@ export async function getReviewBatch(adminId) {
   if (!raw) return null;
   try {
     const b = JSON.parse(raw);
-    if (b && Array.isArray(b.ids)) return b;
+    if (b && Array.isArray(b.ids)) return normalizeBatchState(b, adminId);
   } catch (_e) {}
   return null;
 }
 
 /** برخلاف settingSet خطا را می‌اندازد تا Batch نیمه‌کاره ثبت نشود */
 async function saveReviewBatch(adminId, batch) {
+  const normalized = normalizeBatchState(batch, adminId);
+  normalized.version = (Number(normalized.version) || 0) + 1;
+  normalized.adminId = Number(adminId);
   const key = reviewBatchKey(adminId);
-  const value = JSON.stringify(batch);
+  const value = JSON.stringify(normalized);
   const rows = await db.select().from(settings).where(eq(settings.key, key)).all();
   if (rows && rows.length) {
-    await db.update(settings).set({ value }).where(eq(settings.key, key)).run();
+    await db.update(settings).set({ value: value }).where(eq(settings.key, key)).run();
   } else {
-    await db.insert(settings).values({ key, value }).run();
+    await db.insert(settings).values({ key: key, value: value }).run();
   }
-
   try {
     const raw = await settingGet('review_batch_index', '[]');
     let arr = [];
     try { arr = JSON.parse(raw || '[]') || []; } catch (_e) { arr = []; }
     if (!Array.isArray(arr)) arr = [];
     const aid = Number(adminId);
-    if (!arr.map(Number).includes(aid)) {
-      arr.push(aid);
-      if (arr.length > 500) arr = arr.slice(-500);
-      await settingSet('review_batch_index', JSON.stringify(arr));
+    if (normalized.ids && normalized.ids.length) {
+      if (!arr.map(Number).includes(aid)) {
+        arr.push(aid);
+        if (arr.length > 500) arr = arr.slice(-500);
+        await settingSet('review_batch_index', JSON.stringify(arr));
+      }
+    } else {
+      const next = arr.filter(function (x) { return Number(x) !== aid; });
+      if (next.length !== arr.length) await settingSet('review_batch_index', JSON.stringify(next));
     }
   } catch (_e) {}
-
+  return normalized;
 }
 
 /** فقط state Batch را پاک می‌کند؛ هیچ پیامی تغییر نمی‌کند */
+/** پاک کردن پیام‌های UI مربوط به Batch قبلی در چت ادمین */
+export async function clearReviewUiMessages(adminId, chatId) {
+  const key = 'review_ui:' + Number(adminId);
+  let ids = [];
+  try {
+    const raw = await settingGet(key, '[]');
+    ids = JSON.parse(raw) || [];
+  } catch (_e) {
+    ids = [];
+  }
+  const chat = chatId != null ? Number(chatId) : Number(adminId);
+  for (const mid of ids) {
+    try {
+      await api.deleteMessage({ chat_id: chat, message_id: Number(mid) });
+    } catch (_e) {}
+  }
+  try {
+    await settingSet(key, '[]');
+  } catch (_e) {}
+  return ids.length;
+}
+
 export async function clearReviewBatch(adminId) {
+  try {
+    const old = await getReviewBatch(adminId);
+    if (old && Array.isArray(old.ids)) {
+      for (const id of old.ids) {
+        try { await releaseReviewClaim(id, adminId); } catch (_e) {}
+      }
+    }
+  } catch (_e) {}
   try {
     await db.delete(settings).where(eq(settings.key, reviewBatchKey(adminId))).run();
   } catch (e) {
     console.error('clearReviewBatch', e);
   }
+  try {
+    const raw = await settingGet('review_batch_index', '[]');
+    let arr = [];
+    try { arr = JSON.parse(raw || '[]') || []; } catch (_e) { arr = []; }
+    if (Array.isArray(arr)) {
+      const next = arr.filter(function (x) { return Number(x) !== Number(adminId); });
+      if (next.length !== arr.length) await settingSet('review_batch_index', JSON.stringify(next));
+    }
+  } catch (_e) {}
 }
 
 /** فقط IDهای هنوز pending را نگه می‌دارد */
+
+async function getReviewClaim(msgId) {
+  try {
+    const raw = await settingGet(reviewClaimKey(msgId), '');
+    if (!raw) return null;
+    const c = JSON.parse(raw);
+    if (!c || !c.adminId) return null;
+    const now = Date.now();
+    if (c.expiresAt && now > Number(c.expiresAt)) {
+      try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run(); } catch (_e) {}
+      return null;
+    }
+    // claim بلااستفاده را زودتر آزاد کن تا صف خالیِ کاذب نماند
+    try {
+      const claimedAt = Number(c.claimedAt) || 0;
+      const age = claimedAt ? now - claimedAt : 0;
+      const holderBatch = await getReviewBatch(c.adminId);
+      const ids = (holderBatch && holderBatch.ids) || [];
+      const mid = Number(msgId);
+      let still = false;
+      for (let i = 0; i < ids.length; i++) {
+        if (Number(ids[i]) === mid) {
+          still = true;
+          break;
+        }
+      }
+      // اگر در batch نگهدارنده نیست → فوراً آزاد (حتی تازه)
+      if (!still) {
+        try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run(); } catch (_e) {}
+        return null;
+      }
+      // اگر بیش از ۳۰ دقیقه در batch مانده و هنوز pending است → آزاد کن
+      if (age > 30 * 60 * 1000) {
+        try {
+          const row = await getMessageById(mid);
+          if (row && String(row.status || '') === 'pending') {
+            try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run(); } catch (_e) {}
+            return null;
+          }
+        } catch (_e) {}
+      }
+    } catch (_e) {}
+    return c;
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function tryClaimReviewMessage(msgId, adminId, batchNumber) {
+  const id = Number(msgId);
+  const aid = Number(adminId);
+  if (!id || !aid) return { ok: false, code: 'bad' };
+
+  async function writeClaim() {
+    const payload = JSON.stringify({
+      adminId: aid,
+      batchNumber: Number(batchNumber) || 0,
+      claimedAt: Date.now(),
+      expiresAt: Date.now() + REVIEW_CLAIM_TTL_MS,
+    });
+    try {
+      await db.insert(settings).values({ key: reviewClaimKey(id), value: payload }).run();
+      return { ok: true };
+    } catch (_e) {
+      try {
+        await db
+          .update(settings)
+          .set({ value: payload })
+          .where(eq(settings.key, reviewClaimKey(id)))
+          .run();
+        return { ok: true, stolen: true };
+      } catch (_e2) {
+        const again = await getReviewClaim(id);
+        if (again && Number(again.adminId) === aid) return { ok: true, renewed: true };
+        return { ok: false, code: 'held', holder: again ? Number(again.adminId) : null };
+      }
+    }
+  }
+
+  const existing = await getReviewClaim(id);
+  if (existing) {
+    if (Number(existing.adminId) === aid) return { ok: true, renewed: true };
+    // آیا می‌توان claim یتیم/کهنه را گرفت؟
+    let canSteal = false;
+    try {
+      const holderBatch = await getReviewBatch(existing.adminId);
+      const ids = (holderBatch && holderBatch.ids) || [];
+      let inBatch = false;
+      for (let i = 0; i < ids.length; i++) {
+        if (Number(ids[i]) === id) {
+          inBatch = true;
+          break;
+        }
+      }
+      const age = Date.now() - (Number(existing.claimedAt) || 0);
+      const batchAge =
+        holderBatch && holderBatch.createdAt
+          ? Date.now() - Number(holderBatch.createdAt)
+          : Number.POSITIVE_INFINITY;
+      // آزاد: در batch نیست، یا batch/claim بیش از ۲۰ دقیقه مانده
+      if (!inBatch || age > 20 * 60 * 1000 || batchAge > 20 * 60 * 1000) {
+        canSteal = true;
+      }
+    } catch (_e) {
+      canSteal = true;
+    }
+    if (!canSteal) {
+      return { ok: false, code: 'held', holder: Number(existing.adminId) };
+    }
+    try {
+      await db.delete(settings).where(eq(settings.key, reviewClaimKey(id))).run();
+    } catch (_e) {}
+  }
+  return await writeClaim();
+}
+
+async function releaseReviewClaim(msgId, adminId) {
+  const id = Number(msgId);
+  if (!id) return;
+  try {
+    const cur = await getReviewClaim(id);
+    if (!cur) return;
+    if (adminId != null && Number(cur.adminId) !== Number(adminId)) return;
+    await db.delete(settings).where(eq(settings.key, reviewClaimKey(id))).run();
+  } catch (_e) {}
+}
+
 export async function pruneReviewBatchToPending(adminId) {
   const old = await getReviewBatch(adminId);
   if (!old || !old.ids || !old.ids.length) return { cleared: true, ids: [] };
   const rows = await Promise.all(
     old.ids.map(function (id) {
-      return getMessageById(Number(id));
+      return getMessageById(Number(id)).catch(function () {
+        return null;
+      });
     })
   );
   const alive = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (row && String(row.status) === 'pending') alive.push(Number(old.ids[i]));
+    // فقط pending واقعی؛ approved/rejected/publishing از Batch خارج
+    if (row && String(row.status || '') === 'pending') alive.push(Number(old.ids[i]));
   }
   if (!alive.length) {
     await clearReviewBatch(adminId);
@@ -1679,9 +3471,11 @@ export async function dropMessageFromReviewBatch(adminId, msgId) {
     if (!old || !Array.isArray(old.ids)) return;
     const next = old.ids.map(Number).filter(function (id) { return id !== msgId; });
     if (next.length === old.ids.length) return;
+    try { await releaseReviewClaim(msgId, adminId); } catch (_e) {}
     if (!next.length) await clearReviewBatch(adminId);
     else {
       old.ids = next;
+      old.delivered = (old.delivered || []).map(Number).filter(function (id) { return id !== msgId; });
       await saveReviewBatch(adminId, old);
     }
   } catch (e) {
@@ -1692,7 +3486,6 @@ export async function dropMessageFromReviewBatch(adminId, msgId) {
 export async function dropMessageFromAllReviewBatches(msgId) {
   msgId = Number(msgId);
   try {
-    // ایندکس سبک به‌جای اسکن کل settings (شامل exportهای چندمگابایتی)
     let adminIds = [];
     try {
       const raw = await settingGet('review_batch_index', '[]');
@@ -1701,22 +3494,7 @@ export async function dropMessageFromAllReviewBatches(msgId) {
     } catch (_e) {
       adminIds = [];
     }
-    // اگر ایندکس خالی بود، فقط کلیدهای review_batch را از لیست فیلتر کن ولی value بزرگ را نخوان
-    if (!adminIds.length) {
-      try {
-        const all = (await db.select().from(settings).all()) || [];
-        for (const row of all) {
-          const key = row && row.key != null ? String(row.key) : '';
-          if (!key.startsWith('review_batch:')) continue;
-          const aid = Number(key.slice('review_batch:'.length));
-          if (Number.isFinite(aid)) adminIds.push(aid);
-        }
-        adminIds = Array.from(new Set(adminIds));
-        try {
-          await settingSet('review_batch_index', JSON.stringify(adminIds.slice(0, 500)));
-        } catch (_e) {}
-      } catch (_e) {}
-    }
+    try { await releaseReviewClaim(msgId, null); } catch (_e) {}
     for (const aid of adminIds) {
       try {
         await dropMessageFromReviewBatch(aid, msgId);
@@ -1748,19 +3526,71 @@ export async function getReviewBatchMessages(adminId) {
 export async function isReviewBatchComplete(adminId) {
   const batch = await getReviewBatch(adminId);
   if (!batch || !batch.ids || !batch.ids.length) return true;
-  const rows = await Promise.all(batch.ids.map(function (id) { return getMessageById(Number(id)); }));
-  for (let i = 0; i < rows.length; i++) {
-    if (rows[i] && String(rows[i].status) === 'pending') return false;
+  for (const id of batch.ids) {
+    let row = null;
+    try {
+      row = await getMessageById(Number(id));
+    } catch (_e) {
+      row = null;
+    }
+    if (!row) continue;
+    const st = String(row.status || '');
+    if (st === 'pending') return false;
+    if (st === 'publishing') {
+      const ra = row.reviewedAt ? new Date(row.reviewedAt).getTime() : 0;
+      if (!ra || Date.now() - ra < PUBLISHING_STUCK_MS) return false;
+    }
   }
   return true;
 }
 
-/** Pendingهای قابل‌بررسی ادمین، قدیمی‌ترین اول — بدون select همه‌ی content */
-async function selectReviewablePending(adminId) {
-  // اول فقط id/status/channel (سبک) تا timeout نشود
-  let light = [];
+/** Pending قابل‌بررسی — قدیمی‌ترین اول در پنجرهٔ اخیر جدول
+ * با ۵۰k+ ردیف، ASC از id=0 قبل از رسیدن به صف واقعی بودجه را تمام می‌کند.
+ * مسیر پایدار: چند برش DESC روی PK (سریع) → فیلتر pending → sort ASC → FIFO در همان پنجره.
+ */
+
+/** تشخیص صف pending برای یک بازبین — فقط خواندنی */
+export async function diagnoseReviewQueue(adminId) {
+  const aid = Number(adminId);
+  const now = tehranNow();
+  const pdate = periodDateStr(now);
+  const info = {
+    adminId: aid,
+    nowHm: now.hm,
+    date: now.date,
+    pdate: pdate,
+    isOwner: isOwner(aid),
+    shiftKeys: [],
+    allowed: [],
+    pendingTotal: null,
+    pendingByAllowed: {},
+    pendingByChannelSample: {},
+    claimHints: 0,
+  };
   try {
-    light =
+    info.shiftKeys = (await activeShiftChannelKeys(aid)) || [];
+  } catch (e) {
+    info.shiftKeysError = String((e && e.message) || e).slice(0, 120);
+  }
+  try {
+    info.allowed = (await allowedReviewChannels(aid)) || [];
+  } catch (e) {
+    info.allowedError = String((e && e.message) || e).slice(0, 120);
+  }
+  try {
+    const rows =
+      (await db
+        .select({ n: sql`count(*)` })
+        .from(messages)
+        .where(eq(messages.status, 'pending'))
+        .all()) || [];
+    info.pendingTotal = Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+  } catch (e) {
+    info.pendingTotalError = String((e && e.message) || e).slice(0, 120);
+  }
+  // نمونه pending اخیر برای توزیع کانال
+  try {
+    const sample =
       (await db
         .select({
           id: messages.id,
@@ -1769,103 +3599,239 @@ async function selectReviewablePending(adminId) {
         })
         .from(messages)
         .where(eq(messages.status, 'pending'))
+        .orderBy(desc(messages.id))
+        .limit(500)
         .all()) || [];
-  } catch (e1) {
-    console.error('selectReviewablePending light+where', e1);
+    const by = Object.create(null);
+    for (const m of sample) {
+      const raw = String((m.channelKey ?? m.channel_key) || '');
+      const nk = normalizeChannelKey(raw) || raw || '?';
+      by[nk] = (by[nk] || 0) + 1;
+    }
+    info.pendingByChannelSample = by;
+  } catch (e) {
+    info.sampleError = String((e && e.message) || e).slice(0, 120);
+  }
+  // شمارش per allowed با variants
+  for (const ck of info.allowed || []) {
+    const nk = normalizeChannelKey(ck) || ck;
+    let n = 0;
+    const variants = [nk, ck];
+    const conf = DEFAULT_CHANNELS[nk];
+    if (conf) {
+      if (conf.key) variants.push(conf.key);
+      if (conf.title) variants.push(conf.title);
+    }
+    const seen = Object.create(null);
+    for (const v of variants) {
+      if (!v || seen[v]) continue;
+      seen[v] = 1;
+      try {
+        const rows =
+          (await db
+            .select({ n: sql`count(*)` })
+            .from(messages)
+            .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, v)))
+            .all()) || [];
+        n += Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+      } catch (_e) {}
+    }
+    info.pendingByAllowed[nk || ck] = n;
+  }
+  return info;
+}
+
+async function selectReviewablePending(adminId, limit) {
+  const need = Math.min(Math.max(Number(limit) || REVIEW_BATCH_SIZE, 1), 80);
+  const perVariant = Math.min(Math.max(need * 3, 30), 150);
+
+  let ownerCh = '';
+  if (isOwner(adminId)) {
     try {
-      light =
-        (await db
-          .select({
-            id: messages.id,
-            status: messages.status,
-            channelKey: messages.channelKey,
-          })
-          .from(messages)
-          .all()) || [];
-      light = light.filter(function (m) {
-        return String(m.status) === 'pending';
-      });
-    } catch (e2) {
-      console.error('selectReviewablePending light all', e2);
+      ownerCh = String((await settingGet('owner_pend_ch:' + adminId, '')) || '');
+      if (ownerCh === 'all') ownerCh = '';
+      if (ownerCh) ownerCh = normalizeChannelKey(ownerCh) || ownerCh;
+    } catch (_e) {}
+  }
+
+  // کانال‌های مجاز
+  let channelKeys = [];
+  if (isOwner(adminId)) {
+    if (ownerCh) channelKeys = [ownerCh];
+    else channelKeys = Object.keys(DEFAULT_CHANNELS || {});
+  } else {
+    try {
+      const allowList = await allowedReviewChannels(adminId);
+      const seen = Object.create(null);
+      for (const k of allowList || []) {
+        const nk = normalizeChannelKey(k) || String(k || '');
+        if (!nk || seen[nk]) continue;
+        seen[nk] = true;
+        channelKeys.push(nk);
+      }
+    } catch (e) {
+      console.error('selectReviewablePending allow', e);
       return [];
     }
   }
 
-  light.sort(function (a, b) {
+  if (!channelKeys.length) {
+    batchLog('select_no_allow', { adminId: Number(adminId) });
+    return [];
+  }
+
+  function keyVariants(ck) {
+    const out = [];
+    const seen = Object.create(null);
+    function add(v) {
+      const s = String(v || '').trim();
+      if (!s || seen[s]) return;
+      seen[s] = true;
+      out.push(s);
+    }
+    add(ck);
+    const nk = normalizeChannelKey(ck) || ck;
+    add(nk);
+    const conf = (DEFAULT_CHANNELS && (DEFAULT_CHANNELS[nk] || DEFAULT_CHANNELS[ck])) || null;
+    if (conf) {
+      add(conf.key);
+      add(conf.title);
+    }
+    return out;
+  }
+
+  const collected = [];
+  const seenId = Object.create(null);
+  let queryErrors = 0;
+
+  for (let ci = 0; ci < channelKeys.length; ci++) {
+    const ck = channelKeys[ci];
+    const variants = keyVariants(ck);
+    for (let vi = 0; vi < variants.length; vi++) {
+      const variant = variants[vi];
+      let rows = [];
+      try {
+        rows =
+          (await db
+            .select()
+            .from(messages)
+            .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, variant)))
+            .orderBy(asc(messages.id))
+            .limit(perVariant)
+            .all()) || [];
+      } catch (eQ) {
+        queryErrors++;
+        rows = [];
+      }
+      for (const r of rows) {
+        if (!r) continue;
+        const mid = Number(r.id);
+        if (!mid || seenId[mid]) continue;
+        if (String(r.status || '') !== 'pending') continue;
+        seenId[mid] = 1;
+        collected.push(r);
+      }
+    }
+  }
+
+  // Fallback: اگر per-channel چیزی نداد، نمونه pending اخیر (DESC) و فیلتر حافظه
+  // (pendingهای بسیار قدیمی کانال‌های دیگر نباید کل پنجره ASC را ببلعند)
+  if (!collected.length) {
+    let sample = [];
+    try {
+      sample =
+        (await db
+          .select()
+          .from(messages)
+          .where(eq(messages.status, 'pending'))
+          .orderBy(desc(messages.id))
+          .limit(800)
+          .all()) || [];
+    } catch (e1) {
+      try {
+        const allm = (await db.select().from(messages).orderBy(desc(messages.id)).limit(1200).all()) || [];
+        sample = allm.filter(function (m) {
+          return String(m.status || '') === 'pending';
+        });
+      } catch (e2) {
+        console.error('selectReviewablePending fallback', e1, e2);
+        sample = [];
+      }
+    }
+    const allowSet = Object.create(null);
+    for (const ck of channelKeys) {
+      for (const v of keyVariants(ck)) allowSet[v] = true;
+      allowSet[ck] = true;
+      const nk = normalizeChannelKey(ck) || ck;
+      if (nk) allowSet[nk] = true;
+    }
+    for (const r of sample) {
+      if (!r) continue;
+      const mid = Number(r.id);
+      if (!mid || seenId[mid]) continue;
+      if (String(r.status || '') !== 'pending') continue;
+      const raw = String((r.channelKey ?? r.channel_key) || '');
+      const nk = normalizeChannelKey(raw) || raw;
+      if (!(allowSet[raw] || allowSet[nk])) continue;
+      seenId[mid] = 1;
+      collected.push(r);
+    }
+  }
+
+  collected.sort(function (a, b) {
     return (Number(a.id) || 0) - (Number(b.id) || 0);
   });
 
-  function msgCh(m) {
-    return String((m.channelKey ?? m.channel_key) || '');
-  }
+  const out = collected.slice(0, need);
 
-  let filtered = light;
-  if (isOwner(adminId)) {
-    try {
-      const ch = await settingGet('owner_pend_ch:' + adminId, '');
-      if (ch) {
-        filtered = light.filter(function (m) {
-          return msgCh(m) === String(ch);
-        });
-      }
-    } catch (_e) {}
-  } else {
-    const allowList = await allowedReviewChannels(adminId);
-    if (!allowList.length) return [];
-    const allowed = {};
-    for (const k of allowList) {
-      const nk = normalizeChannelKey(k) || String(k);
-      if (nk) allowed[nk] = true;
-      allowed[String(k)] = true;
-    }
-    filtered = light.filter(function (m) {
-      const ck = msgCh(m);
-      const nk = normalizeChannelKey(ck) || ck;
-      return !!(allowed[ck] || allowed[nk]);
-    });
-  }
-
-  // فقط به اندازه یک Batch ردیف کامل — موازی برای سرعت
-  const need = REVIEW_BATCH_SIZE;
-  const ids = filtered.slice(0, need).map(function (m) {
-    return Number(m.id);
+  batchLog('select_pending', {
+    adminId: Number(adminId),
+    channels: channelKeys,
+    matched: collected.length,
+    returned: out.length,
+    need: need,
+    queryErrors: queryErrors,
   });
-  if (!ids.length) return [];
-  const rows = await Promise.all(
-    ids.map(function (id) {
-      return getMessageById(id).catch(function () {
-        return null;
-      });
-    })
-  );
-  const full = [];
-  for (const row of rows) {
-    if (row && String(row.status) === 'pending') full.push(row);
-  }
-  return full;
+
+  return out;
 }
 
 
+export async function hasEligiblePending(adminId) {
+  try {
+    const rows = await selectReviewablePending(adminId, 1);
+    return !!(rows && rows.length);
+  } catch (e) {
+    console.error('hasEligiblePending', e);
+    return true;
+  }
+}
 
 export async function finishReviewBatchIfComplete(adminId, messageId) {
   try {
     const batch = await getReviewBatch(adminId);
     if (!batch) {
-      // بدون اسکن کامل صف — hasMore را true فرض کن تا دکمه Batch بعدی بماند
-      return { inBatch: false, complete: true, hasMore: true, batch: null };
+      let hasMore = false;
+      try {
+        hasMore = await hasEligiblePending(adminId);
+      } catch (_e) {
+        hasMore = true;
+      }
+      return { inBatch: false, complete: true, hasMore: hasMore, batch: null };
     }
     const ids = (batch.ids || []).map(Number);
     const inBatch = messageId == null || ids.includes(Number(messageId));
-    // سریع: فقط اگر همه idها از لیست رفته‌اند complete است (بعد از drop)
-    // isReviewBatchComplete همچنان دقیق است ولی سبک‌تر از selectReviewablePending
     const complete = await isReviewBatchComplete(adminId);
     let hasMore = false;
     if (complete) {
       try {
         await clearReviewBatch(adminId);
       } catch (_e) {}
-      // اسکن کامل صف را نکن — دکمه «Batch بعدی» را نشان بده؛ اگر خالی باشد بعداً empty می‌گوید
-      hasMore = true;
+      try {
+        hasMore = await hasEligiblePending(adminId);
+      } catch (_e) {
+        hasMore = false;
+      }
     }
     return { inBatch: inBatch || complete, complete, hasMore, batch };
   } catch (e) {
@@ -1921,9 +3887,14 @@ export async function adminShiftCard(adminId) {
   }
   try {
     const allowed = await allowedReviewChannels(adminId);
-    const allow = {};
-    for (const k of allowed || []) allow[String(k)] = true;
-    // شمارش سبک pending
+    const allow = Object.create(null);
+    for (const k of allowed || []) {
+      const raw = String(k || '');
+      const nk = normalizeChannelKey(raw) || raw;
+      if (raw) allow[raw] = true;
+      if (nk) allow[nk] = true;
+    }
+    // شمارش سبک pending — همان منبع حقیقت selectReviewablePending
     let light = [];
     try {
       light =
@@ -1942,26 +3913,47 @@ export async function adminShiftCard(adminId) {
     }
     for (const m of light) {
       const ck = String((m.channelKey ?? m.channel_key) || '');
-      if (isOwner(adminId) || allow[ck]) out.pendingTotal += 1;
+      const nk = normalizeChannelKey(ck) || ck;
+      if (isOwner(adminId) || allow[ck] || allow[nk]) out.pendingTotal += 1;
     }
   } catch (e) {
     console.error('adminShiftCard pending', e);
   }
   try {
-    const allm = (await db.select().from(messages).all()) || [];
     const day = String(now.date);
-    for (const m of allm) {
-      if (Number(m.reviewedBy ?? m.reviewed_by) !== Number(adminId)) continue;
-      const ts = String(m.reviewedAt ?? m.reviewed_at ?? m.createdAt ?? m.created_at ?? '');
-      if (ts.indexOf(day) < 0 && !String(ts).startsWith(day)) {
-        // تلاش برای تاریخ شمسی/ISO
+    let mine = [];
+    try {
+      mine =
+        (await db
+          .select({
+            id: messages.id,
+            status: messages.status,
+            reviewedAt: messages.reviewedAt,
+          })
+          .from(messages)
+          .where(eq(messages.reviewedBy, Number(adminId)))
+          .all()) || [];
+    } catch (_e) {
+      mine = [];
+    }
+    for (const m of mine) {
+      const ts = String(m.reviewedAt ?? m.reviewed_at ?? '');
+      if (!ts) continue;
+      // مقایسه روز تقویمی تهران از رشته ISO یا Date
+      let dayOk = ts.indexOf(day) >= 0 || ts.startsWith(day);
+      if (!dayOk) {
         try {
-          if (ts && ts.length >= 10 && ts.slice(0, 10) !== day) continue;
-          if (!ts) continue;
-        } catch (_e) {
-          continue;
-        }
+          const d = new Date(ts);
+          if (!isNaN(d.getTime())) {
+            const tehran = new Date(d.getTime() + 3.5 * 3600 * 1000);
+            const y = tehran.getUTCFullYear();
+            const mo = String(tehran.getUTCMonth() + 1).padStart(2, '0');
+            const da = String(tehran.getUTCDate()).padStart(2, '0');
+            dayOk = y + '-' + mo + '-' + da === day;
+          }
+        } catch (_e2) {}
       }
+      if (!dayOk) continue;
       const st = String(m.status || '');
       if (st === 'approved') out.todayApproved += 1;
       else if (st === 'rejected') out.todayRejected += 1;
@@ -2033,11 +4025,126 @@ export async function maybeGreetShiftStart(adminId, chatId) {
 }
 
 
+
+export async function recoverStuckPublishingForReviewer(adminId) {
+  const aid = Number(adminId);
+  let recovered = 0;
+  try {
+    let extra = [];
+    try {
+      extra =
+        (await db
+          .select()
+          .from(messages)
+          .where(and(eq(messages.status, 'publishing'), eq(messages.reviewedBy, aid)))
+          .orderBy(desc(messages.id))
+          .limit(30)
+          .all()) || [];
+    } catch (_e) {
+      extra = [];
+    }
+    const batch = await getReviewBatch(aid);
+    const ids = batch && Array.isArray(batch.ids) ? batch.ids.map(Number) : [];
+    const seen = Object.create(null);
+    const list = [];
+    for (const id of ids) {
+      if (seen[id]) continue;
+      seen[id] = 1;
+      try {
+        const row = await getMessageById(id);
+        if (row) list.push(row);
+      } catch (_e) {}
+    }
+    for (const row of extra) {
+      const id = Number(row.id);
+      if (seen[id]) continue;
+      seen[id] = 1;
+      list.push(row);
+    }
+    for (const row of list) {
+      if (!row || String(row.status || '') !== 'publishing') continue;
+      const ra = row.reviewedAt ? new Date(row.reviewedAt).getTime() : 0;
+      if (ra && Date.now() - ra < PUBLISHING_STUCK_MS) continue;
+      const id = Number(row.id);
+      let ref = null;
+      try { ref = await findChannelMessageByInternalId(id); } catch (_e) {}
+      if (ref && ref.channelMsgId) {
+        try {
+          await db
+            .update(messages)
+            .set({ status: 'approved', reviewedAt: new Date() })
+            .where(and(eq(messages.id, id), eq(messages.status, 'publishing')))
+            .run();
+          recovered++;
+          batchLog('publishing_to_approved', { adminId: aid, msgId: id });
+          try { await dropMessageFromAllReviewBatches(id); } catch (_e) {}
+          continue;
+        } catch (_e) {}
+      }
+      try {
+        await db
+          .update(messages)
+          .set({ status: 'pending', reviewedBy: null, reviewedAt: null })
+          .where(and(eq(messages.id, id), eq(messages.status, 'publishing')))
+          .run();
+        recovered++;
+        batchLog('publishing_to_pending', { adminId: aid, msgId: id });
+      } catch (_e) {}
+    }
+  } catch (e) {
+    console.error('recoverStuckPublishingForReviewer', e);
+  }
+  return recovered;
+}
+
 export async function createReviewBatch(adminId) {
   const lockKey = 'review_batch_lock:' + adminId;
   const lock = await acquireLock(lockKey);
   if (!lock) return { status: 'busy' };
+  const t0 = Date.now();
   try {
+    try { await recoverStuckPublishingForReviewer(adminId); } catch (_e) {}
+    // publishingهای گیرکردهٔ قدیمی را به pending برگردان (هر ادمین)
+    try {
+      const stuckMs = PUBLISHING_STUCK_MS;
+      let stuck =
+        (await db
+          .select({ id: messages.id, status: messages.status, reviewedAt: messages.reviewedAt, channelKey: messages.channelKey })
+          .from(messages)
+          .where(eq(messages.status, 'publishing'))
+          .orderBy(desc(messages.id))
+          .limit(80)
+          .all()) || [];
+      const nowMs = Date.now();
+      for (const row of stuck) {
+        const ra = row.reviewedAt ? new Date(row.reviewedAt).getTime() : 0;
+        if (ra && nowMs - ra < stuckMs) continue;
+        const id = Number(row.id);
+        if (!id) continue;
+        let ref = null;
+        try { ref = await findChannelMessageByInternalId(id); } catch (_e) {}
+        if (ref && ref.channelMsgId) {
+          try {
+            await db
+              .update(messages)
+              .set({ status: 'approved', reviewedAt: new Date() })
+              .where(and(eq(messages.id, id), eq(messages.status, 'publishing')))
+              .run();
+          } catch (_e) {}
+        } else {
+          try {
+            await db
+              .update(messages)
+              .set({ status: 'pending', reviewedBy: null, reviewedAt: null })
+              .where(and(eq(messages.id, id), eq(messages.status, 'publishing')))
+              .run();
+            try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(id))).run(); } catch (_e2) {}
+          } catch (_e) {}
+        }
+      }
+    } catch (eStuck) {
+      console.error('recoverStuckPublishing global', eStuck);
+    }
     const owner = isOwner(adminId);
     if (!owner) {
       const slCh = await getActiveSubLeaderChannel(adminId);
@@ -2061,7 +4168,7 @@ export async function createReviewBatch(adminId) {
         })
       );
       for (const row of got) {
-        if (row && String(row.status) === 'pending') pendingRows.push(row);
+        if (row && String(row.status || '') === 'pending') pendingRows.push(row);
       }
       if (!owner) {
         const allowed = await allowedReviewChannels(adminId);
@@ -2078,7 +4185,30 @@ export async function createReviewBatch(adminId) {
         });
       }
       if (pendingRows.length) {
-        const batch = pruned.batch || (await getReviewBatch(adminId));
+        // تکمیل تا ۱۸ از صف، تا Batch ناقص کوچک گیر نکند
+        try {
+          if (pendingRows.length < REVIEW_BATCH_SIZE) {
+            const have = Object.create(null);
+            for (const r of pendingRows) have[Number(r.id)] = 1;
+            const extra = (await selectReviewablePending(adminId)) || [];
+            for (const m of extra) {
+              if (pendingRows.length >= REVIEW_BATCH_SIZE) break;
+              const mid = Number(m && m.id);
+              if (!mid || have[mid]) continue;
+              if (String(m.status || '') !== 'pending') continue;
+              have[mid] = 1;
+              pendingRows.push(m);
+            }
+          }
+        } catch (eFill) {
+          console.error('incomplete topup', eFill);
+        }
+        const batch = pruned.batch || (await getReviewBatch(adminId)) || {
+          ids: [],
+          batchNumber: 1,
+          createdAt: Date.now(),
+          periodDate: periodDateStr(),
+        };
         batch.ids = pendingRows.map((r) => Number(r.id));
         await saveReviewBatch(adminId, batch);
         return { status: 'incomplete', batch, messages: pendingRows };
@@ -2086,110 +4216,395 @@ export async function createReviewBatch(adminId) {
       await clearReviewBatch(adminId);
     }
 
-    const candidates = (await selectReviewablePending(adminId)).filter(
-      (m) => m && String(m.status) === 'pending'
-    );
-    // پیام‌هایی که در Batch بازِ ادمین دیگری‌اند را جدا کن تا Batchها قاطی نشوند
-    let takenByOthers = {};
-    try {
-      const rawIdx = await settingGet('review_batch_index', '[]');
-      let adminIds = [];
-      try { adminIds = JSON.parse(rawIdx) || []; } catch (_e) { adminIds = []; }
-      for (const aid of adminIds) {
-        if (Number(aid) === Number(adminId)) continue;
+    // حاشیه بیشتر از اندازه Batch تا claim fail باعث empty نشود
+    let candidates = ((await selectReviewablePending(adminId, REVIEW_BATCH_SIZE * 3)) || []).filter(function (m) {
+      return m && String(m.status || '') === 'pending';
+    });
+    {
+      const verified = [];
+      for (const m of candidates) {
         try {
-          const b = await getReviewBatch(aid);
-          if (!b || !b.ids) continue;
-          for (const id of b.ids) takenByOthers[Number(id)] = true;
+          const fresh = await getMessageById(Number(m.id));
+          if (fresh && String(fresh.status || '') === 'pending') verified.push(fresh);
         } catch (_e) {}
       }
-    } catch (_e) {}
-    const free = candidates.filter(function (m) {
-      return !takenByOthers[Number(m.id)];
-    });
-    const clean = free.slice(0, REVIEW_BATCH_SIZE);
-    if (!clean.length) return { status: 'empty' };
-
+      candidates = verified;
+    }
     const old = await getReviewBatch(adminId);
-    const batch = {
-      ids: clean.map((m) => Number(m.id)),
-      batchNumber: (old && Number(old.batchNumber) ? Number(old.batchNumber) : 0) + 1,
+    const batchNumber = (old && Number(old.batchNumber) ? Number(old.batchNumber) : 0) + 1;
+    let claimed = [];
+    for (const m of candidates) {
+      if (claimed.length >= REVIEW_BATCH_SIZE) break;
+      const cl = await tryClaimReviewMessage(m.id, adminId, batchNumber);
+      if (!cl.ok) continue;
+      claimed.push(m);
+    }
+    // تلاش مجدد با آزادسازی اجباری claim روی کاندیدها
+    if (claimed.length < Math.min(REVIEW_BATCH_SIZE, candidates.length) && candidates.length) {
+      batchLog('create_claim_retry', {
+        adminId: Number(adminId),
+        candidates: candidates.length,
+        claimed: claimed.length,
+      });
+      for (const m of candidates) {
+        const mid = Number(m.id);
+        if (!mid) continue;
+        // اگر همین ادمین قبلاً claim کرده، نگه دار
+        let mine = false;
+        for (let i = 0; i < claimed.length; i++) {
+          if (Number(claimed[i].id) === mid) {
+            mine = true;
+            break;
+          }
+        }
+        if (mine) continue;
+        try {
+          await db.delete(settings).where(eq(settings.key, reviewClaimKey(mid))).run();
+        } catch (_e) {}
+      }
+      claimed = [];
+      for (const m of candidates) {
+        if (claimed.length >= REVIEW_BATCH_SIZE) break;
+        const cl2 = await tryClaimReviewMessage(m.id, adminId, batchNumber);
+        if (!cl2.ok) continue;
+        claimed.push(m);
+      }
+    }
+    if (!claimed.length) {
+      batchLog('create_empty', {
+        adminId: Number(adminId),
+        ms: Date.now() - t0,
+        candidates: candidates.length,
+      });
+      if (candidates.length) {
+        return { status: 'held', pendingCount: candidates.length };
+      }
+      let diag = null;
+      try {
+        diag = await diagnoseReviewQueue(adminId);
+        batchLog('create_empty_diag', diag);
+      } catch (eDiag) {
+        console.error('create_empty_diag', eDiag);
+      }
+      return { status: 'empty', diag: diag };
+    }
+    const batch = normalizeBatchState({
+      ids: claimed.map(function (m) { return Number(m.id); }),
+      delivered: [],
+      failed: [],
+      batchNumber: batchNumber,
       createdAt: Date.now(),
       periodDate: periodDateStr(),
-    };
+    }, adminId);
     await saveReviewBatch(adminId, batch);
-    return { status: 'created', batch, messages: clean };
+    batchLog('create_ok', { adminId: Number(adminId), batchNumber: batch.batchNumber, selected: batch.ids.length, ms: Date.now() - t0 });
+    return { status: 'created', batch, messages: claimed };
   } finally {
     await releaseLock(lockKey, lock);
   }
 }
 
-/** ارسال پیام‌های Batch به ادمین (حداکثر ۱۰ + یک پیام سرتیتر) */
+/**
+ * ارسال پیام‌های Batch — پیشرفت افزایشی بعد از هر send موفق
+ */
 export async function sendReviewBatch(chatId, batch, rows, opts) {
   const resumed = !!(opts && opts.resumed);
-  // اگر ردیف‌ها content دارند همان را بگیر؛ فقط مشکوک‌ها را دوباره بخوان
+  const adminId = Number((opts && opts.adminId) || chatId) || null;
+  const t0 = Date.now();
+  const TIME_BUDGET_MS = 45000;
+
+  if (!batch && adminId) {
+    try { batch = await getReviewBatch(adminId); } catch (_e) {}
+  }
+  batch = normalizeBatchState(batch || { ids: [] }, adminId);
+
+  const alreadyDelivered = Object.create(null);
+  for (const d of batch.delivered || []) alreadyDelivered[Number(d)] = 1;
+
   const live = [];
-  for (const row of rows || []) {
-    if (!row) continue;
-    if (row.content != null && String(row.status || 'pending') === 'pending') {
-      live.push(row);
+  const seen = Object.create(null);
+  const idOrder =
+    batch.ids && batch.ids.length
+      ? batch.ids.map(Number)
+      : (rows || [])
+          .map(function (r) {
+            return Number(r && r.id);
+          })
+          .filter(Boolean);
+
+  for (const id of idOrder) {
+    if (!id || seen[id]) continue;
+    if (live.length >= REVIEW_BATCH_SIZE) break;
+    if (resumed && alreadyDelivered[id] && !(opts && opts.forceResend)) {
+      seen[id] = 1;
       continue;
     }
     try {
-      const fresh = await getMessageById(Number(row.id));
-      if (fresh && String(fresh.status) === 'pending') live.push(fresh);
+      const fresh = await getMessageById(Number(id));
+      if (fresh && String(fresh.status || '') === 'pending') {
+        seen[id] = 1;
+        live.push(fresh);
+      }
     } catch (_e) {}
   }
+
+  if (adminId && live.length < REVIEW_BATCH_SIZE) {
+    try {
+      const more = (await selectReviewablePending(adminId, REVIEW_BATCH_SIZE)) || [];
+      for (const m of more) {
+        if (live.length >= REVIEW_BATCH_SIZE) break;
+        const id = Number(m && m.id);
+        if (!id || seen[id] || alreadyDelivered[id]) continue;
+        if (String(m.status || '') !== 'pending') continue;
+        const cl = await tryClaimReviewMessage(id, adminId, batch.batchNumber);
+        if (!cl.ok) continue;
+        seen[id] = 1;
+        live.push(m);
+        if (!(batch.ids || []).map(Number).includes(id)) {
+          batch.ids = (batch.ids || []).concat([id]);
+        }
+      }
+      try {
+        await saveReviewBatch(adminId, batch);
+      } catch (_e) {}
+    } catch (eTop) {
+      console.error('sendReviewBatch topup', eTop);
+    }
+  }
+
   if (!live.length) {
+    if (adminId && (batch.ids || []).length) {
+      let still = 0;
+      for (const id of batch.ids) {
+        try {
+          const r = await getMessageById(id);
+          if (r && String(r.status) === 'pending') still++;
+        } catch (_e) {}
+      }
+      if (still && resumed) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            '⏳ Batch شماره ' +
+            batch.batchNumber +
+            ' — ' +
+            still +
+            ' پیام تحویل‌شده هنوز بررسی نشده‌اند.\nپس از بررسی همه، Batch بعدی آزاد می‌شود.',
+        });
+        batchLog('send_resume_waiting_review', { adminId: adminId, batchNumber: batch.batchNumber, remaining: still });
+        return { sent: 0, batch: batch, waitingReview: true };
+      }
+    }
+    if (adminId) {
+      try { await clearReviewBatch(adminId); } catch (_e) {}
+    }
     await api.sendMessage({
       chat_id: chatId,
       text: '📭 در این Batch پیام pending نمانده. دوباره «📥 پیام‌های در انتظار» را بزنید.',
     });
-    return;
+    return { sent: 0, batch: null };
   }
-  const lastId = Number(live[live.length - 1].id);
-  // خوش‌آمد شیفت فقط یک‌بار، روی اولین دریافت Batch در بازه شیفت
+
   if (!resumed) {
-    try {
-      await maybeGreetShiftStart(chatId, chatId);
-    } catch (_e) {}
+    try { await maybeGreetShiftStart(chatId, chatId); } catch (_e) {}
   }
-  const queueHint = '';
+
   const head = resumed
-    ? '⏳ Batch فعلی هنوز کامل بررسی نشده است.\nBatch شماره ' +
-      batch.batchNumber +
-      ' — ' +
-      live.length +
-      ' پیام باقی مانده.' +
-      queueHint
-    : '📥 Batch شماره ' +
-      batch.batchNumber +
-      '\n' +
-      live.length +
-      ' پیام برای بررسی' +
-      queueHint;
-  await api.sendMessage({ chat_id: chatId, text: head });
-  for (const row of live) {
+    ? '⏳ ادامه Batch شماره ' + batch.batchNumber + '\n' + live.length + ' پیام برای تحویل/بررسی.'
+    : '📥 Batch شماره ' + batch.batchNumber + '\n' + live.length + ' پیام برای بررسی';
+
+  const uiIds = [];
+  try {
+    const headMsg = await api.sendMessage({ chat_id: chatId, text: head });
+    const hid = headMsg && (headMsg.message_id || headMsg.messageId);
+    if (hid) uiIds.push(Number(hid));
+  } catch (_e) {
+    try { await api.sendMessage({ chat_id: chatId, text: head }); } catch (_e2) {}
+  }
+
+  const deliveredNow = [];
+  const failedNow = [];
+  let deferred = false;
+  const bn = batch.batchNumber || 0;
+
+  async function sendOne(row, useHtml) {
+    const ck = String((row.channelKey ?? row.channel_key) || '');
+    const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck || 'کانال';
+    let senderLine = '';
     try {
-      const ck = String((row.channelKey ?? row.channel_key) || '');
-      const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-      // ادمین/ساب‌لیدر نباید مشخصات فرستنده را ببینند
+      if (adminId && isOwner(Number(adminId))) {
+        const suid = Number(row.userId ?? row.user_id);
+        let sname = String(suid || '');
+        try {
+          const su = await getUser(suid);
+          sname = displayName(su, suid);
+        } catch (_e) {}
+        if (useHtml) {
+          senderLine =
+            'فرستنده: ' +
+            escapeHtmlBatch(sname) +
+            ' · <code>' +
+            escapeHtmlBatch(String(suid)) +
+            '</code>\n';
+        } else {
+          senderLine = 'فرستنده: ' + sname + ' · ' + suid + '\n';
+        }
+      }
+    } catch (_e) {}
+    const bodyTxt =
+      '#' +
+      row.id +
+      ' | ' +
+      title +
+      '\n' +
+      senderLine +
+      '\n' +
+      String(row.content || '').slice(0, 3600);
+    const payload = {
+      chat_id: chatId,
+      text: bodyTxt,
+      reply_markup: sanitizeMarkup(reviewInline(row.id, false, bn)),
+    };
+    if (useHtml && senderLine) payload.parse_mode = 'HTML';
+    const sent = await api.sendMessage(payload);
+    return sent && (sent.message_id || sent.messageId);
+  }
+
+  for (let ri = 0; ri < live.length; ri++) {
+    const row = live[ri];
+    if (!row) continue;
+    if (Date.now() - t0 > TIME_BUDGET_MS) {
+      deferred = true;
+      batchLog('send_budget_stop', {
+        adminId: adminId,
+        batchNumber: bn,
+        deliveredNow: deliveredNow.length,
+        left: live.length - ri,
+      });
+      break;
+    }
+    let okMid = null;
+    try {
+      try {
+        okMid = await sendOne(row, true);
+      } catch (eHtml) {
+        try {
+          okMid = await sendOne(row, false);
+        } catch (ePlain) {
+          // یک‌بار دیگر بدون reply_markup
+          try {
+            const ck = String((row.channelKey ?? row.channel_key) || '');
+            const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck || '';
+            const sent = await api.sendMessage({
+              chat_id: chatId,
+              text:
+                '#' +
+                row.id +
+                ' | ' +
+                title +
+                '\n\n' +
+                String(row.content || '').slice(0, 3600),
+            });
+            okMid = sent && (sent.message_id || sent.messageId);
+          } catch (e3) {
+            console.error('sendReviewBatch item', row && row.id, e3);
+            failedNow.push(Number(row.id));
+            try {
+              if (adminId) await releaseReviewClaim(Number(row.id), adminId);
+            } catch (_e) {}
+            continue;
+          }
+        }
+      }
+    } catch (eOuter) {
+      console.error('sendReviewBatch outer', row && row.id, eOuter);
+      failedNow.push(Number(row.id));
+      continue;
+    }
+
+    if (!okMid) {
+      failedNow.push(Number(row.id));
+      continue;
+    }
+
+    uiIds.push(Number(okMid));
+    deliveredNow.push(Number(row.id));
+    if (adminId) {
+      try {
+        const cur = (await getReviewBatch(adminId)) || batch;
+        const delivered = Array.from(
+          new Set((cur.delivered || []).map(Number).concat([Number(row.id)]))
+        );
+        const ids = Array.from(new Set((cur.ids || []).map(Number).concat([Number(row.id)])));
+        cur.ids = ids;
+        cur.delivered = delivered;
+        await saveReviewBatch(adminId, cur);
+        batch.delivered = delivered;
+        batch.ids = ids;
+      } catch (eSave) {
+        console.error('incremental persist', eSave);
+      }
+    }
+  }
+
+  try {
+    const rawUi = await settingGet('review_ui:' + (adminId || chatId), '{}');
+    let merged = {};
+    try {
+      merged = JSON.parse(rawUi || '{}') || {};
+    } catch (_e) {
+      merged = {};
+    }
+    merged.ids = Array.from(new Set([].concat(merged.ids || [], uiIds)));
+    merged.at = Date.now();
+    await settingSet('review_ui:' + (adminId || chatId), JSON.stringify(merged));
+  } catch (eUi) {
+    console.error('review_ui save', eUi);
+  }
+
+  batchLog('send_done', {
+    adminId: adminId,
+    batchNumber: bn,
+    attempted: live.length,
+    delivered: deliveredNow.length,
+    failed: failedNow.length,
+    deferred: deferred ? 1 : 0,
+    resumed: resumed ? 1 : 0,
+    ms: Date.now() - t0,
+  });
+
+  if (!deliveredNow.length && live.length) {
+    try {
       await api.sendMessage({
         chat_id: chatId,
         text:
-          '#' +
-          row.id +
-          ' | ' +
-          title +
-          '\n\n' +
-          String(row.content || '').slice(0, 3800),
-        // فقط زیر آخرین پیام Batch دکمه «Batch بعدی» باشد
-        reply_markup: sanitizeMarkup(reviewInline(row.id, false, batch.batchNumber)),
+          '⚠️ ارسال پیام‌های Batch ناموفق بود (' +
+          live.length +
+          ' مورد).\nدوباره «📥 پیام‌های در انتظار» را بزنید.',
       });
-    } catch (e) {
-      console.error('sendReviewBatch', row.id, e);
-    }
+    } catch (_e) {}
+  } else if (deferred) {
+    try {
+      await api.sendMessage({
+        chat_id: chatId,
+        text:
+          '⏳ بخشی از Batch ارسال شد: ' +
+          deliveredNow.length +
+          ' از ' +
+          live.length +
+          '.\nدوباره «📥 پیام‌های در انتظار» را بزنید تا ادامه برسد.',
+      });
+    } catch (_e) {}
+  } else if (deliveredNow.length) {
+    try {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: '✅ ' + deliveredNow.length + ' پیام برای بررسی ارسال شد.',
+      });
+    } catch (_e) {}
   }
+
+  return { sent: deliveredNow.length, failed: failedNow.length, deferred: deferred, batch: batch };
 }
 
 /**
@@ -2202,7 +4617,11 @@ export async function checkReviewAccess(adminId, row) {
   if (isOwner(adminId)) return { ok: true };
   if (!row) return { ok: false, code: 'missing', text: 'پیام یافت نشد.' };
   const st = String(row.status || '');
-  if (st === 'publishing') return { ok: true }; // رزرو خود ادمین
+  if (st === 'publishing') {
+    const holder = Number(row.reviewedBy ?? row.reviewed_by) || 0;
+    if (isOwner(adminId) || (holder && holder === Number(adminId))) return { ok: true };
+    return { ok: false, code: 'busy', text: 'این پیام در حال انتشار توسط فرد دیگری است.' };
+  }
   if (st !== 'pending') {
     return { ok: false, code: 'done', text: 'قبلاً بررسی شده' };
   }
@@ -2250,6 +4669,69 @@ export async function checkReviewAccess(adminId, row) {
  * decision: 'approve' | 'reject'
  * فقط یک فراخوانی ok:true می‌گیرد؛ بقیه code='done' یا 'busy'.
  */
+
+/**
+ * رزرو اتمیک پیام برای انتشار.
+ * فقط اگر status=pending باشد به publishing می‌رود و reviewedBy ست می‌شود.
+ * برنده: ok=true. بازنده رقابت: ok=false.
+ */
+export async function reserveMessageForPublish(msgId, reviewerId) {
+  const id = Number(msgId);
+  const rid = Number(reviewerId) || 0;
+  if (!id) return { ok: false, code: 'bad_id' };
+  try {
+    await db
+      .update(messages)
+      .set({
+        status: 'publishing',
+        reviewedBy: rid || null,
+        reviewedAt: new Date(),
+      })
+      .where(and(eq(messages.id, id), eq(messages.status, 'pending')))
+      .run();
+    const rows = (await db.select().from(messages).where(eq(messages.id, id)).all()) || [];
+    const row = rows[0];
+    if (!row) return { ok: false, code: 'missing' };
+    if (String(row.status) !== 'publishing') {
+      return { ok: false, code: 'not_pending', row: row };
+    }
+    const holder = Number(row.reviewedBy ?? row.reviewed_by) || 0;
+    if (rid && holder && holder !== rid) {
+      return { ok: false, code: 'other_holder', row: row, holder: holder };
+    }
+    return { ok: true, row: row };
+  } catch (e) {
+    console.error('reserveMessageForPublish', e);
+    return { ok: false, code: 'error' };
+  }
+}
+
+/**
+ * تکمیل انتشار برای رزروی که گیر کرده (همان reviewer یا مالک).
+ * اگر holder دیگری باشد و owner نباشد → رد.
+ */
+export async function canCompletePublishing(msgId, reviewerId) {
+  const id = Number(msgId);
+  const rid = Number(reviewerId) || 0;
+  try {
+    const rows = (await db.select().from(messages).where(eq(messages.id, id)).all()) || [];
+    const row = rows[0];
+    if (!row) return { ok: false, code: 'missing' };
+    if (String(row.status) !== 'publishing') {
+      return { ok: false, code: 'not_publishing', row: row };
+    }
+    const holder = Number(row.reviewedBy ?? row.reviewed_by) || 0;
+    if (isOwner(rid)) return { ok: true, row: row, holder: holder };
+    if (holder && holder === rid) return { ok: true, row: row, holder: holder };
+    // بدون holder — اجازه به کسی که شیفت دارد نمی‌دهیم مگر مالک؛ برای ایمنی فقط holder یا owner
+    if (!holder) return { ok: true, row: row, holder: 0 };
+    return { ok: false, code: 'other_holder', row: row, holder: holder };
+  } catch (e) {
+    console.error('canCompletePublishing', e);
+    return { ok: false, code: 'error' };
+  }
+}
+
 export async function decideMessage(adminId, id, decision, reason) {
   id = Number(id);
   const row = await getMessageById(id);
@@ -2369,7 +4851,9 @@ export async function pendingForViewer(userId) {
  * گزارش تحلیل داده برای مالک — سبک و بدون content پیام‌ها
  * scope: sadambazan | inkarbar | zendegi | all
  */
-export async function buildDataAnalysisReport(scope) {
+export async function buildDataAnalysisReport(scope, period, mode) {
+  period = period || 'week';
+  mode = mode || 'full';
   const now = tehranNow();
   const channelKeys =
     scope === 'all'
@@ -2379,7 +4863,6 @@ export async function buildDataAnalysisReport(scope) {
         });
   if (!channelKeys.length) return 'کانال نامعتبر.';
 
-  // تقویم ۷ و ۱۴ روز اخیر (تهران تقریبی از UTC+3:30)
   function dayOffset(baseDateStr, offset) {
     const parts = String(baseDateStr).split('-').map(Number);
     const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
@@ -2392,36 +4875,26 @@ export async function buildDataAnalysisReport(scope) {
       String(dt.getUTCDate()).padStart(2, '0')
     );
   }
-  const days7 = [];
-  const days14 = [];
-  for (let i = 0; i < 14; i++) {
-    const d = dayOffset(now.date, -i);
-    days14.push(d);
-    if (i < 7) days7.push(d);
-  }
-  const weekThis = days7.slice(); // امروز تا ۶ روز قبل
-  const weekPrev = days14.slice(7, 14); // ۷ تا ۱۳ روز قبل
 
-  function tehranDay(ts) {
-    if (ts == null) return null;
-    try {
-      let t = ts;
-      if (typeof t === 'string' && /^\d+$/.test(t)) t = Number(t);
-      if (typeof t === 'number' && t < 1e12) t = t * 1000; // seconds → ms
-      const ms = new Date(t).getTime();
-      if (!Number.isFinite(ms)) return null;
-      const adj = new Date(ms + 3.5 * 3600 * 1000);
-      return (
-        adj.getUTCFullYear() +
-        '-' +
-        String(adj.getUTCMonth() + 1).padStart(2, '0') +
-        '-' +
-        String(adj.getUTCDate()).padStart(2, '0')
-      );
-    } catch (_e) {
-      return null;
-    }
+  const allowedDays = {};
+  let periodLabel = '';
+  if (period === 'today') {
+    allowedDays[now.date] = true;
+    periodLabel = 'امروز (' + now.date + ')';
+  } else if (period === 'yesterday') {
+    const y = dayOffset(now.date, -1);
+    allowedDays[y] = true;
+    periodLabel = 'دیروز (' + y + ')';
+  } else if (period === 'week') {
+    for (let i = 0; i < 7; i++) allowedDays[dayOffset(now.date, -i)] = true;
+    periodLabel = '۷ روز اخیر';
+  } else if (period === 'month') {
+    for (let i = 0; i < 30; i++) allowedDays[dayOffset(now.date, -i)] = true;
+    periodLabel = '۳۰ روز اخیر';
+  } else {
+    periodLabel = 'کل نمونهٔ اخیر';
   }
+  const filterByDay = period !== 'all';
 
   function tsMs(ts) {
     if (ts == null) return null;
@@ -2436,23 +4909,25 @@ export async function buildDataAnalysisReport(scope) {
     }
   }
 
-  function shiftHours(s) {
-    try {
-      const a = periodOrd(normHm(s.startHm));
-      let b = periodOrd(normHm(s.endHm));
-      if (b <= a) b += 24 * 60;
-      const mins = b - a;
-      if (mins <= 0 || mins > 15 * 60) return 0;
-      return mins / 60;
-    } catch (_e) {
-      return 0;
-    }
+  function fmtMins(ms) {
+    if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
+    const m = Math.round(ms / 60000);
+    if (m < 60) return m + ' دقیقه';
+    const h = Math.floor(m / 60);
+    const r = m % 60;
+    return h + 'س ' + r + 'د';
   }
 
-  // —— بارگذاری داده (محدود برای Serverless) ——
+  function avg(arr) {
+    if (!arr || !arr.length) return null;
+    let s = 0;
+    for (const x of arr) s += x;
+    return s / arr.length;
+  }
+
   let allSh = [];
   try {
-    allSh = (await db.select().from(shifts).limit(3000).all()) || [];
+    allSh = (await db.select().from(shifts).orderBy(desc(shifts.id)).limit(4000).all()) || [];
   } catch (e) {
     console.error('da shifts', e);
   }
@@ -2470,7 +4945,6 @@ export async function buildDataAnalysisReport(scope) {
       (await db
         .select({
           id: messages.id,
-          userId: messages.userId,
           status: messages.status,
           channelKey: messages.channelKey,
           reviewedBy: messages.reviewedBy,
@@ -2480,418 +4954,311 @@ export async function buildDataAnalysisReport(scope) {
         })
         .from(messages)
         .orderBy(desc(messages.id))
-        .limit(5000)
+        .limit(8000)
         .all()) || [];
   } catch (e) {
-    console.error('da messages', e);
-    // fallback بدون orderBy
-    try {
-      allMsg = (await db.select().from(messages).limit(4000).all()) || [];
-    } catch (e2) {
-      console.error('da messages fallback', e2);
-    }
+    console.error('da msgs', e);
   }
 
   const scopeSet = {};
   for (const k of channelKeys) scopeSet[k] = true;
 
-  // فیلتر پیام‌های محدوده
-  const msgScope = allMsg.filter(function (m) {
-    return m && scopeSet[String(m.channelKey)];
-  });
-
-  // —— آمار سراسری صف ——
-  const pendingAll = msgScope.filter(function (m) {
-    return String(m.status) === 'pending';
-  });
-  const pendingByCh = {};
-  let oldestPendingMs = null;
-  const waitSamples = [];
-  const nowMs = Date.now();
-  for (const m of pendingAll) {
-    const ck = String(m.channelKey);
-    pendingByCh[ck] = (pendingByCh[ck] || 0) + 1;
-    const sub = tsMs(m.submittedAt);
-    if (sub != null) {
-      const age = nowMs - sub;
-      if (age >= 0 && age < 30 * 24 * 3600 * 1000) {
-        waitSamples.push(age);
-        if (oldestPendingMs == null || sub < oldestPendingMs) oldestPendingMs = sub;
-      }
-    }
-  }
-  function avg(arr) {
-    if (!arr || !arr.length) return 0;
-    let s = 0;
-    for (const x of arr) s += x;
-    return s / arr.length;
-  }
-  function fmtMins(ms) {
-    if (ms == null || !Number.isFinite(ms)) return '—';
-    const m = Math.round(ms / 60000);
-    if (m < 60) return m + ' دقیقه';
-    const h = Math.floor(m / 60);
-    const mm = m % 60;
-    if (h < 48) return h + 'س ' + mm + 'د';
-    return Math.floor(h / 24) + ' روز و ' + (h % 24) + 'س';
-  }
-
-  let body = '📈 تحلیل داده دقیق\n';
-  body += '📅 امروز تهران: ' + now.date + ' ' + now.hm + '\n';
-  body +=
-    '🔎 محدوده: ' +
-    (scope === 'all'
-      ? 'همه کانال‌ها'
-      : (DEFAULT_CHANNELS[scope] && DEFAULT_CHANNELS[scope].title) || scope) +
-    '\n';
-  body += '📦 نمونه پیام: ' + msgScope.length + ' از حداکثر ۵۰۰۰ اخیر\n';
-
-  // —— ۳) تحلیل صف انتظار ——
-  body += '\n════════════\n⏳ تحلیل صف انتظار و تأخیر\n════════════\n';
-  body += '🟡 در انتظار الان: ' + pendingAll.length + '\n';
-  body += '⏱ میانگین سن صف: ' + fmtMins(avg(waitSamples)) + '\n';
-  if (oldestPendingMs != null) {
-    body += '🕰 قدیمی‌ترین pending: ' + fmtMins(nowMs - oldestPendingMs) + '\n';
-  }
-  const pendRank = Object.keys(pendingByCh)
-    .map(function (k) {
-      return { k: k, n: pendingByCh[k] };
-    })
-    .sort(function (a, b) {
-      return b.n - a.n;
-    });
-  if (pendRank.length) {
-    body += '\nصف به تفکیک کانال:\n';
-    for (const r of pendRank) {
-      const t = (DEFAULT_CHANNELS[r.k] && DEFAULT_CHANNELS[r.k].title) || r.k;
-      body += '• «' + t + '»: ' + r.n + '\n';
-    }
-  }
-
-  // —— ۲) آمار کانال‌ها ——
-  body += '\n════════════\n📢 آمار جامع کانال‌ها (۷ روز)\n════════════\n';
-
-  const channelSummary = [];
-
-  for (const ck of channelKeys) {
-    const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
-    const chMsg = msgScope.filter(function (m) {
-      return String(m.channelKey) === ck;
-    });
-
-    let recv7 = 0;
-    let ap7 = 0;
-    let rj7 = 0;
-    let pend = 0;
-    let waitCh = [];
-    let reviewWaits = [];
-    const activeUsers = {};
-    let deleted = 0;
-
-    for (const m of chMsg) {
-      const st = String(m.status || '');
-      const subDay = tehranDay(m.submittedAt);
-      const revDay = tehranDay(m.reviewedAt);
-      if (st === 'pending') pend++;
-      if (st === 'rejected' && String(m.rejectReason || '').indexOf('پاک') >= 0) deleted++;
-      if (subDay && weekThis.indexOf(subDay) >= 0) {
-        recv7++;
-        if (m.userId) activeUsers[m.userId] = true;
-      }
-      if (revDay && weekThis.indexOf(revDay) >= 0) {
-        if (st === 'approved') ap7++;
-        if (st === 'rejected') rj7++;
-        const sub = tsMs(m.submittedAt);
-        const rev = tsMs(m.reviewedAt);
-        if (sub != null && rev != null && rev >= sub) {
-          const d = rev - sub;
-          if (d < 14 * 24 * 3600 * 1000) reviewWaits.push(d);
-        }
-      }
-      if (st === 'pending') {
-        const sub = tsMs(m.submittedAt);
-        if (sub != null) waitCh.push(nowMs - sub);
-      }
-    }
-
-    const totalDec = ap7 + rj7;
-    const rejectPct = totalDec ? Math.round((rj7 / totalDec) * 100) : 0;
-    const avgWait = avg(waitCh);
-    const avgReviewWait = avg(reviewWaits);
-
-    // شیفت‌های ۷ روز
-    const chShifts = allSh.filter(function (s) {
-      if (String(s.channelKey) !== ck) return false;
-      if (String(s.status) === 'cancelled') return false;
-      if (s.shiftDate === 'perm' || s.shiftDate === 'permanent') return true;
-      return weekThis.indexOf(String(s.shiftDate)) >= 0;
-    });
-    const shiftAdminSet = {};
-    let shiftHoursTot = 0;
-    for (const s of chShifts) {
-      shiftAdminSet[s.adminId] = true;
-      shiftHoursTot += shiftHours(s);
-    }
-
-    const ads = allAdmins.filter(function (a) {
-      return String(a.channelKey || a.channel_key) === ck;
-    });
-
-    channelSummary.push({
-      ck: ck,
-      title: title,
-      recv7: recv7,
-      ap7: ap7,
-      rj7: rj7,
-      pend: pend,
-      rejectPct: rejectPct,
-      avgWait: avgWait,
-      avgReviewWait: avgReviewWait,
-      activeUsers: Object.keys(activeUsers).length,
-      deleted: deleted,
-      shiftHours: shiftHoursTot,
-      shiftAdmins: Object.keys(shiftAdminSet).length,
-      registeredAdmins: ads.length,
-      needScore: pend + Math.round(avgWait / 60000) + rejectPct,
-    });
-
-    body += '\n━━━━━━━━━━━━\n📢 «' + title + '»\n';
-    body += '📥 دریافتی ۷روز: ' + recv7 + '\n';
-    body += '✅ تأیید ۷روز: ' + ap7 + '\n';
-    body += '❌ رد ۷روز: ' + rj7 + (totalDec ? ' (' + rejectPct + '٪)' : '') + '\n';
-    body += '🟡 در انتظار الان: ' + pend + '\n';
-    body += '⏱ میانگین سن صف: ' + fmtMins(avgWait) + '\n';
-    body += '⚡️ میانگین زمان بررسی: ' + fmtMins(avgReviewWait) + '\n';
-    body += '👤 کاربران فعال ۷روز: ' + Object.keys(activeUsers).length + '\n';
-    body += '🗑 حذف/پاک‌سازی (نمونه): ' + deleted + '\n';
-    body += '⏰ ساعات شیفت ۷روز: ' + Math.round(shiftHoursTot * 10) / 10 + '\n';
-    body += '👮 ادمین ثبت‌شده: ' + ads.length + ' | شیفت‌دار: ' + Object.keys(shiftAdminSet).length + '\n';
-  }
-
-  // رتبه‌بندی کانال‌ها
-  if (channelSummary.length > 1) {
-    body += '\n────────────\n📊 مقایسه کانال‌ها\n';
-    const byRecv = channelSummary.slice().sort(function (a, b) {
-      return b.recv7 - a.recv7;
-    });
-    const byDelay = channelSummary.slice().sort(function (a, b) {
-      return b.avgWait - a.avgWait;
-    });
-    const byRej = channelSummary.slice().sort(function (a, b) {
-      return b.rejectPct - a.rejectPct;
-    });
-    const byNeed = channelSummary.slice().sort(function (a, b) {
-      return b.needScore - a.needScore;
-    });
-    if (byRecv[0]) body += '🥇 بیشترین ورودی: «' + byRecv[0].title + '» (' + byRecv[0].recv7 + ')\n';
-    if (byDelay[0]) body += '🐢 بیشترین تأخیر صف: «' + byDelay[0].title + '» (' + fmtMins(byDelay[0].avgWait) + ')\n';
-    if (byRej[0]) body += '🔴 بیشترین ٪ رد: «' + byRej[0].title + '» (' + byRej[0].rejectPct + '٪)\n';
-    if (byNeed[0])
-      body += '🆘 نیاز بیشتر به ادمین: «' + byNeed[0].title + '» (امتیاز ' + byNeed[0].needScore + ')\n';
-  }
-
-  // —— ۱) آمار عملکرد ادمین‌ها ——
-  body += '\n════════════\n👮 آمار عملکرد ادمین‌ها (۷ روز)\n════════════\n';
-
-  // جمع‌آوری ادمین‌های مرتبط با scope
-  const adminIdsSet = {};
+  // ادمین‌های معتبر فقط از جدول channel_admins
+  const validAdminByCh = {};
+  const validAdminAll = {};
   for (const a of allAdmins) {
     const ck = String(a.channelKey || a.channel_key || '');
-    if (scopeSet[ck]) {
-      const uid = Number(a.userId != null ? a.userId : a.user_id);
-      if (uid) adminIdsSet[uid] = true;
-    }
-  }
-  for (const s of allSh) {
-    if (!scopeSet[String(s.channelKey)]) continue;
-    if (String(s.status) === 'cancelled') continue;
-    const uid = Number(s.adminId);
-    if (uid) adminIdsSet[uid] = true;
-  }
-  for (const m of msgScope) {
-    if (m.reviewedBy) adminIdsSet[Number(m.reviewedBy)] = true;
+    const uid = Number(a.userId != null ? a.userId : a.user_id);
+    if (!uid || !scopeSet[ck]) continue;
+    if (!validAdminByCh[ck]) validAdminByCh[ck] = {};
+    validAdminByCh[ck][uid] = true;
+    validAdminAll[uid] = true;
   }
 
-  const adminStats = [];
-  for (const aidStr of Object.keys(adminIdsSet)) {
-    const aid = Number(aidStr);
-    if (!aid) continue;
-
-    // شیفت‌ها این هفته / هفته قبل
-    let shiftsThis = 0;
-    let hoursThis = 0;
-    let shiftsPrev = 0;
-    let hoursPrev = 0;
-    const activeShiftDays = {};
-    for (const s of allSh) {
-      if (Number(s.adminId) !== aid) continue;
-      if (String(s.status) === 'cancelled') continue;
-      if (scope !== 'all' && String(s.channelKey) !== scope) continue;
-      const sd = String(s.shiftDate || '');
-      const hrs = shiftHours(s);
-      if (sd === 'perm' || sd === 'permanent') {
-        shiftsThis++;
-        hoursThis += hrs;
-        continue;
-      }
-      if (weekThis.indexOf(sd) >= 0) {
-        shiftsThis++;
-        hoursThis += hrs;
-        activeShiftDays[sd] = true;
-      } else if (weekPrev.indexOf(sd) >= 0) {
-        shiftsPrev++;
-        hoursPrev += hrs;
-      }
-    }
-
-    // بررسی‌ها
-    let ap = 0;
-    let rj = 0;
-    let apPrev = 0;
-    let rjPrev = 0;
-    const reviewDurations = [];
-    const reviewDays = {};
-    let lastAct = null;
-    for (const m of msgScope) {
-      if (Number(m.reviewedBy) !== aid) continue;
-      const st = String(m.status || '');
-      if (st !== 'approved' && st !== 'rejected') continue;
-      const rd = tehranDay(m.reviewedAt);
-      const rev = tsMs(m.reviewedAt);
-      if (rev != null && (lastAct == null || rev > lastAct)) lastAct = rev;
-      if (rd && weekThis.indexOf(rd) >= 0) {
-        if (st === 'approved') ap++;
-        else rj++;
-        reviewDays[rd] = true;
-        const sub = tsMs(m.submittedAt);
-        if (sub != null && rev != null && rev >= sub) {
-          const d = rev - sub;
-          if (d < 14 * 24 * 3600 * 1000) reviewDurations.push(d);
-        }
-      } else if (rd && weekPrev.indexOf(rd) >= 0) {
-        if (st === 'approved') apPrev++;
-        else rjPrev++;
-      }
-    }
-
-    const reviewed = ap + rj;
-    const reviewedPrev = apPrev + rjPrev;
-    const avgReviewMs = avg(reviewDurations);
-    const perHour = hoursThis > 0.25 ? Math.round((reviewed / hoursThis) * 10) / 10 : reviewed;
-    // تعهد شیفت: روزهایی که هم شیفت داشته و هم حداقل یک بررسی
-    const shiftDayCount = Object.keys(activeShiftDays).length;
-    let fulfilledDays = 0;
-    for (const d of Object.keys(activeShiftDays)) {
-      if (reviewDays[d]) fulfilledDays++;
-    }
-    // اگر شیفت دائمی/بدون تاریخ مشخص: بر اساس داشتن بررسی در برابر گرفتن شیفت
-    let commitPct = 0;
-    if (shiftDayCount > 0) {
-      commitPct = Math.round((fulfilledDays / shiftDayCount) * 100);
-    } else if (shiftsThis > 0) {
-      commitPct = reviewed > 0 ? Math.min(100, Math.round((reviewed / Math.max(shiftsThis * 5, 1)) * 100)) : 0;
-    } else {
-      commitPct = reviewed > 0 ? 50 : 0;
-    }
-
-    // روزهای فعالیت / عدم فعالیت در ۷ روز
-    const activeDaysN = Object.keys(reviewDays).length;
-    const inactiveDaysN = 7 - activeDaysN;
-
-    // باقی‌مانده صف در کانال‌های این ادمین (تقریبی — snapshot فعلی)
-    let remainHint = 0;
-    for (const a of allAdmins) {
-      const uid = Number(a.userId != null ? a.userId : a.user_id);
-      if (uid !== aid) continue;
-      const ck = String(a.channelKey || a.channel_key || '');
-      if (scopeSet[ck]) remainHint += pendingByCh[ck] || 0;
-    }
-
-    const delta = reviewed - reviewedPrev;
-
-    adminStats.push({
-      id: aid,
-      shiftsThis: shiftsThis,
-      hoursThis: hoursThis,
-      reviewed: reviewed,
-      ap: ap,
-      rj: rj,
-      avgReviewMs: avgReviewMs,
-      perHour: perHour,
-      activeDaysN: activeDaysN,
-      inactiveDaysN: inactiveDaysN,
-      commitPct: commitPct,
-      lastAct: lastAct,
-      remainHint: remainHint,
-      reviewedPrev: reviewedPrev,
-      delta: delta,
-    });
+  function inPeriodSub(m) {
+    if (!filterByDay) return true;
+    const d = tehranDateOfTs(m.submittedAt);
+    return d && allowedDays[d];
+  }
+  function inPeriodRev(m) {
+    if (!filterByDay) return true;
+    const d = tehranDateOfTs(m.reviewedAt);
+    return d && allowedDays[d];
   }
 
-  adminStats.sort(function (a, b) {
-    return b.reviewed - a.reviewed || b.shiftsThis - a.shiftsThis;
+  const msgScope = allMsg.filter(function (m) {
+    return scopeSet[String(m.channelKey || m.channel_key || '')];
   });
 
-  // حداکثر ۱۵ ادمین برتر + همه کسانی که شیفت داشتند
-  const shown = adminStats.slice(0, 18);
-  if (!shown.length) {
-    body += '— ادمینی در این محدوده یافت نشد.\n';
-  } else {
-    for (const st of shown) {
-      let name = String(st.id);
-      try {
-        name = displayName(await getUser(st.id), st.id);
-      } catch (_e) {}
-      body += '\n👤 ' + name + ' | ' + st.id + '\n';
-      body += '  ⏰ شیفت: ' + st.shiftsThis + ' (' + Math.round(st.hoursThis * 10) / 10 + 'س)\n';
-      body += '  🔍 بررسی: ' + st.reviewed + ' | ✅' + st.ap + ' ❌' + st.rj + '\n';
-      body += '  ⏱ میانگین زمان بررسی: ' + fmtMins(st.avgReviewMs) + '\n';
-      body += '  🚀 میانگین در ساعت شیفت: ' + st.perHour + '\n';
-      body += '  📅 فعالیت: ' + st.activeDaysN + ' روز | عدم‌فعالیت: ' + st.inactiveDaysN + ' روز\n';
-      body += '  📐 انجام تعهد شیفت: ' + st.commitPct + '٪\n';
-      body += '  🟡 صف مرتبط (الان): ~' + st.remainHint + '\n';
-      body +=
-        '  🕰 آخرین فعالیت: ' +
-        (st.lastAct ? fmtMins(nowMs - st.lastAct) + ' پیش' : '—') +
-        '\n';
-      const arrow = st.delta > 0 ? '▲' : st.delta < 0 ? '▼' : '＝';
-      body +=
-        '  📊 نسبت به هفته قبل: ' +
-        arrow +
-        ' ' +
-        (st.delta >= 0 ? '+' : '') +
-        st.delta +
-        ' بررسی (قبل: ' +
-        st.reviewedPrev +
-        ')\n';
+  const received = msgScope.filter(inPeriodSub);
+  const reviewed = msgScope.filter(function (m) {
+    const st = String(m.status || '');
+    return (st === 'approved' || st === 'rejected') && inPeriodRev(m);
+  });
+  const pendingNow = msgScope.filter(function (m) {
+    return String(m.status) === 'pending';
+  });
+
+  let ap = 0;
+  let rj = 0;
+  const waitSamples = [];
+  const handleSamples = [];
+  const nowMs = Date.now();
+  for (const m of reviewed) {
+    if (String(m.status) === 'approved') ap++;
+    else rj++;
+    const sub = tsMs(m.submittedAt);
+    const rev = tsMs(m.reviewedAt);
+    if (sub != null && rev != null && rev >= sub) {
+      waitSamples.push(rev - sub);
+      handleSamples.push(rev - sub);
     }
-    if (adminStats.length > shown.length) {
-      body += '\n… و ' + (adminStats.length - shown.length) + ' ادمین دیگر در نمونه\n';
+  }
+  for (const m of pendingNow) {
+    const sub = tsMs(m.submittedAt);
+    if (sub != null) waitSamples.push(nowMs - sub);
+  }
+
+  const scopeTitle =
+    scope === 'all'
+      ? 'همه کانال‌ها'
+      : (DEFAULT_CHANNELS[scope] && DEFAULT_CHANNELS[scope].title) || scope;
+
+  let body = '';
+  body += '📈 تحلیل داده — «' + scopeTitle + '»\n';
+  body += '🗓 بازه: ' + periodLabel + '\n';
+  body += 'نمونهٔ پیام: ' + allMsg.length + ' ردیف اخیر\n';
+
+  // —— چرخه پیام ——
+  if (mode === 'msg' || mode === 'full') {
+    body += '\n════════════\n📨 چرخه پیام‌ها\n════════════\n';
+    body += '📥 دریافتی (بازه): ' + received.length + '\n';
+    body += '🟢 تأیید: ' + ap + '\n';
+    body += '🔴 رد: ' + rj + '\n';
+    body += '🟡 در انتظار الان: ' + pendingNow.length + '\n';
+    const done = ap + rj;
+    if (done > 0) {
+      body += '٪ تأیید: ' + Math.round((ap / done) * 100) + '٪\n';
+      body += '٪ رد: ' + Math.round((rj / done) * 100) + '٪\n';
+    }
+    body += '⏱ میانگین انتظار تا رسیدگی: ' + fmtMins(avg(handleSamples)) + '\n';
+    if (pendingNow.length) {
+      const ages = [];
+      for (const m of pendingNow) {
+        const sub = tsMs(m.submittedAt);
+        if (sub != null) ages.push(nowMs - sub);
+      }
+      body += '⏳ میانگین سن صف فعلی: ' + fmtMins(avg(ages)) + '\n';
+      body += '🕰 قدیمی‌ترین pending: ' + fmtMins(ages.length ? Math.max.apply(null, ages) : null) + '\n';
+    }
+
+    // تفکیک کانال
+    body += '\n📺 تفکیک کانال (بازه):\n';
+    for (const ck of channelKeys) {
+      const title = (DEFAULT_CHANNELS[ck] && DEFAULT_CHANNELS[ck].title) || ck;
+      let r = 0,
+        a = 0,
+        j = 0,
+        p = 0;
+      for (const m of msgScope) {
+        if (String(m.channelKey) !== ck) continue;
+        if (String(m.status) === 'pending') p++;
+        if (inPeriodSub(m)) r++;
+        if (inPeriodRev(m)) {
+          if (String(m.status) === 'approved') a++;
+          if (String(m.status) === 'rejected') j++;
+        }
+      }
+      body +=
+        '• «' +
+        title +
+        '» 📥' +
+        r +
+        ' 🟢' +
+        a +
+        ' 🔴' +
+        j +
+        ' 🟡' +
+        p +
+        '\n';
+    }
+
+    // دلایل رد
+    const reasons = {};
+    for (const m of reviewed) {
+      if (String(m.status) !== 'rejected') continue;
+      const rr = String(m.rejectReason || 'نامشخص').slice(0, 40);
+      reasons[rr] = (reasons[rr] || 0) + 1;
+    }
+    const reasonList = Object.keys(reasons)
+      .map(function (k) {
+        return { k: k, n: reasons[k] };
+      })
+      .sort(function (a, b) {
+        return b.n - a.n;
+      })
+      .slice(0, 8);
+    if (reasonList.length) {
+      body += '\n📌 دلایل رد پرتکرار:\n';
+      for (const x of reasonList) body += '• ' + x.k + ': ' + x.n + '\n';
     }
   }
 
-  // هشدار عملکرد پایین
-  const low = adminStats
-    .filter(function (s) {
-      return s.shiftsThis >= 1 && s.reviewed < Math.max(3, s.shiftsThis * 2);
-    })
-    .slice(0, 8);
-  if (low.length) {
-    body += '\n⚠️ شیفت گرفته ولی بررسی کم:\n';
-    for (const s of low) {
-      let name = String(s.id);
-      try {
-        name = displayName(await getUser(s.id), s.id);
-      } catch (_e) {}
-      body += '• ' + name + ' | شیفت ' + s.shiftsThis + ' | بررسی ' + s.reviewed + '\n';
+  // —— ادمین‌ها ——
+  if (mode === 'adm' || mode === 'full') {
+    body += '\n════════════\n👮 عملکرد ادمین‌ها\n════════════\n';
+    body += '(فقط ادمین‌های فعلی هر کانال)\n';
+
+    const adminStats = [];
+    for (const aidStr of Object.keys(validAdminAll)) {
+      const aid = Number(aidStr);
+      let a = 0,
+        j = 0;
+      let inS = 0,
+        outS = 0;
+      const durs = [];
+      let lastAct = null;
+      for (const m of reviewed) {
+        if (Number(m.reviewedBy) !== aid) continue;
+        if (String(m.status) === 'approved') a++;
+        else if (String(m.status) === 'rejected') j++;
+        const ck = String(m.channelKey || '');
+        if (reviewMatchedShift(aid, ck, m.reviewedAt, allSh)) inS++;
+        else outS++;
+        const sub = tsMs(m.submittedAt);
+        const rev = tsMs(m.reviewedAt);
+        if (sub != null && rev != null && rev >= sub) durs.push(rev - sub);
+        if (rev != null && (lastAct == null || rev > lastAct)) lastAct = rev;
+      }
+      let shiftsN = 0;
+      for (const s of allSh) {
+        if (Number(s.adminId || s.admin_id) !== aid) continue;
+        if (String(s.status) === 'cancelled') continue;
+        const ck = String(s.channelKey || s.channel_key || '');
+        if (!scopeSet[ck]) continue;
+        if (!validAdminByCh[ck] || !validAdminByCh[ck][aid]) continue;
+        const sd = String(s.shiftDate || s.shift_date || '');
+        if (filterByDay) {
+          if (sd === 'perm' || sd === 'permanent') continue;
+          if (!allowedDays[sd]) continue;
+        }
+        shiftsN++;
+      }
+      const total = a + j;
+      adminStats.push({
+        id: aid,
+        ap: a,
+        rj: j,
+        total: total,
+        inShift: inS,
+        outShift: outS,
+        shifts: shiftsN,
+        avgHandle: avg(durs),
+        lastAct: lastAct,
+        rejectPct: total ? Math.round((j / total) * 100) : 0,
+      });
+    }
+
+    adminStats.sort(function (x, y) {
+      return y.total - x.total || y.shifts - x.shifts;
+    });
+
+    const shown = adminStats.slice(0, 25);
+    if (!shown.length) {
+      body += 'ادمینی در محدوده ثبت نشده.\n';
+    } else {
+      for (const st of shown) {
+        let name = String(st.id);
+        try {
+          name = displayName(await getUser(st.id), st.id);
+        } catch (_e) {}
+        body +=
+          '\n👤 ' +
+          name +
+          '\n  ✅' +
+          st.ap +
+          ' ❌' +
+          st.rj +
+          ' (جمع ' +
+          st.total +
+          ') · ٪رد ' +
+          st.rejectPct +
+          '\n  📍 در شیفت: ' +
+          (st.inShift || 0) +
+          ' · خارج شیفت: ' +
+          (st.outShift || 0) +
+          '\n  ⏰ شیفت ثبت‌شده در بازه: ' +
+          st.shifts +
+          ' · میانگین رسیدگی: ' +
+          fmtMins(st.avgHandle) +
+          '\n';
+        if (st.lastAct) {
+          body += '  🕰 آخرین فعالیت: ' + fmtMins(nowMs - st.lastAct) + ' پیش\n';
+        }
+      }
+      if (adminStats.length > shown.length) {
+        body += '\n… و ' + (adminStats.length - shown.length) + ' ادمین دیگر\n';
+      }
+    }
+
+    // ضعیف‌ها: شیفت داشته بررسی کم
+    const low = adminStats
+      .filter(function (s) {
+        return s.shifts >= 1 && s.total < Math.max(2, s.shifts);
+      })
+      .slice(0, 6);
+    if (low.length) {
+      body += '\n⚠️ شیفت گرفته ولی بررسی کم:\n';
+      for (const s of low) {
+        let name = String(s.id);
+        try {
+          name = displayName(await getUser(s.id), s.id);
+        } catch (_e) {}
+        body += '• ' + name + ' | شیفت ' + s.shifts + ' | بررسی ' + s.total + '\n';
+      }
+    }
+  }
+
+  // —— نتیجه مدیریتی ——
+  if (mode === 'full' || mode === 'msg') {
+    body += '\n════════════\n🧠 جمع‌بندی مدیریتی\n════════════\n';
+    const tips = [];
+    if (pendingNow.length > 50) {
+      tips.push('صف انتظار بالاست (' + pendingNow.length + '). نیاز به ادمین/شیفت بیشتر در ساعات پیک.');
+    }
+    if (ap + rj > 0 && rj / (ap + rj) > 0.35) {
+      tips.push('نسبت رد بالاست (' + Math.round((rj / (ap + rj)) * 100) + '٪). قوانین ارسال یا آموزش کاربران را بررسی کنید.');
+    }
+    const avgW = avg(handleSamples);
+    if (avgW != null && avgW > 2 * 3600 * 1000) {
+      tips.push('میانگین زمان رسیدگی بیش از ۲ ساعت است — پوشش شیفت را متراکم‌تر کنید.');
+    }
+    // نسبت خارج از شیفت
+    let totR = 0,
+      outR = 0;
+    for (const st of adminStats || []) {
+      totR += st.total || 0;
+      outR += st.outShift || 0;
+    }
+    if (totR > 20 && outR / totR > 0.4) {
+      tips.push(
+        'حدود ' +
+          Math.round((outR / totR) * 100) +
+          '٪ بررسی‌ها خارج از بازه شیفت ثبت‌شده است (ساب‌لیدر بدون شیفت، پایان Batch، یا مالک).'
+      );
+    }
+    if (!tips.length) {
+      tips.push('شاخص‌های اصلی در محدوده قابل‌قبول نمونه هستند. روی کانال‌های با صف بالاتر تمرکز کنید.');
+    }
+    for (let i = 0; i < tips.length; i++) {
+      body += i + 1 + ') ' + tips[i] + '\n';
     }
   }
 
   body +=
     '\n────────────\n' +
-    'ℹ️ محاسبات از نمونهٔ حداکثر ۵۰۰۰ پیام اخیر و جداول شیفت/ادمین است.\n' +
-    '«باقی‌مانده پایان شیفت» به‌صورت snapshot صف فعلی کانال‌های مرتبط تقریب زده شده (لاگ تاریخی صف ذخیره نمی‌شود).\n' +
-    'تعهد شیفت ≈ نسبت روزهای دارای بررسی به روزهای دارای شیفت.';
+    'ℹ️ آمار از نمونهٔ حداکثر ۸۰۰۰ پیام اخیر + جداول شیفت و ادمین فعلی است.\n' +
+    'افراد خارج از لیست ادمین کانال در گزارش ادمین نمی‌آیند.';
 
   return body;
 }
@@ -2935,3 +5302,24 @@ export async function postToChannel(channelKey, text) {
     parse_mode: 'HTML',
   });
 }
+
+/** اطلاعیه کاربران — پیاده‌سازی در lib/announcements.js */
+export {
+  setPassiveUserAnnounce,
+  clearPassiveUserAnnounce,
+  getPassiveUserAnnounce,
+  maybeDeliverPassiveAnnounce,
+  activateUserAnnouncement,
+  cancelAnnouncement,
+  countEligibleAnnounceUsers,
+  listAnnouncementsByStatus,
+  getAnnouncement,
+  countReceipts,
+  formatAnnouncementStats,
+  announceManageKeyboard,
+  announceActivateConfirmInline,
+  announceCapPickInline,
+  announceDetailInline,
+  announceCancelConfirmInline,
+} from 'lib/announcements';
+

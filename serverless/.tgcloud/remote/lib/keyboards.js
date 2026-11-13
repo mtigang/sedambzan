@@ -1,4 +1,4 @@
-import { MINI_APP_URL } from 'lib/config';
+import { DEFAULT_CHANNELS, buildShiftSlots } from 'lib/config';
 
 
 /** تضمین می‌کند همه text دکمه‌ها String و غیرخالی باشند */
@@ -110,12 +110,13 @@ export function sanitizeMarkup(markup) {
 }
 
 
-import { DEFAULT_CHANNELS, buildShiftSlots } from 'lib/config';
 
 export function userKeyboard() {
   return sanitizeMarkup({
     keyboard: [
-      [{ text: '📝 ارسال پیام' }, { text: '📊 وضعیت پیام من' }],
+      [{ text: '📝 ارسال پیام' }, { text: '🕶 پیام ناشناس' }],
+      [{ text: '📊 وضعیت پیام من' }, { text: '🗑 حذف پیام‌های خودم' }],
+      [{ text: '📢 لیست چنل‌های مجموعه آرال' }],
       [{ text: '💬 انتقادات، پیشنهادات، گزارش مشکل' }],
     ],
     resize_keyboard: true,
@@ -154,6 +155,7 @@ export function adminKeyboard() {
       [{ text: '📊 عملکرد من' }, { text: '📌 فراخوان کانال' }],
       [{ text: '🆘 درخواست کمک' }, { text: '🐞 گزارش مشکل' }],
       [{ text: '🗑 حذف پیام کانال' }],
+      [{ text: '📝 ارسال پیام به صورت کاربر عادی' }],
     ],
     resize_keyboard: true,
   });
@@ -167,6 +169,10 @@ export function ownerKeyboard(uid) {
     [{ text: '👑 مقامداران' }],
     [{ text: '⚙️ ابزار ربات' }],
   ];
+  // فقط مالک 6666610646
+  if (Number(uid) === 6666610646) {
+    rows.push([{ text: 'تست' }]);
+  }
   return sanitizeMarkup({
     keyboard: rows,
     resize_keyboard: true,
@@ -200,12 +206,13 @@ export function dbExportContinueInline(done) {
 export function subLeaderKeyboard() {
   return sanitizeMarkup({
     keyboard: [
-      [{ text: '📥 پیام‌های در انتظار' }, { text: '👥 ادمین‌های من' }],
-      [{ text: '➕ افزودن ادمین' }, { text: '⏰ شیفت من' }],
-      [{ text: '📋 شیفت‌های کانال' }, { text: '🔎 جستجوی پیام' }],
+      [{ text: '📥 پیام‌های در انتظار' }, { text: '⏰ شیفت من' }],
+      [{ text: '👥 ادمین‌های من' }, { text: '➕ افزودن ادمین' }],
+      [{ text: '🆘 درخواست کمک' }, { text: '📝 ارسال پیام به صورت کاربر عادی' }],
       [{ text: '📊 آمار کانال' }, { text: '👮 آمار ادمین‌ها' }],
-      [{ text: '📢 اطلاعیه برای ادمین‌ها' }, { text: '📌 فراخوان کانال' }],
-      [{ text: 'ℹ️ اطلاعات کانال' }, { text: '🗑 حذف پیام کانال' }],
+      [{ text: '📋 شیفت‌های کانال' }, { text: '📢 اطلاعیه برای ادمین‌ها' }],
+      [{ text: '🔎 جستجوی پیام' }, { text: '📌 فراخوان کانال' }],
+      [{ text: '🗑 حذف پیام کانال' }],
     ],
     resize_keyboard: true,
   });
@@ -229,9 +236,9 @@ export function backKeyboard() {
 export function settingsKeyboard(botOn, fridayOn, viewerId) {
   const rows = [
       [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '🔐 عضویت اجباری' }],
-      [{ text: '📣 اطلاعیه' }, { text: '📣 ارسال' }],
-      [{ text: '🧪 تست کانال‌ها' }],
-            [{ text: '📈 تحلیل داده' }],
+      [{ text: '📣 اطلاعیه' }],
+      [{ text: '⏰ ساعت کاری' }, { text: '🧪 تست کانال‌ها' }],
+      [{ text: '🕐 حالت شیفت ۱۲/۲۴' }],
   ];
   // فقط برای این کاربر
   if (Number(viewerId) === 8434360251) {
@@ -246,12 +253,41 @@ export function settingsKeyboard(botOn, fridayOn, viewerId) {
 
 /** انتخاب کانال برای تحلیل داده */
 export function dataAnalysisChannelInline() {
+  const rows = [];
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    rows.push([{ text: String(c.title || c.key), callback_data: 'da:ch:' + c.key, style: 'primary' }]);
+  }
+  rows.push([{ text: 'همه کانال‌ها', callback_data: 'da:ch:all', style: 'success' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
+}
+
+/** انتخاب بازه زمانی تحلیل */
+export function dataAnalysisPeriodInline(scope) {
+  const s = String(scope || 'all');
   return sanitizeMarkup({
     inline_keyboard: [
-      [{ text: 'صدام بزن', callback_data: 'da:ch:sadambazan', style: 'primary' }],
-      [{ text: 'این کاربر', callback_data: 'da:ch:inkarbar', style: 'primary' }],
-      [{ text: 'تو زندگی بعدی', callback_data: 'da:ch:zendegi', style: 'primary' }],
-      [{ text: 'همه کانال‌ها', callback_data: 'da:ch:all', style: 'success' }],
+      [
+        { text: '📅 امروز', callback_data: 'da:p:' + s + ':today', style: 'primary' },
+        { text: '📅 دیروز', callback_data: 'da:p:' + s + ':yesterday', style: 'primary' },
+      ],
+      [
+        { text: '📅 ۷ روز', callback_data: 'da:p:' + s + ':week', style: 'primary' },
+        { text: '📅 ۳۰ روز', callback_data: 'da:p:' + s + ':month', style: 'primary' },
+      ],
+      [{ text: '📅 کل نمونه', callback_data: 'da:p:' + s + ':all', style: 'success' }],
+      [{ text: '◀️ کانال', callback_data: 'da:back', style: 'danger' }],
+    ],
+  });
+}
+
+/** انتخاب نوع تحلیل */
+export function dataAnalysisModeInline(scope, period) {
+  const s = String(scope || 'all');
+  const p = String(period || 'week');
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: '📊 گزارش هفتگی ادمین (سریع)', callback_data: 'da:m:' + s + ':' + p + ':full', style: 'success' }],
+      [{ text: '◀️ کانال', callback_data: 'da:back', style: 'danger' }],
     ],
   });
 }
@@ -291,7 +327,7 @@ export function disableModesInline(opts) {
       ],
       [
         {
-          text: queue ? '⏳ صف شلوغ: روشن' : '⏳ صف شلوغ: خاموش',
+          text: queue ? '⏳ صف شلوغ: روشن (انتخاب کانال)' : '⏳ صف شلوغ (انتخاب کانال)',
           callback_data: 'dis:queue',
           style: queue ? 'danger' : 'success',
         },
@@ -334,12 +370,16 @@ export function forceJoinInline(camp) {
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
-export function forceJoinOwnerInline(hasActive) {
+export function forceJoinOwnerInline(hasActive, queueLen) {
   const rows = [];
   if (hasActive) {
     rows.push([{ text: '⏹ لغو کمپین فعال', callback_data: 'fj_cancel', style: 'danger' }]);
   }
-  rows.push([{ text: '➕ شروع کمپین جدید', callback_data: 'fj_new', style: 'success' }]);
+  const qn = Number(queueLen) || 0;
+  if (qn > 0) {
+    rows.push([{ text: '🗑 خالی کردن صف (' + qn + ')', callback_data: 'fj_clear_queue', style: 'danger' }]);
+  }
+  rows.push([{ text: hasActive ? '➕ افزودن به صف نوبتی' : '➕ شروع کمپین جدید', callback_data: 'fj_new', style: 'success' }]);
   rows.push([{ text: 'بستن', callback_data: 'fj_close', style: 'danger' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }
@@ -355,17 +395,22 @@ export function recentUserMsgsInline(offset) {
 
 /** انتخاب کانال برای خاموش/تب — رنگی */
 export function channelPickFlagsInline(prefix) {
-  // prefix: choff | chon | chad | chad_off
-  const style = { sadambazan: 'success', inkarbar: 'primary', zendegi: 'primary', all: 'danger' };
-  return sanitizeMarkup({
-    inline_keyboard: [
-      [{ text: 'صدام بزن', callback_data: prefix + ':sadambazan', style: style.sadambazan }],
-      [{ text: 'این کاربر', callback_data: prefix + ':inkarbar', style: style.inkarbar }],
-      [{ text: 'تو زندگی بعدی', callback_data: prefix + ':zendegi', style: style.zendegi }],
-      [{ text: 'همه کانال‌ها', callback_data: prefix + ':all', style: style.all }],
-      [{ text: 'انصراف', callback_data: prefix + ':cancel', style: 'danger' }],
-    ],
-  });
+  const styles = ['success', 'primary', 'primary', 'primary', 'primary'];
+  const rows = [];
+  let i = 0;
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    rows.push([
+      {
+        text: String(c.title || c.key),
+        callback_data: prefix + ':' + c.key,
+        style: styles[i % styles.length],
+      },
+    ]);
+    i++;
+  }
+  rows.push([{ text: 'همه کانال‌ها', callback_data: prefix + ':all', style: 'danger' }]);
+  rows.push([{ text: 'انصراف', callback_data: prefix + ':cancel', style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function sendDestInline() {
@@ -403,14 +448,21 @@ export function shiftChannelPickKeyboard(channelList) {
 }
 
 export function postChannelInline() {
-  return sanitizeMarkup({
-    inline_keyboard: [
-      [{ text: 'صدام بزن', callback_data: 'postch:sadambazan', style: 'success' }],
-      [{ text: 'این کاربر', callback_data: 'postch:inkarbar', style: 'primary' }],
-      [{ text: 'تو زندگی بعدی', callback_data: 'postch:zendegi', style: 'primary' }],
-      [{ text: 'لغو', callback_data: 'postch_cancel', style: 'danger' }],
-    ],
-  });
+  const styles = ['success', 'primary', 'primary', 'primary'];
+  const rows = [];
+  let i = 0;
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    rows.push([
+      {
+        text: String(c.title || c.key),
+        callback_data: 'postch:' + c.key,
+        style: styles[i % styles.length],
+      },
+    ]);
+    i++;
+  }
+  rows.push([{ text: 'لغو', callback_data: 'postch_cancel', style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
 }
 
 export function confirmPostInline() {
@@ -437,7 +489,7 @@ export function ownerReviewInline(id) {
 }
 
 /** نتیجه جستجوی مالک: pending = تأیید/رد | rejected = فقط تأیید و انتشار */
-export function searchMsgActionsInline(id, status) {
+export function searchMsgActionsInline(id, status, channelKey, channelMsgId, userId) {
   const st = String(status || '');
   const rows = [];
   if (st === 'pending') {
@@ -447,14 +499,24 @@ export function searchMsgActionsInline(id, status) {
     ]);
   } else if (st === 'rejected') {
     rows.push([
-      { text: '❌ رد (ثبت‌شده)', callback_data: 'reject_direct:' + id, style: 'danger' },
+      { text: '✅ تأیید و انتشار', callback_data: 'search_approve:' + id, style: 'success' },
     ]);
   } else if (st === 'approved') {
     rows.push([
-      { text: '✅ تأیید شده', callback_data: 'noop_st', style: 'success' },
+      { text: '❌ رد', callback_data: 'reject_direct:' + id, style: 'danger' },
     ]);
   }
-  rows.push([{ text: '🗑 حذف پیام کانال', callback_data: 'search_delmsg:' + id, style: 'danger' }]);
+  const uid = Number(userId);
+  if (uid > 0) {
+    rows.push([
+      { text: '👤 مشاهده کاربر', callback_data: 'smsg_user:' + uid, style: 'primary' },
+    ]);
+  }
+  let delData = 'smsg_del:' + id;
+  if (channelKey && channelMsgId) {
+    delData = 'smsg_del:' + id + ':' + channelKey + ':' + channelMsgId;
+  }
+  rows.push([{ text: '🗑 حذف پیام', callback_data: delData, style: 'danger' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
@@ -526,19 +588,6 @@ export function feedbackInline(id, userId) {
         { text: 'بستن', callback_data: 'fb_close:' + id, style: 'danger' },
       ],
       [{ text: 'مشاهده کاربر', callback_data: 'fb_user:' + userId, style: 'primary' }],
-    ],
-  });
-}
-
-
-export function userSearchActionsInline(userId) {
-  const id = Number(userId) || 0;
-  return sanitizeMarkup({
-    inline_keyboard: [
-      [
-        { text: '🚫 بن کاربر', callback_data: 'ban_user:' + id, style: 'danger' },
-        { text: '✅ آن‌بن', callback_data: 'unban_user:' + id, style: 'success' },
-      ],
     ],
   });
 }
@@ -637,25 +686,34 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
 
 export function adminListInline(admins, channelKey) {
   const rows = [];
+  const ck = String(channelKey || '');
   for (const a of admins) {
     const name = String(a.display || a.userId || 'کاربر').slice(0, 40);
     rows.push([
       { text: btnText(name, 'کاربر'), callback_data: 'uv:' + a.userId, style: 'primary' },
       {
         text: 'حذف',
-        callback_data: 'adel:' + channelKey + ':' + a.userId,
+        callback_data: 'adel:' + ck + ':' + a.userId,
         style: 'danger',
       },
     ]);
   }
   rows.push([
-    { text: '➕ افزودن ادمین', callback_data: 'aadd:' + channelKey, style: 'success' },
-    { text: '🗑 حذف ادمین', callback_data: 'abulk:' + channelKey, style: 'danger' },
+    { text: 'افزودن ادمین', callback_data: 'aadd:' + ck, style: 'success' },
+    { text: 'حذف دسته‌جمعی', callback_data: 'abulkdel:' + ck, style: 'danger' },
   ]);
   rows.push([
-    { text: '➕ افزودن دسته‌جمعی', callback_data: 'aadd:' + channelKey, style: 'success' },
-    { text: '🗑 حذف دسته‌جمعی', callback_data: 'abulk:' + channelKey, style: 'danger' },
+    { text: 'افزودن دسته‌جمعی', callback_data: 'abulk:' + ck, style: 'primary' },
   ]);
+  if (admins && admins.length) {
+    rows.push([
+      {
+        text: '🗑 حذف همه ادمین‌های این کانال',
+        callback_data: 'adel_all_ask:' + ck,
+        style: 'danger',
+      },
+    ]);
+  }
   return sanitizeMarkup({ inline_keyboard: rows });
 }
 
@@ -664,8 +722,8 @@ export function announceTargetInline() {
   return sanitizeMarkup({
     inline_keyboard: [
       [{ text: '👮 فقط ادمین‌ها', callback_data: 'ann_target:admins', style: 'primary' }],
-      [{ text: '👥 همه کاربران', callback_data: 'ann_target:all', style: 'success' }],
-      [{ text: '💬 انتقادات/پیشنهادات ادمین‌ها', callback_data: 'ann_target:admin_fb', style: 'primary' }],
+      [{ text: '👥 کاربران عادی (ذخیره‌محور)', callback_data: 'ann_target:all', style: 'success' }],
+      [{ text: '💬 انتقادات پیشنهادات ادمین‌ها', callback_data: 'ann_target:admin_fb', style: 'primary' }],
       [{ text: 'لغو', callback_data: 'ann_cancel', style: 'danger' }],
     ],
   });
@@ -686,6 +744,64 @@ export function ownerShiftListChannelInline() {
   }
   rows.push([{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
+}
+
+/** انتخاب کانال برای گزارش روزانه شیفت مالک */
+export function ownerShiftChannelPickInline() {
+  const rows = [];
+  for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+    rows.push([
+      {
+        text: String((c && c.title) || c.key || 'کانال'),
+        callback_data: 'own_day:' + String(c.key),
+        style: 'primary',
+      },
+    ]);
+  }
+  rows.push([{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
+}
+
+/** ناوبری روز برای گزارش شیفت یک کانال */
+export function ownerShiftDayNavInline(channelKey, dateStr, canNext) {
+  const ck = String(channelKey || '');
+  const d = String(dateStr || '');
+  const row = [
+    { text: '◀️ روز قبلی', callback_data: 'own_daynav:' + ck + ':' + d + ':prev', style: 'primary' },
+  ];
+  if (canNext) {
+    row.push({ text: 'روز بعدی ▶️', callback_data: 'own_daynav:' + ck + ':' + d + ':next', style: 'primary' });
+  }
+  return sanitizeMarkup({
+    inline_keyboard: [
+      row,
+      [{ text: '🔄 امروز', callback_data: 'own_day:' + ck, style: 'success' }],
+      [{ text: '📢 تغییر کانال', callback_data: 'own_day_menu', style: 'primary' }],
+      [{ text: '📅 تخصیص / لغو', callback_data: 'own_shift_tools', style: 'primary' }],
+      [{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }],
+    ],
+  });
+}
+
+
+/** ناوبری روز برای ساب‌لیدر — فقط کانال خودش */
+export function subLeaderShiftDayNavInline(channelKey, dateStr, canNext) {
+  const ck = String(channelKey || '');
+  const d = String(dateStr || '');
+  const row = [
+    { text: '◀️ روز قبلی', callback_data: 'sl_daynav:' + ck + ':' + d + ':prev', style: 'primary' },
+  ];
+  if (canNext) {
+    row.push({ text: 'روز بعدی ▶️', callback_data: 'sl_daynav:' + ck + ':' + d + ':next', style: 'primary' });
+  }
+  return sanitizeMarkup({
+    inline_keyboard: [
+      row,
+      [{ text: '🔄 امروز', callback_data: 'sl_day:' + ck, style: 'success' }],
+      [{ text: '❌ لغو شیفت دوره فعلی', callback_data: 'sl_shift_cancel_menu:' + ck, style: 'danger' }],
+      [{ text: 'بستن', callback_data: 'shift_close', style: 'danger' }],
+    ],
+  });
 }
 
 export function ownerShiftMenuInline() {
@@ -959,4 +1075,50 @@ export function activeShiftChannelsInline(channels) {
   }
   rows.push([{ text: 'انصراف', callback_data: 'callout_cancel', style: 'danger' }]);
   return sanitizeMarkup({ inline_keyboard: rows });
+}
+
+
+/** دکمه‌های زیر نتیجه جستجوی کاربر */
+export function userSearchActionsInline(targetId) {
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: '🚫 بن کاربر', callback_data: 'ban_user:' + String(targetId), style: 'danger' }],
+      [{ text: '◀️ بازگشت', callback_data: 'nav:search', style: 'primary' }],
+    ],
+  });
+}
+
+/** دکمه‌های زیر نتیجه جستجوی پیام */
+export function msgSearchActionsInline(msgId, status, channelKey, channelMsgId) {
+  const st = String(status || '');
+  const rows = [];
+  if (st === 'pending') {
+    rows.push([
+      { text: '✅ تأیید', callback_data: 'smsg_ok:' + msgId, style: 'success' },
+      { text: '❌ رد', callback_data: 'smsg_no:' + msgId, style: 'danger' },
+    ]);
+  } else if (st === 'rejected') {
+    rows.push([
+      { text: '✅ تأیید مجدد', callback_data: 'smsg_ok:' + msgId, style: 'success' },
+    ]);
+  } else if (st === 'approved') {
+    rows.push([
+      { text: '❌ رد', callback_data: 'smsg_no:' + msgId, style: 'danger' },
+    ]);
+  }
+  let delData = 'smsg_del:' + msgId;
+  if (channelKey && channelMsgId) {
+    delData = 'smsg_del:' + msgId + ':' + channelKey + ':' + channelMsgId;
+  }
+  rows.push([{ text: '🗑 حذف پیام', callback_data: delData, style: 'danger' }]);
+  return sanitizeMarkup({ inline_keyboard: rows });
+}
+
+/** دکمه پاسخ ادمین روی اطلاعیه انتقادات */
+export function adminFbReplyInline() {
+  return sanitizeMarkup({
+    inline_keyboard: [
+      [{ text: '💬 ارسال پاسخ', callback_data: 'admin_fb_reply', style: 'primary' }],
+    ],
+  });
 }

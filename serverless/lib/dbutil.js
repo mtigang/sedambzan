@@ -2296,124 +2296,147 @@ export async function getStatsDashboardText() {
     }
   }
 
-  // شمارش مستقیم با یک GROUP BY — بدون نمونه و بدون مقیاس
-  // (count(*) WHERE status روی ۱۰۰k+ گاهی timeout می‌دهد؛ groupBy یک اسکن است)
+  /** count با WHERE — روی statusهای پرتعداد (approved) ممکن است timeout شود */
+  async function countWhereStatus(st) {
+    try {
+      const rows =
+        (await db.select({ n: sql`count(*)` }).from(messages).where(eq(messages.status, st)).all()) || [];
+      const n = Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+      return n;
+    } catch (e) {
+      console.error('stats countWhere', st, e);
+      return null;
+    }
+  }
+
   let pe = 0;
   let ap = 0;
   let rj = 0;
   let accurate = false;
+  let methodNote = '';
   const byCh = {};
   for (const c of Object.values(DEFAULT_CHANNELS || {})) {
     byCh[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
   }
 
-  async function loadStatusCounts() {
-    // مسیر ۱: groupBy روی status
-    try {
-      const rows =
-        (await db
-          .select({
-            status: messages.status,
-            n: sql`count(*)`,
-          })
-          .from(messages)
-          .groupBy(messages.status)
-          .all()) || [];
-      if (rows && rows.length) {
-        let p = 0,
-          a = 0,
-          r = 0;
-        for (const row of rows) {
-          const st = String(row.status || '');
-          const n = Number(row.n != null ? row.n : Object.values(row)[1]) || 0;
-          if (st === 'pending' || st === 'publishing') p += n;
-          else if (st === 'approved') a += n;
-          else if (st === 'rejected') r += n;
-        }
-        return { pe: p, ap: a, rj: r, ok: true };
-      }
-    } catch (e) {
-      console.error('stats groupBy status', e);
-    }
-    // مسیر ۲: چهار count جدا (fallback)
-    async function one(st) {
-      try {
-        const rows =
-          (await db.select({ n: sql`count(*)` }).from(messages).where(eq(messages.status, st)).all()) ||
-          [];
-        return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
-      } catch (e) {
-        console.error('stats status', st, e);
-        return null;
-      }
-    }
-    const p1 = await one('pending');
-    const p2 = await one('publishing');
-    const a1 = await one('approved');
-    const r1 = await one('rejected');
-    if (p1 == null || a1 == null || r1 == null) return { pe: 0, ap: 0, rj: 0, ok: false };
-    return { pe: Number(p1) + Number(p2 || 0), ap: Number(a1), rj: Number(r1), ok: true };
-  }
-
-  async function loadChannelCounts() {
-    try {
-      const rows =
-        (await db
-          .select({
-            status: messages.status,
-            channelKey: messages.channelKey,
-            n: sql`count(*)`,
-          })
-          .from(messages)
-          .groupBy(messages.status, messages.channelKey)
-          .all()) || [];
-      if (rows && rows.length) {
-        const out = {};
-        for (const c of Object.values(DEFAULT_CHANNELS || {})) {
-          out[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
-        }
-        for (const row of rows) {
-          const st = String(row.status || '');
-          const ck = String((row.channelKey ?? row.channel_key) || '');
-          if (!out[ck]) continue;
-          const n = Number(row.n != null ? row.n : Object.values(row)[2]) || 0;
-          out[ck].total += n;
-          if (st === 'pending' || st === 'publishing') out[ck].pe += n;
-          else if (st === 'approved') out[ck].ap += n;
-          else if (st === 'rejected') out[ck].rj += n;
-        }
-        return { byCh: out, ok: true };
-      }
-    } catch (e) {
-      console.error('stats groupBy channel', e);
-    }
-    return { byCh: null, ok: false };
-  }
-
   const total = await countAll();
-  const sc = await loadStatusCounts();
-  pe = sc.pe;
-  ap = sc.ap;
-  rj = sc.rj;
-  accurate = sc.ok;
 
-  const chRes = await loadChannelCounts();
-  if (chRes.ok && chRes.byCh) {
-    for (const k of Object.keys(chRes.byCh)) byCh[k] = chRes.byCh[k];
-  } else if (accurate) {
-    // اگر groupBy کانال نشد ولی status دقیق بود، تفکیک را از نسبت کل نگه می‌داریم
-    accurate = true;
-  } else {
-    accurate = false;
+  // ۱) صف (pending/publishing) معمولاً کوچک است → count دقیق
+  let peExact = await countWhereStatus('pending');
+  let pubExact = await countWhereStatus('publishing');
+  if (peExact != null) {
+    pe = Number(peExact) + Number(pubExact || 0);
   }
 
-  // اگر groupBy هم شکست خورد، هرگز نمونه ۸هزارتایی را به عنوان «از اول تا الان» نشان نده
-  // pe/ap/rj روی ۰ می‌مانند و note می‌گوید شمارش مستقیم ممکن نشد
-  if (!sc.ok) {
-    pe = 0;
+  // ۲) نمونهٔ بزرگ از جدیدترین‌ها برای نسبت ap/rj و تفکیک کانال
+  let sample = [];
+  try {
+    sample =
+      (await db
+        .select({
+          status: messages.status,
+          channelKey: messages.channelKey,
+          submittedAt: messages.submittedAt,
+          reviewedAt: messages.reviewedAt,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(25000)
+        .all()) || [];
+  } catch (e) {
+    console.error('stats sample', e);
+    try {
+      sample =
+        (await db
+          .select({ status: messages.status, channelKey: messages.channelKey })
+          .from(messages)
+          .orderBy(desc(messages.id))
+          .limit(12000)
+          .all()) || [];
+    } catch (e2) {
+      console.error('stats sample2', e2);
+    }
+  }
+
+  let sPe = 0,
+    sAp = 0,
+    sRj = 0,
+    sOther = 0;
+  for (const x of sample) {
+    const st = String(x.status || '');
+    const ck = String((x.channelKey ?? x.channel_key) || '');
+    if (st === 'pending' || st === 'publishing') sPe++;
+    else if (st === 'approved') sAp++;
+    else if (st === 'rejected') sRj++;
+    else sOther++;
+    if (byCh[ck]) {
+      byCh[ck].total++;
+      if (st === 'pending' || st === 'publishing') byCh[ck].pe++;
+      else if (st === 'approved') byCh[ck].ap++;
+      else if (st === 'rejected') byCh[ck].rj++;
+    }
+  }
+  const sSum = sPe + sAp + sRj + sOther;
+
+  // ۳) تلاش برای count دقیق rejected (معمولاً کمتر از approved)
+  let rjExact = await countWhereStatus('rejected');
+  let apExact = await countWhereStatus('approved');
+
+  if (peExact != null && rjExact != null && apExact != null) {
+    pe = Number(peExact) + Number(pubExact || 0);
+    ap = Number(apExact);
+    rj = Number(rjExact);
+    accurate = true;
+    methodNote = 'شمارش مستقیم count(*) روی هر status';
+  } else if (peExact != null && rjExact != null && total > 0) {
+    // pending+rejected دقیق؛ approved = باقی‌مانده
+    pe = Number(peExact) + Number(pubExact || 0);
+    rj = Number(rjExact);
+    ap = Math.max(0, total - pe - rj);
+    accurate = true;
+    methodNote = 'pending/rejected دقیق؛ تأیید = کل − صف − رد';
+  } else if (sSum > 0 && total > 0) {
+    // مقیاس نمونه روی کل
+    if (total <= sSum + 100) {
+      pe = peExact != null ? Number(peExact) + Number(pubExact || 0) : sPe;
+      ap = sAp;
+      rj = sRj;
+      accurate = true;
+      methodNote = 'نمونه تقریباً برابر کل پایگاه';
+    } else {
+      const ratio = total / sSum;
+      if (peExact != null) pe = Number(peExact) + Number(pubExact || 0);
+      else pe = Math.round(sPe * ratio);
+      // باقی‌مانده را بین ap/rj با نسبت نمونه تقسیم کن
+      const rest = Math.max(0, total - pe);
+      const sRest = sAp + sRj;
+      if (sRest > 0) {
+        ap = Math.round((sAp / sRest) * rest);
+        rj = Math.max(0, rest - ap);
+      } else {
+        ap = rest;
+        rj = 0;
+      }
+      accurate = false;
+      methodNote = 'برآورد از نمونه ' + sample.length + ' پیام اخیر + مقیاس روی کل ' + total;
+      // مقیاس تفکیک کانال
+      for (const key of Object.keys(byCh)) {
+        const b = byCh[key];
+        byCh[key] = {
+          total: Math.round(b.total * ratio),
+          pe: Math.round(b.pe * ratio),
+          ap: Math.round(b.ap * ratio),
+          rj: Math.round(b.rj * ratio),
+          title: b.title,
+        };
+      }
+    }
+  } else if (peExact != null) {
+    pe = Number(peExact) + Number(pubExact || 0);
     ap = 0;
     rj = 0;
     accurate = false;
+    methodNote = 'فقط صف دقیق؛ تأیید/رد قابل شمارش نبود';
   }
 
   let userCount = 0;
@@ -2445,21 +2468,13 @@ export async function getStatsDashboardText() {
     }).length;
   } catch (_e) {}
 
-  // امروز: نمونهٔ جدیدترین‌ها (بدون ایندکس زمانی دقیق‌تر ممکن نیست)
-  let todayPe = 0, todayAp = 0, todayRj = 0, todayNew = 0;
+  // امروز از روی همان نمونهٔ بارگذاری‌شده
+  let todayPe = 0,
+    todayAp = 0,
+    todayRj = 0,
+    todayNew = 0;
   try {
     const today = tehranNow().date;
-    const sample =
-      (await db
-        .select({
-          status: messages.status,
-          submittedAt: messages.submittedAt,
-          reviewedAt: messages.reviewedAt,
-        })
-        .from(messages)
-        .orderBy(desc(messages.id))
-        .limit(15000)
-        .all()) || [];
     for (const m of sample) {
       const subD = tehranDateOfTs(m.submittedAt);
       const revD = tehranDateOfTs(m.reviewedAt);
@@ -2486,7 +2501,7 @@ export async function getStatsDashboardText() {
     '📊 داشبورد آماری' +
     _nl +
     _nl +
-    '① از اول تا الان (شمارش مستقیم)' +
+    '① از اول تا الان' +
     _nl +
     '• کل پیام‌ها: ' +
     total +
@@ -2507,9 +2522,9 @@ export async function getStatsDashboardText() {
     adminUnique +
     _nl +
     _nl +
-    '② نمونه ۱۵ هزار پیام اخیر' +
-    _nl +
-    '📅 امروز (تهران) از روی همین نمونه:' +
+    '② امروز (تهران) از نمونه ' +
+    sample.length +
+    ' پیام اخیر:' +
     _nl +
     '• جدید امروز: ' +
     todayNew +
@@ -2527,13 +2542,13 @@ export async function getStatsDashboardText() {
     shToday +
     _nl +
     _nl +
-    '📺 تفکیک کانال (کل با count یا نمونه اخیر):' +
+    '📺 تفکیک کانال:' +
     _nl +
     by +
     _nl +
     (accurate
-      ? '✅ بخش «از اول» و تفکیک کانال از شمارش مستقیم (GROUP BY) است. امروز از نمونه اخیر.'
-      : '⚠️ شمارش مستقیم status ممکن نشد؛ اعداد pe/ap/rj بخش ۱ صفر شده‌اند تا با نمونه اشتباه گرفته نشوند. امروز از نمونه اخیر.') +
+      ? '✅ ' + (methodNote || 'شمارش دقیق') + '.'
+      : 'ℹ️ ' + (methodNote || 'برآورد از نمونه اخیر') + '.') +
     _nl;
 
   return text;

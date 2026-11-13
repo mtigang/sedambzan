@@ -22,8 +22,11 @@ import {
   acquireLock,
   releaseLock,
   forceJoinNeedGate,
+  pruneOldestMessageIfOverBudget,
   FRIDAY_MODE_TEXT,
   QUEUE_BUSY_TEXT,
+  getUser, findBodyDuplicate,
+  rememberUserMessageId,
 } from 'lib/dbutil';
 
 function isOwner(uid) {
@@ -60,6 +63,16 @@ export async function submitUserMessage(userId, text) {
   const rawText = String(text || '').trim();
   if (!rawText) return { ok: false, error: 'متن خالی است.' };
 
+  // بن
+  if (!owner) {
+    try {
+      const uBan = await getUser(uid);
+      if (uBan && Number(uBan.blocked) === 1) {
+        return { ok: false, error: 'شما از ربات مسدود شده‌اید.', code: 'blocked' };
+      }
+    } catch (_e) {}
+  }
+
   // عضویت اجباری
   if (!owner) {
     try {
@@ -77,23 +90,45 @@ export async function submitUserMessage(userId, text) {
   if (!owner && (await isFridayMode())) {
     return { ok: false, error: FRIDAY_MODE_TEXT || 'امروز جمعه است؛ ارسال پیام ممکن نیست.' };
   }
-  if (!owner && (await isQueueBusyMode())) {
+  if (!(await isBotOn()) && !owner) {
     return {
       ok: false,
-      error: QUEUE_BUSY_TEXT || 'حجم صف زیاد است. کمی بعد دوباره تلاش کنید.',
+      error:
+        '🔴 ربات موقتاً خاموش است.\n\n' +
+        'پیام شما ثبت نشد — ربات خراب نیست.\n' +
+        'لطفاً بعداً دوباره تلاش کنید.',
     };
-  }
-  if (!(await isBotOn()) && !owner) {
-    return { ok: false, error: '🔴 ربات در حال حاضر غیرفعال است.' };
   }
 
   // اعتبارسنجی (بدون entity بولد — مینی‌اپ متن ساده می‌فرستد؛ ربات خودش بولد می‌کند)
   const v = validateAndFix({ text: rawText, entities: [] });
   if (!v.ok) return { ok: false, error: v.error || 'پیام نامعتبر است.' };
 
+  const chTitle =
+    (DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey;
+
+  // صف شلوغ به‌ازای کانال
+  if (!owner && (await isQueueBusyMode(v.channelKey))) {
+    return {
+      ok: false,
+      error:
+        '⏳ صف «' +
+        chTitle +
+        '» شلوغ است.\n\n' +
+        'پیام شما ثبت نشد — ربات سالم است و فقط ورودی این کانال موقتاً بسته شده.\n' +
+        'کمی بعد دوباره بفرستید.',
+    };
+  }
+
   const ch = await getChannel(v.channelKey);
   if (!ch || Number(ch.enabled) === 0) {
-    return { ok: false, error: '🔴 این کانال غیرفعال است.' };
+    return {
+      ok: false,
+      error:
+        '🔴 کانال «' +
+        chTitle +
+        '» غیرفعال است.\n\nپیام ثبت نشد (عمدی است، نه خرابی ربات).',
+    };
   }
 
   try {
@@ -102,8 +137,9 @@ export async function submitUserMessage(userId, text) {
         ok: false,
         error:
           '🔴 دریافت پیام برای «' +
-          ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
-          '» فعلاً غیرفعال است.',
+          chTitle +
+          '» فعلاً خاموش است.\n\n' +
+          'پیام شما ثبت نشد.\nمالک این کانال را موقتاً بسته است — بعداً تلاش کنید.',
       };
     }
     if (await isChannelAdMode(v.channelKey)) {
@@ -111,8 +147,10 @@ export async function submitUserMessage(userId, text) {
         ok: false,
         error:
           '📢 «' +
-          ((DEFAULT_CHANNELS[v.channelKey] && DEFAULT_CHANNELS[v.channelKey].title) || v.channelKey) +
-          '» الان درگیر تبلیغات است. کمی بعد دوباره بفرستید.',
+          chTitle +
+          '» الان درگیر تبلیغات / تبادل است.\n\n' +
+          'پیام شما ثبت نشد — ربات سالم است.\n' +
+          'کمی بعد دوباره بفرستید.',
       };
     }
   } catch (_e) {}
@@ -174,75 +212,21 @@ export async function submitUserMessage(userId, text) {
   }
 
   try {
-    // تکراری
-    let dup = null;
-    let dupIsPending = false;
-    let queuePos = 0;
-    const hit = await settingGet(bIdx, '');
-    if (hit) {
-      const hid = Number(String(hit).split('|')[0]);
-      const hst = String(hit).split('|')[1] || 'pending';
-      if (hid && (hst === 'pending' || hst === 'approved')) {
-        dup = { id: hid, status: hst };
-        dupIsPending = hst === 'pending';
-      }
+    // تکراری — سبک (ایندکس + نمونه محدود؛ نه .all)
+  let dup = null;
+  let dupIsPending = false;
+  let queuePos = 0;
+  try {
+    const found = await findBodyDuplicate(v.channelKey, bodyKey);
+    if (found && found.dup) {
+      dup = found.dup;
+      dupIsPending = !!found.dupIsPending;
+      queuePos = Number(found.queuePos) || 0;
     }
-    if (!dup) {
-      const pendingRows =
-        (await db
-          .select({
-            id: messages.id,
-            status: messages.status,
-            content: messages.content,
-          })
-          .from(messages)
-          .where(and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'pending')))
-          .all()) || [];
-      for (const row of pendingRows) {
-        const other = exactBodyKey(row.content);
-        if (other && other === bodyKey) {
-          dup = row;
-          dupIsPending = true;
-          const pendingSorted = pendingRows.slice().sort(function (a, b) {
-            return Number(a.id) - Number(b.id);
-          });
-          const idx = pendingSorted.findIndex(function (x) {
-            return Number(x.id) === Number(row.id);
-          });
-          queuePos = idx >= 0 ? idx : 0;
-          try {
-            await settingSet(bIdx, String(row.id) + '|pending');
-          } catch (_e) {}
-          break;
-        }
-      }
-    }
-    if (!dup) {
-      const recentApproved =
-        (await db
-          .select({
-            id: messages.id,
-            status: messages.status,
-            content: messages.content,
-          })
-          .from(messages)
-          .where(and(eq(messages.channelKey, v.channelKey), eq(messages.status, 'approved')))
-          .orderBy(desc(messages.id))
-          .limit(200)
-          .all()) || [];
-      for (const row of recentApproved) {
-        const other = exactBodyKey(row.content);
-        if (other && other === bodyKey) {
-          dup = row;
-          dupIsPending = false;
-          try {
-            await settingSet(bIdx, String(row.id) + '|approved');
-          } catch (_e) {}
-          break;
-        }
-      }
-    }
-    if (dup) {
+  } catch (e) {
+    console.error('submit dup check', e);
+  }
+  if (dup) {
       if (dupIsPending) {
         return {
           ok: false,
@@ -286,25 +270,55 @@ export async function submitUserMessage(userId, text) {
         content: v.content,
         channelKey: v.channelKey,
         status: 'pending',
-        submittedAt: new Date(),
       })
       .run();
 
     let msgId = null;
     const lastRows =
       (await db
-        .select({ id: messages.id })
+        .select({
+          id: messages.id,
+          userId: messages.userId,
+          content: messages.content,
+          channelKey: messages.channelKey,
+          status: messages.status,
+        })
         .from(messages)
-        .where(eq(messages.userId, uid))
         .orderBy(desc(messages.id))
-        .limit(1)
+        .limit(20)
         .all()) || [];
-    if (lastRows[0]) msgId = lastRows[0].id;
+    for (const row of lastRows) {
+      if (Number(row.userId ?? row.user_id) !== Number(uid)) continue;
+      if (String(row.status) !== 'pending') continue;
+      if (String(row.channelKey || row.channel_key) !== String(v.channelKey)) continue;
+      if (String(row.content || '') === String(v.content)) {
+        msgId = row.id;
+        break;
+      }
+    }
+    if (msgId == null) {
+      for (const row of lastRows) {
+        if (Number(row.userId ?? row.user_id) === Number(uid) && String(row.status) === 'pending') {
+          msgId = row.id;
+          break;
+        }
+      }
+    }
+    if (msgId == null && lastRows[0]) msgId = lastRows[0].id;
     if (msgId != null && bodyKey) {
       try {
         await settingSet(bIdx, String(msgId) + '|pending');
       } catch (_e) {}
     }
+    if (msgId != null) {
+      try {
+        await rememberUserMessageId(uid, msgId);
+      } catch (_e) {}
+    }
+
+    try {
+      await pruneOldestMessageIfOverBudget();
+    } catch (_e) {}
 
     return {
       ok: true,

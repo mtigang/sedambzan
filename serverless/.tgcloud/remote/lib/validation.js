@@ -28,7 +28,14 @@ function isFullyBold(text, entities) {
 
 function hasLink(entities, text) {
   if (entities && entities.some((e) => e.type === 'url' || e.type === 'text_link')) return true;
-  return /https?:\/\//i.test(text || '');
+  const t = String(text || '');
+  if (/https?:\/\//i.test(t)) return true;
+  if (/\btg:\/\//i.test(t)) return true;
+  if (/(?:^|[\s(])(?:t\.me|telegram\.me)\//i.test(t)) return true;
+  if (/(?:^|[\s(])www\./i.test(t)) return true;
+  // دامنه ساده example.com (بدون فاصله قبل از نقطه)
+  if (/(?:^|[\s(])[a-z0-9][-a-z0-9]*\.(?:com|ir|org|net|me|io|app|dev)\b/i.test(t)) return true;
+  return false;
 }
 
 function hasEmoji(text) {
@@ -42,7 +49,12 @@ function hasEmoji(text) {
         if (
           (cp >= 0x1f300 && cp <= 0x1faff) ||
           (cp >= 0x1f600 && cp <= 0x1f64f) ||
-          (cp >= 0x1f900 && cp <= 0x1f9ff)
+          (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+          (cp >= 0x1f1e0 && cp <= 0x1f1ff) || // پرچم
+          (cp >= 0x1fa00 && cp <= 0x1faff) ||
+          (cp >= 0x1f680 && cp <= 0x1f6ff) ||
+          cp === 0x2b50 || // ⭐
+          cp === 0x23f0 // ⏰
         ) {
           return true;
         }
@@ -50,7 +62,7 @@ function hasEmoji(text) {
       }
     }
   }
-  if (/[\u2600-\u27BF]/.test(text)) return true;
+  if (/[\u2600-\u27BF\u2300-\u23FF\u2B50\u3030\u303D]/.test(text)) return true;
   return false;
 }
 
@@ -146,32 +158,40 @@ export function bodyIndexSettingKey(channelKey, bodyKey) {
 export function detectChannel(text) {
   const t = normalizeForPrefix(text);
   if (!t) return null;
-  for (const { key, prefix } of CHANNEL_PREFIXES) {
+  // طولانی‌ترین پیشوند اول تا «این کاربر» بر «این» نچسبد
+  const list = (CHANNEL_PREFIXES || []).slice().sort(function (a, b) {
+    return String(b.prefix || '').length - String(a.prefix || '').length;
+  });
+  for (const { key, prefix } of list) {
     const p = normalizeForPrefix(prefix);
+    if (!p) continue;
     if (t.startsWith(p)) {
-      // بعد از پیشوند یا فاصله یا پایان
       const next = t.charAt(p.length);
-      if (!next || next === ' ' || next === '.' || next === '،' || next === ',') {
+      // فقط فاصله، نقطه، ویرگول یا پایان — نه چسبیده مثل «صدام بزنم»
+      if (!next || next === ' ' || next === '.' || next === '،' || next === ',' || next === '‌') {
         return { key, prefix };
       }
-      // اگر بلافاصله حرف چسبیده بود هم قبول (بعضی موبایل‌ها)
-      if (p.length >= 3) return { key, prefix };
     }
   }
   return null;
 }
+
+const MAX_MSG_LEN = 4096;
 
 export function validateAndFix(message) {
   // text یا caption
   let raw = message.text || message.caption || '';
   let text = normalizeForPrefix(raw);
   const entities = message.entities || message.caption_entities || [];
+  if (text.length > MAX_MSG_LEN) {
+    return { ok: false, error: 'متن پیام خیلی طولانی است (حداکثر ۴۰۹۶ کاراکتر).' };
+  }
   const ch = detectChannel(text);
   if (!ch) {
     return {
       ok: false,
       error:
-        '🚫 پیام باید با یکی از این‌ها شروع شود:\n• صدام بزن\n• این کاربر\n• تو زندگی بعدی',
+        '🚫 پیام باید با یکی از این‌ها شروع شود:\n• صدام بزن\n• این کاربر\n• تو زندگی بعدی\n• من فکر میکردم',
     };
   }
   if (hasLink(entities, text)) {
@@ -179,6 +199,32 @@ export function validateAndFix(message) {
   }
   if (hasEmoji(text)) {
     return { ok: false, error: '🚫 ایموجی در پیام مجاز نیست.' };
+  }
+
+  // کلمات ناسزا — تطبیق کلمه‌ای (نه زیررشته؛ «کسی»/«کسب» رد نشوند)
+  const BAD_WORDS = ['کیرم', 'گاییدم', 'جنده', 'کیر', 'کص', 'کس'];
+  const lowerCheck = text.replace(/ك/g, 'ک').replace(/ي/g, 'ی');
+  function isArabicLetter(ch) {
+    if (!ch) return false;
+    const c = ch.charCodeAt(0);
+    return c >= 0x0600 && c <= 0x06ff;
+  }
+  function hasBadWord(hay, word) {
+    let from = 0;
+    while (from <= hay.length) {
+      const i = hay.indexOf(word, from);
+      if (i < 0) return false;
+      const before = i === 0 ? '' : hay.charAt(i - 1);
+      const after = i + word.length >= hay.length ? '' : hay.charAt(i + word.length);
+      if (!isArabicLetter(before) && !isArabicLetter(after)) return true;
+      from = i + 1;
+    }
+    return false;
+  }
+  for (const w of BAD_WORDS) {
+    if (hasBadWord(lowerCheck, w)) {
+      return { ok: false, error: 'پیام شما شامل کلمات ناسزا می باشد' };
+    }
   }
 
   // نقطه آخر: دقیقاً یک فاصله قبل از نقطه — فاصله‌های اضافه حذف
