@@ -2296,22 +2296,128 @@ export async function getStatsDashboardText() {
     }
   }
 
-  /** count با WHERE — روی statusهای پرتعداد (approved) ممکن است timeout شود */
   async function countWhereStatus(st) {
     try {
       const rows =
         (await db.select({ n: sql`count(*)` }).from(messages).where(eq(messages.status, st)).all()) || [];
-      const n = Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
-      return n;
+      return Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
     } catch (e) {
       console.error('stats countWhere', st, e);
       return null;
     }
   }
 
-  let pe = 0;
-  let ap = 0;
-  let rj = 0;
+  /** اسکن تکه‌ای دقیق status+channel — بدون sample و بدون مقیاس تقریبی */
+  async function rebuildCountersChunked() {
+    let pe = 0,
+      ap = 0,
+      rj = 0,
+      other = 0,
+      total = 0;
+    const byCh = {};
+    for (const c of Object.values(DEFAULT_CHANNELS || {})) {
+      byCh[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
+    }
+    let cursor = 0;
+    const BATCH = 3000;
+    for (let round = 0; round < 80; round++) {
+      let rows = [];
+      try {
+        rows =
+          (await db
+            .select({
+              id: messages.id,
+              status: messages.status,
+              channelKey: messages.channelKey,
+            })
+            .from(messages)
+            .where(sql`${messages.id} > ${cursor}`)
+            .orderBy(asc(messages.id))
+            .limit(BATCH)
+            .all()) || [];
+      } catch (e1) {
+        try {
+          // fallback بدون where id — فقط اگر جدول کوچک/متوسط
+          rows =
+            (await db
+              .select({
+                id: messages.id,
+                status: messages.status,
+                channelKey: messages.channelKey,
+              })
+              .from(messages)
+              .orderBy(asc(messages.id))
+              .limit(BATCH)
+              .offset(cursor)
+              .all()) || [];
+        } catch (e2) {
+          console.error('rebuildCounters chunk', e1, e2);
+          break;
+        }
+      }
+      if (!rows.length) break;
+      for (const r of rows) {
+        const id = Number(r.id) || 0;
+        if (id > cursor) cursor = id;
+        total++;
+        const st = String(r.status || '');
+        const ck = String((r.channelKey ?? r.channel_key) || '');
+        const nk = normalizeChannelKey(ck) || ck;
+        if (st === 'pending' || st === 'publishing') pe++;
+        else if (st === 'approved') ap++;
+        else if (st === 'rejected') rj++;
+        else other++;
+        if (byCh[nk]) {
+          byCh[nk].total++;
+          if (st === 'pending' || st === 'publishing') byCh[nk].pe++;
+          else if (st === 'approved') byCh[nk].ap++;
+          else if (st === 'rejected') byCh[nk].rj++;
+        }
+      }
+      if (rows.length < BATCH) break;
+    }
+    const payload = {
+      pe: pe,
+      ap: ap,
+      rj: rj,
+      other: other,
+      total: total,
+      byCh: byCh,
+      at: Date.now(),
+    };
+    try {
+      await settingSet('stats_counters_v1', JSON.stringify(payload));
+    } catch (_e) {}
+    return payload;
+  }
+
+  async function loadCounters() {
+    try {
+      const raw = await settingGet('stats_counters_v1', '');
+      if (raw) {
+        const o = JSON.parse(raw);
+        if (o && typeof o.pe === 'number' && o.at && Date.now() - Number(o.at) < 90 * 1000) {
+          return o;
+        }
+      }
+    } catch (_e) {}
+    return await rebuildCountersChunked();
+  }
+
+  const totalExact = await countAll();
+  let peExact = await countWhereStatus('pending');
+  let pubExact = await countWhereStatus('publishing');
+
+  let counters = null;
+  try {
+    counters = await loadCounters();
+  } catch (e) {
+    console.error('stats counters', e);
+  }
+
+  let pe = 0,
+    ap = 0,
+    rj = 0;
   let accurate = false;
   let methodNote = '';
   const byCh = {};
@@ -2319,125 +2425,46 @@ export async function getStatsDashboardText() {
     byCh[c.key] = { total: 0, pe: 0, ap: 0, rj: 0, title: c.title };
   }
 
-  const total = await countAll();
+  if (counters && typeof counters.pe === 'number') {
+    pe = Number(counters.pe) || 0;
+    ap = Number(counters.ap) || 0;
+    rj = Number(counters.rj) || 0;
+    accurate = true;
+    methodNote = 'اسکن تکه‌ای کامل جدول (کش ≤۹۰ث)';
+    if (counters.byCh) {
+      for (const k of Object.keys(counters.byCh)) {
+        if (byCh[k]) byCh[k] = Object.assign({ title: byCh[k].title }, counters.byCh[k]);
+      }
+    }
+  }
 
-  // ۱) صف (pending/publishing) معمولاً کوچک است → count دقیق
-  let peExact = await countWhereStatus('pending');
-  let pubExact = await countWhereStatus('publishing');
+  // صف: ترجیح count زنده (کوچک و دقیق‌تر از کش)
   if (peExact != null) {
     pe = Number(peExact) + Number(pubExact || 0);
   }
 
-  // ۲) نمونهٔ بزرگ از جدیدترین‌ها برای نسبت ap/rj و تفکیک کانال
-  let sample = [];
-  try {
-    sample =
-      (await db
-        .select({
-          status: messages.status,
-          channelKey: messages.channelKey,
-          submittedAt: messages.submittedAt,
-          reviewedAt: messages.reviewedAt,
-        })
-        .from(messages)
-        .orderBy(desc(messages.id))
-        .limit(25000)
-        .all()) || [];
-  } catch (e) {
-    console.error('stats sample', e);
+  // اگر totalExact با counters فاصله زیاد دارد → rebuild اجباری
+  if (
+    counters &&
+    totalExact > 0 &&
+    Math.abs(Number(counters.total || 0) - totalExact) > Math.max(50, totalExact * 0.02)
+  ) {
     try {
-      sample =
-        (await db
-          .select({ status: messages.status, channelKey: messages.channelKey })
-          .from(messages)
-          .orderBy(desc(messages.id))
-          .limit(12000)
-          .all()) || [];
-    } catch (e2) {
-      console.error('stats sample2', e2);
-    }
-  }
-
-  let sPe = 0,
-    sAp = 0,
-    sRj = 0,
-    sOther = 0;
-  for (const x of sample) {
-    const st = String(x.status || '');
-    const ck = String((x.channelKey ?? x.channel_key) || '');
-    if (st === 'pending' || st === 'publishing') sPe++;
-    else if (st === 'approved') sAp++;
-    else if (st === 'rejected') sRj++;
-    else sOther++;
-    if (byCh[ck]) {
-      byCh[ck].total++;
-      if (st === 'pending' || st === 'publishing') byCh[ck].pe++;
-      else if (st === 'approved') byCh[ck].ap++;
-      else if (st === 'rejected') byCh[ck].rj++;
-    }
-  }
-  const sSum = sPe + sAp + sRj + sOther;
-
-  // ۳) تلاش برای count دقیق rejected (معمولاً کمتر از approved)
-  let rjExact = await countWhereStatus('rejected');
-  let apExact = await countWhereStatus('approved');
-
-  if (peExact != null && rjExact != null && apExact != null) {
-    pe = Number(peExact) + Number(pubExact || 0);
-    ap = Number(apExact);
-    rj = Number(rjExact);
-    accurate = true;
-    methodNote = 'شمارش مستقیم count(*) روی هر status';
-  } else if (peExact != null && rjExact != null && total > 0) {
-    // pending+rejected دقیق؛ approved = باقی‌مانده
-    pe = Number(peExact) + Number(pubExact || 0);
-    rj = Number(rjExact);
-    ap = Math.max(0, total - pe - rj);
-    accurate = true;
-    methodNote = 'pending/rejected دقیق؛ تأیید = کل − صف − رد';
-  } else if (sSum > 0 && total > 0) {
-    // مقیاس نمونه روی کل
-    if (total <= sSum + 100) {
-      pe = peExact != null ? Number(peExact) + Number(pubExact || 0) : sPe;
-      ap = sAp;
-      rj = sRj;
+      counters = await rebuildCountersChunked();
+      pe = peExact != null ? Number(peExact) + Number(pubExact || 0) : Number(counters.pe) || 0;
+      ap = Number(counters.ap) || 0;
+      rj = Number(counters.rj) || 0;
       accurate = true;
-      methodNote = 'نمونه تقریباً برابر کل پایگاه';
-    } else {
-      const ratio = total / sSum;
-      if (peExact != null) pe = Number(peExact) + Number(pubExact || 0);
-      else pe = Math.round(sPe * ratio);
-      // باقی‌مانده را بین ap/rj با نسبت نمونه تقسیم کن
-      const rest = Math.max(0, total - pe);
-      const sRest = sAp + sRj;
-      if (sRest > 0) {
-        ap = Math.round((sAp / sRest) * rest);
-        rj = Math.max(0, rest - ap);
-      } else {
-        ap = rest;
-        rj = 0;
+      methodNote = 'اسکن تکه‌ای مجدد (عدم تطابق total)';
+      if (counters.byCh) {
+        for (const k of Object.keys(counters.byCh)) {
+          if (byCh[k]) byCh[k] = Object.assign({ title: byCh[k].title }, counters.byCh[k]);
+        }
       }
-      accurate = false;
-      methodNote = 'برآورد از نمونه ' + sample.length + ' پیام اخیر + مقیاس روی کل ' + total;
-      // مقیاس تفکیک کانال
-      for (const key of Object.keys(byCh)) {
-        const b = byCh[key];
-        byCh[key] = {
-          total: Math.round(b.total * ratio),
-          pe: Math.round(b.pe * ratio),
-          ap: Math.round(b.ap * ratio),
-          rj: Math.round(b.rj * ratio),
-          title: b.title,
-        };
-      }
-    }
-  } else if (peExact != null) {
-    pe = Number(peExact) + Number(pubExact || 0);
-    ap = 0;
-    rj = 0;
-    accurate = false;
-    methodNote = 'فقط صف دقیق؛ تأیید/رد قابل شمارش نبود';
+    } catch (_e) {}
   }
+
+  const total = totalExact || (counters && counters.total) || pe + ap + rj;
 
   let userCount = 0;
   try {
@@ -2468,13 +2495,26 @@ export async function getStatsDashboardText() {
     }).length;
   } catch (_e) {}
 
-  // امروز از روی همان نمونهٔ بارگذاری‌شده
+  // امروز از نمونه محدود (فقط بخش ۲)
   let todayPe = 0,
     todayAp = 0,
     todayRj = 0,
     todayNew = 0;
+  let sampleLen = 0;
   try {
     const today = tehranNow().date;
+    const sample =
+      (await db
+        .select({
+          status: messages.status,
+          submittedAt: messages.submittedAt,
+          reviewedAt: messages.reviewedAt,
+        })
+        .from(messages)
+        .orderBy(desc(messages.id))
+        .limit(12000)
+        .all()) || [];
+    sampleLen = sample.length;
     for (const m of sample) {
       const subD = tehranDateOfTs(m.submittedAt);
       const revD = tehranDateOfTs(m.reviewedAt);
@@ -2523,8 +2563,8 @@ export async function getStatsDashboardText() {
     _nl +
     _nl +
     '② امروز (تهران) از نمونه ' +
-    sample.length +
-    ' پیام اخیر:' +
+    sampleLen +
+    ' اخیر:' +
     _nl +
     '• جدید امروز: ' +
     todayNew +
@@ -2548,12 +2588,11 @@ export async function getStatsDashboardText() {
     _nl +
     (accurate
       ? '✅ ' + (methodNote || 'شمارش دقیق') + '.'
-      : 'ℹ️ ' + (methodNote || 'برآورد از نمونه اخیر') + '.') +
+      : 'ℹ️ ' + (methodNote || 'شمارش ناقص') + '.') +
     _nl;
 
   return text;
 }
-
 
 export async function checkInactiveShiftAndCancel(channelKey, opts) {
   // disabled — do nothing
@@ -2665,31 +2704,45 @@ export function shiftActiveNow(s, now, pdate) {
   if (sd === 'perm' || sd === 'permanent') return false;
   const today = String(pdate || now.date || '');
   const calToday = String(now.date || today);
+  const toMin = function (hm) {
+    const p = String(hm).split(':').map(Number);
+    return (p[0] || 0) * 60 + (p[1] || 0);
+  };
+  const startMin = toMin(start);
+  const endMin = toMin(end);
+  const overnight = endMin < startMin;
+  const nowMin = toMin(now.hm);
+
   // تاریخ امروز (period یا تقویم)
   if (sd === today || sd === calToday) {
-    return inRange(now.hm, start, end);
+    if (!inRange(now.hm, start, end)) return false;
+    // overnight روی روز شروع: صبح زود همان روز هنوز شروع نشده
+    if (overnight && nowMin < startMin) return false;
+    return true;
   }
-  // شیفت overnight ثبت‌شده روی دیروز: اگر الان داخل بازه زمانی است بپذیر
-  if (inRange(now.hm, start, end)) {
-    try {
-      const parts = String(today).split('-').map(Number);
-      if (parts.length === 3 && parts[0]) {
-        const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
-        dt.setUTCDate(dt.getUTCDate() - 1);
-        const y =
-          dt.getUTCFullYear() +
-          '-' +
-          String(dt.getUTCMonth() + 1).padStart(2, '0') +
-          '-' +
-          String(dt.getUTCDate()).padStart(2, '0');
-        if (sd === y) return true;
-      }
-    } catch (_e) {}
-  }
+
+  // فقط overnight ثبت‌شده روی دیروز، در بازهٔ بعداز‌نیمه‌شب
+  if (!overnight) return false;
+  if (!inRange(now.hm, start, end)) return false;
+  // باید در بخش صبح (قبل از start) باشیم
+  if (nowMin >= startMin) return false;
+  try {
+    const parts = String(calToday).split('-').map(Number);
+    if (parts.length === 3 && parts[0]) {
+      const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+      dt.setUTCDate(dt.getUTCDate() - 1);
+      const y =
+        dt.getUTCFullYear() +
+        '-' +
+        String(dt.getUTCMonth() + 1).padStart(2, '0') +
+        '-' +
+        String(dt.getUTCDate()).padStart(2, '0');
+      if (sd === y) return true;
+    }
+  } catch (_e) {}
   return false;
 }
 
-/** کلید کانال‌هایی که ادمین همین الان برایشان شیفت فعال دارد */
 export function shiftIntervalOverlaps(startHm, endHm, otherStartHm, otherEndHm) {
   const toOrd = (hm) => {
     const parts = String(hm || '0:0').split(':').map(Number);
@@ -3143,10 +3196,11 @@ export async function hasActiveShift(adminId, channelKey) {
 export async function allowedReviewChannels(userId) {
   // مالک: همه کانال‌ها بدون نیاز به شیفت
   if (isOwner(userId)) return Object.keys(DEFAULT_CHANNELS || {});
+  // ادمین/ساب‌لیدر: فقط کانال‌هایی که همین الان شیفت فعال دارند
+  // (ساب‌لیدر خارج شیفت دیگر صف pending نمی‌گیرد)
   try {
     const keys = await activeShiftChannelKeys(userId);
     if (keys && keys.length) {
-      // نرمال‌سازی و یکتا
       const seen = {};
       const out = [];
       for (const k of keys) {
@@ -3156,15 +3210,6 @@ export async function allowedReviewChannels(userId) {
         out.push(nk);
       }
       return out;
-    }
-  } catch (_e) {}
-  // ساب‌لیدر بدون شیفت فعال: دسترسی مدیریتی به کانال خودش (عمدی).
-  // این بررسی‌ها در آمار به‌عنوان «خارج شیفت» شمارش می‌شوند.
-  try {
-    const sl = await getActiveSubLeaderChannel(userId);
-    if (sl) {
-      const nk = normalizeChannelKey(sl) || String(sl);
-      return nk ? [nk] : [];
     }
   } catch (_e) {}
   return [];
@@ -3422,8 +3467,11 @@ async function tryClaimReviewMessage(msgId, adminId, batchNumber) {
         holderBatch && holderBatch.createdAt
           ? Date.now() - Number(holderBatch.createdAt)
           : Number.POSITIVE_INFINITY;
-      // آزاد: در batch نیست، یا batch/claim بیش از ۲۰ دقیقه مانده
-      if (!inBatch || age > 20 * 60 * 1000 || batchAge > 20 * 60 * 1000) {
+      // آزاد فقط اگر در batch نگهدارنده نیست، یا claim منقضی/بیش از TTL مانده
+      // (۲۰ دقیقه دزدی اجباری حذف شد تا تحویل تکراری بین ادمین‌ها کم شود)
+      if (!inBatch) {
+        canSteal = true;
+      } else if (age > REVIEW_CLAIM_TTL_MS || batchAge > REVIEW_CLAIM_TTL_MS) {
         canSteal = true;
       }
     } catch (_e) {
@@ -4162,10 +4210,9 @@ export async function createReviewBatch(adminId) {
     }
     const owner = isOwner(adminId);
     if (!owner) {
-      const slCh = await getActiveSubLeaderChannel(adminId);
       const keys = await activeShiftChannelKeys(adminId);
-      // ساب‌لیدر بدون شیفت هم می‌تواند صف کانال خودش را ببیند
-      if (!slCh && !(keys && keys.length)) {
+      // فقط شیفت فعال تهران — ساب‌لیدر خارج شیفت مجاز نیست
+      if (!(keys && keys.length)) {
         await clearReviewBatch(adminId);
         return { status: 'no_shift' };
       }
@@ -4200,17 +4247,39 @@ export async function createReviewBatch(adminId) {
         });
       }
       if (pendingRows.length) {
-        // تکمیل تا ۱۸ از صف، تا Batch ناقص کوچک گیر نکند
+        // فقط پیام‌هایی که claim آزاد یا متعلق به همین ادمین است
+        const mine = [];
+        for (const r of pendingRows) {
+          const mid = Number(r.id);
+          if (!mid) continue;
+          try {
+            const held = await getReviewClaim(mid);
+            if (held && Number(held.adminId) !== Number(adminId)) continue;
+            // claim را برای ادامه بررسی تمدید کن
+            await tryClaimReviewMessage(mid, adminId, (pruned.batch && pruned.batch.batchNumber) || 1);
+            mine.push(r);
+          } catch (_e) {
+            mine.push(r);
+          }
+        }
+        pendingRows = mine;
+        // تکمیل تا اندازه Batch فقط از unclaimed
         try {
           if (pendingRows.length < REVIEW_BATCH_SIZE) {
             const have = Object.create(null);
             for (const r of pendingRows) have[Number(r.id)] = 1;
-            const extra = (await selectReviewablePending(adminId)) || [];
+            const extra = (await selectReviewablePending(adminId, REVIEW_BATCH_SIZE * 2)) || [];
             for (const m of extra) {
               if (pendingRows.length >= REVIEW_BATCH_SIZE) break;
               const mid = Number(m && m.id);
               if (!mid || have[mid]) continue;
               if (String(m.status || '') !== 'pending') continue;
+              try {
+                const held = await getReviewClaim(mid);
+                if (held && Number(held.adminId) !== Number(adminId)) continue;
+              } catch (_e) {}
+              const cl = await tryClaimReviewMessage(mid, adminId, (pruned.batch && pruned.batch.batchNumber) || 1);
+              if (!cl.ok) continue;
               have[mid] = 1;
               pendingRows.push(m);
             }
@@ -4218,15 +4287,27 @@ export async function createReviewBatch(adminId) {
         } catch (eFill) {
           console.error('incomplete topup', eFill);
         }
-        const batch = pruned.batch || (await getReviewBatch(adminId)) || {
-          ids: [],
-          batchNumber: 1,
-          createdAt: Date.now(),
-          periodDate: periodDateStr(),
-        };
-        batch.ids = pendingRows.map((r) => Number(r.id));
-        await saveReviewBatch(adminId, batch);
-        return { status: 'incomplete', batch, messages: pendingRows };
+        if (!pendingRows.length) {
+          await clearReviewBatch(adminId);
+        } else {
+          const batch = pruned.batch || (await getReviewBatch(adminId)) || {
+            ids: [],
+            batchNumber: 1,
+            createdAt: Date.now(),
+            periodDate: periodDateStr(),
+          };
+          batch.ids = pendingRows.map((r) => Number(r.id));
+          // delivered را فقط روی idهای باقی‌مانده نگه دار
+          if (Array.isArray(batch.delivered)) {
+            const idset = Object.create(null);
+            for (const id of batch.ids) idset[Number(id)] = 1;
+            batch.delivered = batch.delivered.filter(function (id) {
+              return idset[Number(id)];
+            });
+          }
+          await saveReviewBatch(adminId, batch);
+          return { status: 'incomplete', batch, messages: pendingRows };
+        }
       }
       await clearReviewBatch(adminId);
     }
@@ -4240,7 +4321,11 @@ export async function createReviewBatch(adminId) {
       for (const m of candidates) {
         try {
           const fresh = await getMessageById(Number(m.id));
-          if (fresh && String(fresh.status || '') === 'pending') verified.push(fresh);
+          if (!fresh || String(fresh.status || '') !== 'pending') continue;
+          // رد claim دیگران (منقضی توسط getReviewClaim آزاد می‌شود)
+          const held = await getReviewClaim(Number(fresh.id));
+          if (held && Number(held.adminId) !== Number(adminId)) continue;
+          verified.push(fresh);
         } catch (_e) {}
       }
       candidates = verified;
@@ -4254,32 +4339,30 @@ export async function createReviewBatch(adminId) {
       if (!cl.ok) continue;
       claimed.push(m);
     }
-    // تلاش مجدد با آزادسازی اجباری claim روی کاندیدها
+    // تلاش مجدد فقط روی پیام‌های بدون claim معتبر (دیگر claim دیگران را نمی‌دزدیم)
     if (claimed.length < Math.min(REVIEW_BATCH_SIZE, candidates.length) && candidates.length) {
-      batchLog('create_claim_retry', {
+      batchLog('create_claim_retry_soft', {
         adminId: Number(adminId),
         candidates: candidates.length,
         claimed: claimed.length,
       });
       for (const m of candidates) {
+        if (claimed.length >= REVIEW_BATCH_SIZE) break;
         const mid = Number(m.id);
         if (!mid) continue;
-        // اگر همین ادمین قبلاً claim کرده، نگه دار
-        let mine = false;
+        let already = false;
         for (let i = 0; i < claimed.length; i++) {
           if (Number(claimed[i].id) === mid) {
-            mine = true;
+            already = true;
             break;
           }
         }
-        if (mine) continue;
+        if (already) continue;
+        // فقط اگر claim آزاد/منقضی است
         try {
-          await db.delete(settings).where(eq(settings.key, reviewClaimKey(mid))).run();
+          const held = await getReviewClaim(mid);
+          if (held && Number(held.adminId) !== Number(adminId)) continue;
         } catch (_e) {}
-      }
-      claimed = [];
-      for (const m of candidates) {
-        if (claimed.length >= REVIEW_BATCH_SIZE) break;
         const cl2 = await tryClaimReviewMessage(m.id, adminId, batchNumber);
         if (!cl2.ok) continue;
         claimed.push(m);
