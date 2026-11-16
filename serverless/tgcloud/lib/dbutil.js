@@ -3399,15 +3399,20 @@ async function getReviewClaim(msgId) {
         try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run(); } catch (_e) {}
         return null;
       }
-      // اگر بیش از ۳۰ دقیقه در batch مانده و هنوز pending است → آزاد کن
-      if (age > 30 * 60 * 1000) {
+      // اگر پیام دیگر pending نیست → claim را آزاد کن
+      try {
+        const row = await getMessageById(mid);
+        if (!row || String(row.status || '') !== 'pending') {
+          try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run(); } catch (_e) {}
+          return null;
+        }
+      } catch (_e) {}
+      // اگر بیش از ۱۵ دقیقه در batch مانده و هنوز pending است → آزاد کن (صف کاذب نماند)
+      if (age > 15 * 60 * 1000) {
         try {
-          const row = await getMessageById(mid);
-          if (row && String(row.status || '') === 'pending') {
-            try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run(); } catch (_e) {}
-            return null;
-          }
+          await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run();
         } catch (_e) {}
+        return null;
       }
     } catch (_e) {}
     return c;
@@ -3797,9 +3802,9 @@ async function selectReviewablePending(adminId, limit) {
     }
   }
 
-  // Fallback: اگر per-channel چیزی نداد، نمونه pending اخیر (DESC) و فیلتر حافظه
-  // (pendingهای بسیار قدیمی کانال‌های دیگر نباید کل پنجره ASC را ببلعند)
-  if (!collected.length) {
+  // همیشه یک نمونه DESC اخیر را هم ادغام کن (حتی اگر per-channel چیزی داده)
+  // تا timeout/خطای ASC یا mismatch جزئی channelKey باعث صف خالی کاذب نشود
+  {
     let sample = [];
     try {
       sample =
@@ -3808,16 +3813,16 @@ async function selectReviewablePending(adminId, limit) {
           .from(messages)
           .where(eq(messages.status, 'pending'))
           .orderBy(desc(messages.id))
-          .limit(800)
+          .limit(1000)
           .all()) || [];
     } catch (e1) {
       try {
-        const allm = (await db.select().from(messages).orderBy(desc(messages.id)).limit(1200).all()) || [];
+        const allm = (await db.select().from(messages).orderBy(desc(messages.id)).limit(1500).all()) || [];
         sample = allm.filter(function (m) {
           return String(m.status || '') === 'pending';
         });
       } catch (e2) {
-        console.error('selectReviewablePending fallback', e1, e2);
+        console.error('selectReviewablePending sample', e1, e2);
         sample = [];
       }
     }
@@ -4305,6 +4310,17 @@ export async function createReviewBatch(adminId) {
               return idset[Number(id)];
             });
           }
+          // deliveredهای هنوز pending را از delivered بردار تا resume واقعاً دوباره بفرستد
+          try {
+            const pendingSet = Object.create(null);
+            for (const r of pendingRows) pendingSet[Number(r.id)] = 1;
+            batch.delivered = (batch.delivered || []).filter(function (id) {
+              return !pendingSet[Number(id)];
+            });
+            batch.failed = (batch.failed || []).filter(function (id) {
+              return idset[Number(id)];
+            });
+          } catch (_eDel) {}
           await saveReviewBatch(adminId, batch);
           return { status: 'incomplete', batch, messages: pendingRows };
         }
@@ -4365,6 +4381,40 @@ export async function createReviewBatch(adminId) {
         } catch (_e) {}
         const cl2 = await tryClaimReviewMessage(m.id, adminId, batchNumber);
         if (!cl2.ok) continue;
+        claimed.push(m);
+      }
+    }
+    if (!claimed.length && candidates.length) {
+      // تلاش یک‌باره: claimهای یتیم/کهنه را برای همین کاندیدها پاک کن و دوباره claim بزن
+      batchLog('create_claim_purge_retry', {
+        adminId: Number(adminId),
+        candidates: candidates.length,
+      });
+      for (const m of candidates) {
+        const mid = Number(m && m.id);
+        if (!mid) continue;
+        try {
+          const held = await getReviewClaim(mid);
+          if (!held) continue;
+          if (Number(held.adminId) === Number(adminId)) continue;
+          // اگر holder batch ندارد یا پیام در batch او نیست → آزاد
+          let holderBatch = null;
+          try { holderBatch = await getReviewBatch(held.adminId); } catch (_e) {}
+          const ids = (holderBatch && holderBatch.ids) || [];
+          let inB = false;
+          for (let i = 0; i < ids.length; i++) {
+            if (Number(ids[i]) === mid) { inB = true; break; }
+          }
+          if (!inB) {
+            try { await db.delete(settings).where(eq(settings.key, reviewClaimKey(mid))).run(); } catch (_e) {}
+          }
+        } catch (_e) {}
+      }
+      claimed = [];
+      for (const m of candidates) {
+        if (claimed.length >= REVIEW_BATCH_SIZE) break;
+        const cl = await tryClaimReviewMessage(m.id, adminId, batchNumber);
+        if (!cl.ok) continue;
         claimed.push(m);
       }
     }
@@ -4433,16 +4483,20 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
   for (const id of idOrder) {
     if (!id || seen[id]) continue;
     if (live.length >= REVIEW_BATCH_SIZE) break;
-    if (resumed && alreadyDelivered[id] && !(opts && opts.forceResend)) {
-      seen[id] = 1;
-      continue;
-    }
     try {
       const fresh = await getMessageById(Number(id));
-      if (fresh && String(fresh.status || '') === 'pending') {
+      if (!fresh || String(fresh.status || '') !== 'pending') {
         seen[id] = 1;
-        live.push(fresh);
+        continue;
       }
+      // اگر هنوز pending است، دوباره بفرست — حتی اگر قبلاً delivered علامت خورده
+      // (ادمین پیام را ندیده / UI پاک شده / batch گیر کرده)
+      if (resumed && alreadyDelivered[id] && !(opts && opts.forceResend)) {
+        // فقط اگر forceResend نیست و این id واقعاً در messages ورودی هست، skip نکن
+        // پیام pending را دوباره تحویل بده
+      }
+      seen[id] = 1;
+      live.push(fresh);
     } catch (_e) {}
   }
 
@@ -4452,12 +4506,18 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
       for (const m of more) {
         if (live.length >= REVIEW_BATCH_SIZE) break;
         const id = Number(m && m.id);
-        if (!id || seen[id] || alreadyDelivered[id]) continue;
+        if (!id || seen[id]) continue;
         if (String(m.status || '') !== 'pending') continue;
         const cl = await tryClaimReviewMessage(id, adminId, batch.batchNumber);
         if (!cl.ok) continue;
         seen[id] = 1;
         live.push(m);
+        // از delivered بردار تا دوباره شمارش/skip نشود
+        try {
+          batch.delivered = (batch.delivered || []).filter(function (x) {
+            return Number(x) !== id;
+          });
+        } catch (_e) {}
         if (!(batch.ids || []).map(Number).includes(id)) {
           batch.ids = (batch.ids || []).concat([id]);
         }

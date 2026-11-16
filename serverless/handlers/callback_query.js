@@ -2239,7 +2239,41 @@ if (data.startsWith('reject_menu:')) {
         return;
       }
       if (res.status === 'incomplete') {
-        await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { adminId: userId, resumed: true });
+        let sendRes = null;
+        try {
+          sendRes = await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, {
+            adminId: userId,
+            resumed: true,
+          });
+        } catch (eSend) {
+          console.error('owner send incomplete', eSend);
+        }
+        if (sendRes && sendRes.sent) return;
+        // batch گیر کرده — پاک و از نو (مثل مسیر ادمین)
+        try {
+          await clearReviewBatch(userId);
+        } catch (_e) {}
+        try {
+          const res2 = await createReviewBatch(userId);
+          if (res2.status === 'created' || res2.status === 'incomplete') {
+            await sendReviewBatch(cq.message.chat.id, res2.batch, res2.messages, {
+              adminId: userId,
+              resumed: false,
+            });
+          } else if (res2.status === 'empty') {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: '📭 پیام pending بیشتری نیست.',
+            });
+          } else if (res2.status === 'held') {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: '⏳ پیام‌ها claim شده‌اند. چند دقیقه بعد دوباره تلاش کنید.',
+            });
+          }
+        } catch (e2) {
+          console.error('owner recreate batch', e2);
+        }
         return;
       }
       await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { adminId: userId, resumed: false });
@@ -2553,7 +2587,42 @@ const res = await createReviewBatch(userId);
       }
       if (res.status === 'incomplete') {
         /* answered early */
-        await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, { adminId: userId, resumed: true });
+        let sendRes = null;
+        try {
+          sendRes = await sendReviewBatch(cq.message.chat.id, res.batch, res.messages, {
+            adminId: userId,
+            resumed: true,
+          });
+        } catch (eSend) {
+          console.error('batch_next incomplete send', eSend);
+        }
+        if (sendRes && sendRes.sent) return;
+        try {
+          await clearReviewBatch(userId);
+        } catch (_e) {}
+        try {
+          const res2 = await createReviewBatch(userId);
+          if (res2.status === 'created' || res2.status === 'incomplete') {
+            await sendReviewBatch(cq.message.chat.id, res2.batch, res2.messages, {
+              adminId: userId,
+              resumed: false,
+            });
+          } else if (res2.status === 'empty') {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: '📭 پیام pending بیشتری برای شیفت شما نیست.',
+            });
+          } else if (res2.status === 'held') {
+            await api.sendMessage({
+              chat_id: cq.message.chat.id,
+              text: '⏳ پیام‌ها در حال بررسی توسط ادمین دیگر هستند. چند دقیقه بعد دوباره بزنید.',
+            });
+          } else if (res2.status === 'no_shift') {
+            await api.sendMessage({ chat_id: cq.message.chat.id, text: '❌ شیفت شما تمام شده است.' });
+          }
+        } catch (e2) {
+          console.error('batch_next recreate', e2);
+        }
         return;
       }
       if (res.status === 'empty') {
