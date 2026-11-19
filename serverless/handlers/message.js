@@ -37,6 +37,7 @@ import {
   ownerReviewInline,
   searchMsgActionsInline,
   feedbackInline,
+  bannedListInline,
   userOpenInline,
   shiftSlotsInline,
   shiftModePickInline,
@@ -100,7 +101,7 @@ import { tehranNow, inRange, hmToMin, periodDateStr, isWorkHours, formatTsJalali
 // normHm via time
 import { resolveUserId, channelMessageLink, channelPublicBase } from 'lib/resolve';
 import { buildShiftBoard, formatShiftBoardMessages, buildOwnerChannelDayReport, formatOwnerChannelDayReport, shiftCalendarDate } from 'lib/owner_analytics';
-import { setBlocked } from 'lib/users';
+import { setBlocked, listBlockedUsers } from 'lib/users';
 import { DB_EXPORT_OWNER_ID, initDbExportJob, processDbExportBatch } from 'lib/db_export';
 import {
   getSubLeaderChannel,
@@ -2144,10 +2145,14 @@ let note =
               shifts +
               '\nکانال مجاز بررسی: ' +
               allow +
-              '\nکل pending: ' +
+              '\nکل pending (پنجره): ' +
               (d.pendingTotal != null ? d.pendingTotal : '?') +
-              (byAllow ? '\npending کانال مجاز:' + byAllow : '') +
-              (sample ? '\nتوزیع نمونه اخیر:' + sample : '');
+              '\nقابل دریافت: ' +
+              (d.available != null ? d.available : '?') +
+              '\nدر دست ادمین دیگر: ' +
+              (d.heldByOthers != null ? d.heldByOthers : (d.claimHints != null ? d.claimHints : '?')) +
+              (byAllow ? '\npending کانال:' + byAllow : '') +
+              (sample ? '\nتوزیع نمونه:' + sample : '');
           }
         } catch (_e) {}
         await api.sendMessage({
@@ -3398,11 +3403,33 @@ let note =
               ],
             });
           }
-          await api.sendMessage({
+          const sentFb = await api.sendMessage({
             chat_id: chatId,
-            text: 'فیدبک #' + row.id + '\nاز: ' + fname + ' (' + row.userId + ')\n\n' + content.replace(/DEL_REQ:\d+\n?/, ''),
+            text:
+              'فیدبک #' +
+              row.id +
+              '\nاز: ' +
+              fname +
+              ' (' +
+              row.userId +
+              ')\n\n' +
+              content.replace(/DEL_REQ:\d+\n?/, '') +
+              '\n\n💡 برای پاسخ، روی همین پیام Reply بزنید و متن را بفرستید.',
             reply_markup: kb,
           });
+          try {
+            const mid = Number(sentFb && (sentFb.message_id || sentFb.messageId));
+            if (mid) {
+              await settingSet(
+                'fb_map:' + chatId + ':' + mid,
+                JSON.stringify({
+                  feedbackId: Number(row.id),
+                  userId: Number(row.userId ?? row.user_id),
+                  at: Date.now(),
+                })
+              );
+            }
+          } catch (_mapE) {}
         }
 
       } catch (e) {
@@ -4350,6 +4377,44 @@ let note =
       }
       return;
     }
+
+    
+    if (owner && text === '📋 لیست بن‌شدگان') {
+      try {
+        const banned = await listBlockedUsers(60);
+        if (!banned.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: '📋 هیچ کاربر بن‌شده‌ای نیست.',
+            reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+          });
+          return;
+        }
+        let textOut = '📋 کاربران بن‌شده (' + banned.length + ')\nروی دکمه «رفع بن» بزنید:\n';
+        for (const u of banned.slice(0, 40)) {
+          const uid = Number(u.userId ?? u.user_id);
+          const name =
+            [u.firstName || u.first_name, u.lastName || u.last_name].filter(Boolean).join(' ') ||
+            (u.username ? '@' + String(u.username).replace(/^@/, '') : '') ||
+            String(uid);
+          textOut += '\n• ' + name + ' | ' + uid;
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text: textOut.slice(0, 3500),
+          reply_markup: bannedListInline(banned),
+        });
+      } catch (e) {
+        console.error('ban list', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در دریافت لیست بن: ' + ((e && e.message) || e),
+          reply_markup: settingsKeyboard(await isBotOn(), await isFridayMode(), userId),
+        });
+      }
+      return;
+    }
+
 
     if (owner && text === '🚫 بن کاربر') {
       await setState(userId, 'ban_user');
@@ -5515,6 +5580,67 @@ if (owner && (text === '⚙️ ابزار ربات' || text === '⚙️ تنظی
         reply_markup: anonMainKeyboard(),
       });
       return;
+    }
+
+
+    
+    // پاسخ فیدبک با Reply مستقیم روی پیام (بدون دکمه)
+    if (
+      owner &&
+      message.reply_to_message &&
+      !state?.kind
+    ) {
+      try {
+        const rtm = message.reply_to_message;
+        const rmid = Number(rtm.message_id || rtm.messageId);
+        if (rmid) {
+          const rawMap = await settingGet('fb_map:' + chatId + ':' + rmid, '');
+          if (rawMap) {
+            let map = null;
+            try {
+              map = JSON.parse(String(rawMap));
+            } catch (_e) {}
+            const fid = map && Number(map.feedbackId);
+            const targetUid = map && Number(map.userId);
+            if (fid && targetUid) {
+              const replyNote = text || message.caption || '(مدیا)';
+              try {
+                await db
+                  .update(feedback)
+                  .set({ status: 'replied', ownerReply: String(replyNote).slice(0, 500) })
+                  .where(eq(feedback.id, fid))
+                  .run();
+              } catch (_e) {}
+              try {
+                await api.sendMessage({
+                  chat_id: targetUid,
+                  text: '💬 پاسخ مدیریت:',
+                });
+                await copyOrSendContent(api, targetUid, message);
+                await api.sendMessage({
+                  chat_id: targetUid,
+                  text: 'با تشکر — مجموعه آرال',
+                });
+              } catch (eSend) {
+                console.error('fb reply-to send', eSend);
+                try {
+                  await api.sendMessage({
+                    chat_id: targetUid,
+                    text: '💬 پاسخ مدیریت:\n\n' + String(replyNote).slice(0, 3000) + '\n\nبا تشکر — مجموعه آرال',
+                  });
+                } catch (_e2) {}
+              }
+              await api.sendMessage({
+                chat_id: chatId,
+                text: '✅ پاسخ برای کاربر ' + targetUid + ' ارسال شد (فیدبک #' + fid + ')',
+              });
+              return;
+            }
+          }
+        }
+      } catch (eFbR) {
+        console.error('fb reply-to', eFbR);
+      }
     }
 
 

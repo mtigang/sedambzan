@@ -173,7 +173,7 @@ export async function rememberUserMessageId(userId, msgId) {
     const parsed = JSON.parse(String(raw || '[]'));
     if (Array.isArray(parsed)) ids = parsed.map(Number).filter(function (x) { return Number.isFinite(x) && x > 0; });
   } catch (_e) {}
-  ids = [mid].concat(ids.filter(function (x) { return x !== mid; })).slice(0, 400);
+  ids = [mid].concat(ids.filter(function (x) { return x !== mid; })).slice(0, 800);
   try {
     await settingSet(key, JSON.stringify(ids));
   } catch (_e) {}
@@ -191,8 +191,9 @@ export async function loadUserMessagesPage(userId, limit, opts) {
     opts && opts.beforeId != null && Number.isFinite(Number(opts.beforeId))
       ? Number(opts.beforeId)
       : null;
-  const maxScan = Math.max(800, Math.min(Number((opts && opts.maxScan) || 4000), 8000));
-  const batchSize = 500;
+  // دامنه اسکن گسترده‌تر ولی محدود — جلوگیری از timeout
+  const maxScan = Math.max(1200, Math.min(Number((opts && opts.maxScan) || 6000), 12000));
+  const batchSize = 400;
   const maxRounds = Math.min(
     Number((opts && opts.maxRounds) || Math.ceil(maxScan / batchSize)),
     Math.ceil(maxScan / batchSize)
@@ -203,6 +204,49 @@ export async function loadUserMessagesPage(userId, limit, opts) {
 
   if (!Number.isFinite(uid) || uid <= 0) {
     return { rows: out, hasMore: false, indexTotal: 0 };
+  }
+
+  // تلاش مستقیم با WHERE userId (سریع و دقیق) — در صورت خطای rows_read به اسکن سبک می‌افتد
+  try {
+    let q = db
+      .select({
+        id: messages.id,
+        userId: messages.userId,
+        status: messages.status,
+        content: messages.content,
+        channelKey: messages.channelKey,
+        submittedAt: messages.submittedAt,
+        reviewedAt: messages.reviewedAt,
+        reviewedBy: messages.reviewedBy,
+        rejectReason: messages.rejectReason,
+      })
+      .from(messages)
+      .where(
+        beforeId != null
+          ? sql`${messages.userId} = ${uid} AND ${messages.id} < ${beforeId}`
+          : eq(messages.userId, uid)
+      )
+      .orderBy(desc(messages.id))
+      .limit(lim + 1);
+    const direct = (await q.all()) || [];
+    if (direct.length) {
+      for (const row of direct) {
+        const id = Number(row.id);
+        if (seen[id]) continue;
+        seen[id] = 1;
+        out.push(row);
+        if (out.length >= lim) break;
+      }
+      if (out.length >= lim || direct.length > 0) {
+        return {
+          rows: out.slice(0, lim),
+          hasMore: direct.length > lim || out.length >= lim,
+          indexTotal: out.length,
+        };
+      }
+    }
+  } catch (eDirect) {
+    console.error('loadUserMessagesPage direct', eDirect && (eDirect.message || eDirect));
   }
 
   try {
@@ -3408,7 +3452,7 @@ async function getReviewClaim(msgId) {
         }
       } catch (_e) {}
       // اگر بیش از ۱۵ دقیقه در batch مانده و هنوز pending است → آزاد کن (صف کاذب نماند)
-      if (age > 15 * 60 * 1000) {
+      if (age > 8 * 60 * 1000) {
         try {
           await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run();
         } catch (_e) {}
@@ -3634,6 +3678,9 @@ export async function diagnoseReviewQueue(adminId) {
     pendingByAllowed: {},
     pendingByChannelSample: {},
     claimHints: 0,
+    available: 0,
+    heldByOthers: 0,
+    scanWindow: 5000,
   };
   try {
     info.shiftKeys = (await activeShiftChannelKeys(aid)) || [];
@@ -3641,95 +3688,55 @@ export async function diagnoseReviewQueue(adminId) {
     info.shiftKeysError = String((e && e.message) || e).slice(0, 120);
   }
   try {
-    info.allowed = (await allowedReviewChannels(aid)) || [];
-  } catch (e) {
-    info.allowedError = String((e && e.message) || e).slice(0, 120);
-  }
-  try {
-    const rows =
-      (await db
-        .select({ n: sql`count(*)` })
-        .from(messages)
-        .where(eq(messages.status, 'pending'))
-        .all()) || [];
-    info.pendingTotal = Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
+    const list = await listPendingForReviewer(aid, { scanTotal: 5000 });
+    info.allowed = list.allowed || [];
+    info.pendingTotal = (list.all || []).length;
+    info.available = (list.available || []).length;
+    info.heldByOthers = Number(list.heldByOthers) || 0;
+    info.pendingByChannelSample = list.byChannel || {};
+    info.pendingByAllowed = list.byChannel || {};
+    info.scanned = list.scanned || 0;
+    info.claimHints = info.heldByOthers;
   } catch (e) {
     info.pendingTotalError = String((e && e.message) || e).slice(0, 120);
-  }
-  // نمونه pending اخیر برای توزیع کانال
-  try {
-    const sample =
-      (await db
-        .select({
-          id: messages.id,
-          status: messages.status,
-          channelKey: messages.channelKey,
-        })
-        .from(messages)
-        .where(eq(messages.status, 'pending'))
-        .orderBy(desc(messages.id))
-        .limit(500)
-        .all()) || [];
-    const by = Object.create(null);
-    for (const m of sample) {
-      const raw = String((m.channelKey ?? m.channel_key) || '');
-      const nk = normalizeChannelKey(raw) || raw || '?';
-      by[nk] = (by[nk] || 0) + 1;
-    }
-    info.pendingByChannelSample = by;
-  } catch (e) {
-    info.sampleError = String((e && e.message) || e).slice(0, 120);
-  }
-  // شمارش per allowed با variants
-  for (const ck of info.allowed || []) {
-    const nk = normalizeChannelKey(ck) || ck;
-    let n = 0;
-    const variants = [nk, ck];
-    const conf = DEFAULT_CHANNELS[nk];
-    if (conf) {
-      if (conf.key) variants.push(conf.key);
-      if (conf.title) variants.push(conf.title);
-    }
-    const seen = Object.create(null);
-    for (const v of variants) {
-      if (!v || seen[v]) continue;
-      seen[v] = 1;
-      try {
-        const rows =
-          (await db
-            .select({ n: sql`count(*)` })
-            .from(messages)
-            .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, v)))
-            .all()) || [];
-        n += Number((rows[0] && (rows[0].n != null ? rows[0].n : Object.values(rows[0])[0])) || 0);
-      } catch (_e) {}
-    }
-    info.pendingByAllowed[nk || ck] = n;
+    try {
+      info.allowed = (await allowedReviewChannels(aid)) || [];
+    } catch (_e) {}
   }
   return info;
 }
 
-async function selectReviewablePending(adminId, limit) {
-  const need = Math.min(Math.max(Number(limit) || REVIEW_BATCH_SIZE, 1), 80);
-  const perVariant = Math.min(Math.max(need * 3, 30), 150);
+
+
+
+
+/**
+ * منبع حقیقت واحد برای صف pending قابل‌بررسی.
+ * اسکن آخرین SCAN_TOTAL پیام (DESC روی id) → فیلتر status=pending + کانال مجاز
+ * → مرتب‌سازی قدیمی→جدید → تفکیک available / heldByOthers
+ */
+export async function listPendingForReviewer(adminId, opts) {
+  opts = opts || {};
+  const SCAN_TOTAL = Math.max(1000, Math.min(Number(opts.scanTotal) || 5000, 8000));
+  const BATCH = 500;
+  const aid = Number(adminId);
 
   let ownerCh = '';
-  if (isOwner(adminId)) {
+  if (isOwner(aid)) {
     try {
-      ownerCh = String((await settingGet('owner_pend_ch:' + adminId, '')) || '');
+      ownerCh = String((await settingGet('owner_pend_ch:' + aid, '')) || '');
       if (ownerCh === 'all') ownerCh = '';
       if (ownerCh) ownerCh = normalizeChannelKey(ownerCh) || ownerCh;
     } catch (_e) {}
   }
 
-  // کانال‌های مجاز
   let channelKeys = [];
-  if (isOwner(adminId)) {
+  if (isOwner(aid)) {
     if (ownerCh) channelKeys = [ownerCh];
     else channelKeys = Object.keys(DEFAULT_CHANNELS || {});
   } else {
     try {
-      const allowList = await allowedReviewChannels(adminId);
+      const allowList = await allowedReviewChannels(aid);
       const seen = Object.create(null);
       for (const k of allowList || []) {
         const nk = normalizeChannelKey(k) || String(k || '');
@@ -3738,23 +3745,36 @@ async function selectReviewablePending(adminId, limit) {
         channelKeys.push(nk);
       }
     } catch (e) {
-      console.error('selectReviewablePending allow', e);
-      return [];
+      console.error('listPendingForReviewer allow', e);
+      return {
+        allowed: [],
+        all: [],
+        available: [],
+        heldByOthers: 0,
+        byChannel: {},
+        scanned: 0,
+      };
     }
   }
 
   if (!channelKeys.length) {
-    batchLog('select_no_allow', { adminId: Number(adminId) });
-    return [];
+    return {
+      allowed: [],
+      all: [],
+      available: [],
+      heldByOthers: 0,
+      byChannel: {},
+      scanned: 0,
+    };
   }
 
   function keyVariants(ck) {
     const out = [];
-    const seen = Object.create(null);
+    const seenV = Object.create(null);
     function add(v) {
       const s = String(v || '').trim();
-      if (!s || seen[s]) return;
-      seen[s] = true;
+      if (!s || seenV[s]) return;
+      seenV[s] = true;
       out.push(s);
     }
     add(ck);
@@ -3768,72 +3788,50 @@ async function selectReviewablePending(adminId, limit) {
     return out;
   }
 
-  const collected = [];
-  const seenId = Object.create(null);
-  let queryErrors = 0;
+  const allowSet = Object.create(null);
+  for (const ck of channelKeys) {
+    for (const v of keyVariants(ck)) allowSet[v] = true;
+    allowSet[String(ck)] = true;
+    const nk = normalizeChannelKey(ck) || ck;
+    if (nk) allowSet[nk] = true;
+  }
 
-  for (let ci = 0; ci < channelKeys.length; ci++) {
-    const ck = channelKeys[ci];
-    const variants = keyVariants(ck);
-    for (let vi = 0; vi < variants.length; vi++) {
-      const variant = variants[vi];
-      let rows = [];
-      try {
-        rows =
+  const pending = [];
+  const seenId = Object.create(null);
+  const byChannel = Object.create(null);
+  let cursor = null;
+  let scanned = 0;
+
+  while (scanned < SCAN_TOTAL) {
+    const take = Math.min(BATCH, SCAN_TOTAL - scanned);
+    let batch = [];
+    try {
+      if (cursor != null) {
+        batch =
           (await db
             .select()
             .from(messages)
-            .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, variant)))
-            .orderBy(asc(messages.id))
-            .limit(perVariant)
+            .where(sql`${messages.id} < ${cursor}`)
+            .orderBy(desc(messages.id))
+            .limit(take)
             .all()) || [];
-      } catch (eQ) {
-        queryErrors++;
-        rows = [];
+      } else {
+        batch =
+          (await db
+            .select()
+            .from(messages)
+            .orderBy(desc(messages.id))
+            .limit(take)
+            .all()) || [];
       }
-      for (const r of rows) {
-        if (!r) continue;
-        const mid = Number(r.id);
-        if (!mid || seenId[mid]) continue;
-        if (String(r.status || '') !== 'pending') continue;
-        seenId[mid] = 1;
-        collected.push(r);
-      }
+    } catch (eScan) {
+      console.error('listPendingForReviewer scan', scanned, eScan);
+      break;
     }
-  }
-
-  // همیشه یک نمونه DESC اخیر را هم ادغام کن (حتی اگر per-channel چیزی داده)
-  // تا timeout/خطای ASC یا mismatch جزئی channelKey باعث صف خالی کاذب نشود
-  {
-    let sample = [];
-    try {
-      sample =
-        (await db
-          .select()
-          .from(messages)
-          .where(eq(messages.status, 'pending'))
-          .orderBy(desc(messages.id))
-          .limit(1000)
-          .all()) || [];
-    } catch (e1) {
-      try {
-        const allm = (await db.select().from(messages).orderBy(desc(messages.id)).limit(1500).all()) || [];
-        sample = allm.filter(function (m) {
-          return String(m.status || '') === 'pending';
-        });
-      } catch (e2) {
-        console.error('selectReviewablePending sample', e1, e2);
-        sample = [];
-      }
-    }
-    const allowSet = Object.create(null);
-    for (const ck of channelKeys) {
-      for (const v of keyVariants(ck)) allowSet[v] = true;
-      allowSet[ck] = true;
-      const nk = normalizeChannelKey(ck) || ck;
-      if (nk) allowSet[nk] = true;
-    }
-    for (const r of sample) {
+    if (!batch.length) break;
+    scanned += batch.length;
+    for (let i = 0; i < batch.length; i++) {
+      const r = batch[i];
       if (!r) continue;
       const mid = Number(r.id);
       if (!mid || seenId[mid]) continue;
@@ -3842,28 +3840,74 @@ async function selectReviewablePending(adminId, limit) {
       const nk = normalizeChannelKey(raw) || raw;
       if (!(allowSet[raw] || allowSet[nk])) continue;
       seenId[mid] = 1;
-      collected.push(r);
+      pending.push(r);
+      const bkey = nk || raw || '?';
+      byChannel[bkey] = (byChannel[bkey] || 0) + 1;
     }
+    const lastId = Number(batch[batch.length - 1].id);
+    if (!Number.isFinite(lastId) || lastId <= 1) break;
+    cursor = lastId;
+    if (batch.length < take) break;
   }
 
-  collected.sort(function (a, b) {
+  pending.sort(function (a, b) {
     return (Number(a.id) || 0) - (Number(b.id) || 0);
   });
 
-  const out = collected.slice(0, need);
+  // تفکیک claim: فقط پیام‌های آزاد یا مال خودم available هستند
+  const available = [];
+  let heldByOthers = 0;
+  const skipClaimCheck = !!opts.skipClaimCheck;
+  if (skipClaimCheck) {
+    for (let i = 0; i < pending.length; i++) available.push(pending[i]);
+  } else {
+    for (let i = 0; i < pending.length; i++) {
+      const m = pending[i];
+      const mid = Number(m.id);
+      let held = null;
+      try {
+        held = await getReviewClaim(mid);
+      } catch (_e) {
+        held = null;
+      }
+      if (held && Number(held.adminId) !== aid) {
+        heldByOthers += 1;
+        continue;
+      }
+      available.push(m);
+    }
+  }
 
-  batchLog('select_pending', {
-    adminId: Number(adminId),
+  batchLog('list_pending', {
+    adminId: aid,
     channels: channelKeys,
-    matched: collected.length,
-    returned: out.length,
-    need: need,
-    queryErrors: queryErrors,
+    scanned: scanned,
+    matched: pending.length,
+    available: available.length,
+    held: heldByOthers,
   });
 
-  return out;
+  return {
+    allowed: channelKeys,
+    all: pending,
+    available: available,
+    heldByOthers: heldByOthers,
+    byChannel: byChannel,
+    scanned: scanned,
+  };
 }
 
+/** سازگاری — فقط پیام‌های قابل claim (قدیمی→جدید) */
+async function selectReviewablePending(adminId, limit) {
+  const need = Math.min(Math.max(Number(limit) || REVIEW_BATCH_SIZE, 1), 80);
+  try {
+    const list = await listPendingForReviewer(adminId, { scanTotal: 5000 });
+    return (list.available || []).slice(0, need);
+  } catch (e) {
+    console.error('selectReviewablePending', e);
+    return [];
+  }
+}
 
 export async function hasEligiblePending(adminId) {
   try {
@@ -3954,36 +3998,11 @@ export async function adminShiftCard(adminId) {
     console.error('adminShiftCard shifts', e);
   }
   try {
-    const allowed = await allowedReviewChannels(adminId);
-    const allow = Object.create(null);
-    for (const k of allowed || []) {
-      const raw = String(k || '');
-      const nk = normalizeChannelKey(raw) || raw;
-      if (raw) allow[raw] = true;
-      if (nk) allow[nk] = true;
-    }
-    // شمارش سبک pending — همان منبع حقیقت selectReviewablePending
-    let light = [];
-    try {
-      light =
-        (await db
-          .select({ id: messages.id, status: messages.status, channelKey: messages.channelKey })
-          .from(messages)
-          .where(eq(messages.status, 'pending'))
-          .all()) || [];
-    } catch (_e) {
-      try {
-        const allm = (await db.select().from(messages).all()) || [];
-        light = allm.filter(function (m) {
-          return String(m.status) === 'pending';
-        });
-      } catch (_e2) {}
-    }
-    for (const m of light) {
-      const ck = String((m.channelKey ?? m.channel_key) || '');
-      const nk = normalizeChannelKey(ck) || ck;
-      if (isOwner(adminId) || allow[ck] || allow[nk]) out.pendingTotal += 1;
-    }
+    // همان منبع حقیقت صف دریافت
+    const list = await listPendingForReviewer(adminId, { scanTotal: 5000, skipClaimCheck: false });
+    out.pendingTotal = (list.available || []).length;
+    out.pendingAll = (list.all || []).length;
+    out.pendingHeld = Number(list.heldByOthers) || 0;
   } catch (e) {
     console.error('adminShiftCard pending', e);
   }
@@ -4328,17 +4347,25 @@ export async function createReviewBatch(adminId) {
       await clearReviewBatch(adminId);
     }
 
-    // حاشیه بیشتر از اندازه Batch تا claim fail باعث empty نشود
-    let candidates = ((await selectReviewablePending(adminId, REVIEW_BATCH_SIZE * 3)) || []).filter(function (m) {
+    // منبع حقیقت واحد: listPendingForReviewer (اسکن ۵۰۰۰ + کانال مجاز + claim)
+    let pool = null;
+    try {
+      pool = await listPendingForReviewer(adminId, { scanTotal: 5000 });
+    } catch (ePool) {
+      console.error('createReviewBatch pool', ePool);
+      pool = { all: [], available: [], heldByOthers: 0, byChannel: {}, allowed: [], scanned: 0 };
+    }
+    let candidates = (pool.available || []).filter(function (m) {
       return m && String(m.status || '') === 'pending';
     });
+    // تأیید زنده وضعیت (بدون اسکن دوباره)
     {
       const verified = [];
       for (const m of candidates) {
+        if (verified.length >= REVIEW_BATCH_SIZE * 3) break;
         try {
           const fresh = await getMessageById(Number(m.id));
           if (!fresh || String(fresh.status || '') !== 'pending') continue;
-          // رد claim دیگران (منقضی توسط getReviewClaim آزاد می‌شود)
           const held = await getReviewClaim(Number(fresh.id));
           if (held && Number(held.adminId) !== Number(adminId)) continue;
           verified.push(fresh);
@@ -4419,17 +4446,42 @@ export async function createReviewBatch(adminId) {
       }
     }
     if (!claimed.length) {
+      const allN = (pool && pool.all && pool.all.length) || 0;
+      const heldN = (pool && pool.heldByOthers) || 0;
       batchLog('create_empty', {
         adminId: Number(adminId),
         ms: Date.now() - t0,
         candidates: candidates.length,
+        all: allN,
+        held: heldN,
       });
-      if (candidates.length) {
-        return { status: 'held', pendingCount: candidates.length };
+      // اگر pending در پنجره هست ولی همه claim دیگران‌اند → held
+      if (candidates.length || heldN > 0) {
+        return {
+          status: 'held',
+          pendingCount: candidates.length || heldN || allN,
+        };
       }
       let diag = null;
       try {
-        diag = await diagnoseReviewQueue(adminId);
+        // از همان pool برای تشخیص بدون اسکن دوباره
+        diag = {
+          adminId: Number(adminId),
+          allowed: (pool && pool.allowed) || [],
+          pendingTotal: allN,
+          pendingByAllowed: (pool && pool.byChannel) || {},
+          pendingByChannelSample: (pool && pool.byChannel) || {},
+          available: 0,
+          heldByOthers: heldN,
+          scanned: (pool && pool.scanned) || 0,
+          nowHm: (tehranNow() && tehranNow().hm) || '',
+          date: (tehranNow() && tehranNow().date) || '',
+        };
+        try {
+          diag.shiftKeys = (await activeShiftChannelKeys(adminId)) || [];
+        } catch (_e) {
+          diag.shiftKeys = [];
+        }
         batchLog('create_empty_diag', diag);
       } catch (eDiag) {
         console.error('create_empty_diag', eDiag);

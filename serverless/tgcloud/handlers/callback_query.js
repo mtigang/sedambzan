@@ -1,3 +1,4 @@
+import { listBlockedUsers, setBlocked } from 'lib/users';
 import { normalizeBody, exactBodyKey, bodyIndexSettingKey } from 'lib/validation';
 import { api, db, InputFile } from 'sdk';
 import { eq, and, desc } from 'sdk/db';
@@ -197,6 +198,7 @@ import {
   sendDestInline,
   confirmPostInline,
   activeShiftChannelsInline,
+  bannedListInline,
 } from 'lib/keyboards';
 
 async function refreshAllShiftBoards(channelKey, date) {
@@ -559,6 +561,100 @@ export default async function (cq) {
       });
       return;
     }
+
+    // —— لیست بن / رفع بن ——
+    if (data === 'banlist:refresh' || data === 'noop_ban') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      if (data === 'noop_ban') {
+        await api.answerCallbackQuery({ callback_query_id: cq.id });
+        return;
+      }
+      try {
+        const banned = await listBlockedUsers(60);
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'بروزرسانی' });
+        let textOut = '📋 کاربران بن‌شده (' + banned.length + ')\nروی دکمه «رفع بن» بزنید:';
+        for (const u of banned.slice(0, 40)) {
+          const uid = Number(u.userId ?? u.user_id);
+          const name =
+            [u.firstName || u.first_name, u.lastName || u.last_name].filter(Boolean).join(' ') ||
+            (u.username ? '@' + String(u.username).replace(/^@/, '') : '') ||
+            String(uid);
+          textOut += '\n• ' + name + ' | ' + uid;
+        }
+        if (!banned.length) textOut = '📋 هیچ کاربر بن‌شده‌ای نیست.';
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: textOut.slice(0, 3500),
+            reply_markup: bannedListInline(banned),
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: textOut.slice(0, 3500),
+            reply_markup: bannedListInline(banned),
+          });
+        }
+      } catch (e) {
+        console.error('banlist refresh', e);
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'خطا', show_alert: true });
+      }
+      return;
+    }
+
+    if (data.startsWith('unban:')) {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      const tid = Number(data.slice(6));
+      if (!Number.isFinite(tid) || tid <= 0) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'آیدی نامعتبر', show_alert: true });
+        return;
+      }
+      try {
+        await setBlocked(tid, false);
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'رفع بن شد', show_alert: true });
+        const banned = await listBlockedUsers(60);
+        let textOut = '📋 کاربران بن‌شده (' + banned.length + ')\nرفع بن «' + tid + '» انجام شد.';
+        for (const u of banned.slice(0, 40)) {
+          const uid = Number(u.userId ?? u.user_id);
+          const name =
+            [u.firstName || u.first_name, u.lastName || u.last_name].filter(Boolean).join(' ') ||
+            (u.username ? '@' + String(u.username).replace(/^@/, '') : '') ||
+            String(uid);
+          textOut += '\n• ' + name + ' | ' + uid;
+        }
+        if (!banned.length) textOut = '✅ رفع بن شد.\n📋 لیست بن خالی است.';
+        try {
+          await api.editMessageText({
+            chat_id: cq.message.chat.id,
+            message_id: cq.message.message_id,
+            text: textOut.slice(0, 3500),
+            reply_markup: bannedListInline(banned),
+          });
+        } catch (_e) {
+          await api.sendMessage({
+            chat_id: cq.message.chat.id,
+            text: '✅ کاربر ' + tid + ' از بن خارج شد.',
+          });
+        }
+      } catch (e) {
+        console.error('unban', e);
+        await api.answerCallbackQuery({
+          callback_query_id: cq.id,
+          text: 'خطا: ' + ((e && e.message) || e),
+          show_alert: true,
+        });
+      }
+      return;
+    }
+
+
 if (data.startsWith('ban_user:')) {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
@@ -1167,8 +1263,8 @@ if (data.startsWith('ban_user:')) {
       try {
         page = await loadUserMessagesPage(uid, pageSize, {
           beforeId: beforeId,
-          maxScan: 3500,
-          maxRounds: 6,
+          maxScan: 8000,
+          maxRounds: 12,
         });
       } catch (e) {
         console.error('smsg_user page', e);
@@ -2210,8 +2306,12 @@ if (data.startsWith('reject_menu:')) {
           const d = res.diag;
           if (d) {
             extra =
-              '\n\nکل pending: ' +
+              '\n\nکل pending (پنجره): ' +
               (d.pendingTotal != null ? d.pendingTotal : '?') +
+              '\nقابل دریافت: ' +
+              (d.available != null ? d.available : '?') +
+              '\nدر دست ادمین دیگر: ' +
+              (d.heldByOthers != null ? d.heldByOthers : '?') +
               '\nکانال مجاز: ' +
               ((d.allowed || []).join(', ') || '—');
             const pba = d.pendingByAllowed || {};
