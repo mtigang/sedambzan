@@ -2723,15 +2723,22 @@ function isPermanentTelegramError(err) {
 }
 function normalizeBatchState(raw, adminId) {
   const b = raw && typeof raw === 'object' ? raw : {};
+  const channelKeys = Array.isArray(b.channelKeys)
+    ? b.channelKeys.map(String).filter(Boolean)
+    : b.channelKey
+      ? [String(b.channelKey)]
+      : [];
   return {
     ids: Array.isArray(b.ids) ? b.ids.map(Number).filter(Boolean) : [],
     delivered: Array.isArray(b.delivered) ? b.delivered.map(Number).filter(Boolean) : [],
     failed: Array.isArray(b.failed) ? b.failed.map(Number).filter(Boolean) : [],
+    channelKeys: channelKeys,
     batchNumber: Number(b.batchNumber) || 1,
     createdAt: Number(b.createdAt) || Date.now(),
     periodDate: b.periodDate || periodDateStr(),
     version: Number(b.version) || 1,
     adminId: Number(b.adminId || adminId) || Number(adminId) || 0,
+    completed: !!b.completed,
   };
 }
 
@@ -3451,13 +3458,7 @@ async function getReviewClaim(msgId) {
           return null;
         }
       } catch (_e) {}
-      // اگر بیش از ۱۵ دقیقه در batch مانده و هنوز pending است → آزاد کن (صف کاذب نماند)
-      if (age > 8 * 60 * 1000) {
-        try {
-          await db.delete(settings).where(eq(settings.key, reviewClaimKey(msgId))).run();
-        } catch (_e) {}
-        return null;
-      }
+      // claim داخل batch معتبر می‌ماند تا expiresAt (دزدی زودهنگام = تحویل تکراری)
     } catch (_e) {}
     return c;
   } catch (_e) {
@@ -3481,17 +3482,34 @@ async function tryClaimReviewMessage(msgId, adminId, batchNumber) {
       await db.insert(settings).values({ key: reviewClaimKey(id), value: payload }).run();
       return { ok: true };
     } catch (_e) {
+      // insert conflict — فقط اگر claim آزاد/منقضی/مال خودمان است آپدیت کن
       try {
-        await db
-          .update(settings)
-          .set({ value: payload })
-          .where(eq(settings.key, reviewClaimKey(id)))
-          .run();
-        return { ok: true, stolen: true };
-      } catch (_e2) {
         const again = await getReviewClaim(id);
-        if (again && Number(again.adminId) === aid) return { ok: true, renewed: true };
-        return { ok: false, code: 'held', holder: again ? Number(again.adminId) : null };
+        if (again && Number(again.adminId) === aid) {
+          await db
+            .update(settings)
+            .set({ value: payload })
+            .where(eq(settings.key, reviewClaimKey(id)))
+            .run();
+          return { ok: true, renewed: true };
+        }
+        if (again && Number(again.adminId) !== aid) {
+          return { ok: false, code: 'held', holder: Number(again.adminId) };
+        }
+        // claim خالی/منقضی شده — insert مجدد
+        try {
+          await db.delete(settings).where(eq(settings.key, reviewClaimKey(id))).run();
+        } catch (_eDel) {}
+        try {
+          await db.insert(settings).values({ key: reviewClaimKey(id), value: payload }).run();
+          return { ok: true };
+        } catch (_eIns2) {
+          const last = await getReviewClaim(id);
+          if (last && Number(last.adminId) === aid) return { ok: true, renewed: true };
+          return { ok: false, code: 'held', holder: last ? Number(last.adminId) : null };
+        }
+      } catch (_e2) {
+        return { ok: false, code: 'error' };
       }
     }
   }
@@ -3801,7 +3819,50 @@ export async function listPendingForReviewer(adminId, opts) {
   const byChannel = Object.create(null);
   let cursor = null;
   let scanned = 0;
+  let usedDirect = false;
 
+  // مسیر مستقیم: per-channel WHERE status=pending ORDER BY id ASC (قدیمی‌ترین اول)
+  // اگر runtime اجازه دهد، همهٔ pendingهای تاریخی کانال دیده می‌شوند نه فقط پنجرهٔ ۵۰۰۰تایی
+  try {
+    for (let ci = 0; ci < channelKeys.length; ci++) {
+      const ck = channelKeys[ci];
+      const variants = keyVariants(ck);
+      for (let vi = 0; vi < variants.length; vi++) {
+        const variant = variants[vi];
+        let rows = [];
+        try {
+          rows =
+            (await db
+              .select()
+              .from(messages)
+              .where(and(eq(messages.status, 'pending'), eq(messages.channelKey, variant)))
+              .orderBy(asc(messages.id))
+              .limit(120)
+              .all()) || [];
+          usedDirect = true;
+        } catch (eDir) {
+          rows = [];
+        }
+        for (let ri = 0; ri < rows.length; ri++) {
+          const r = rows[ri];
+          if (!r) continue;
+          const mid = Number(r.id);
+          if (!mid || seenId[mid]) continue;
+          if (String(r.status || '') !== 'pending') continue;
+          seenId[mid] = 1;
+          pending.push(r);
+          const raw = String((r.channelKey ?? r.channel_key) || '');
+          const nk = normalizeChannelKey(raw) || raw || '?';
+          byChannel[nk] = (byChannel[nk] || 0) + 1;
+        }
+      }
+    }
+  } catch (eDirectAll) {
+    console.error('listPending direct', eDirectAll);
+  }
+
+  // اگر مسیر مستقیم چیزی نداد یا ناکافی بود، اسکن پنجرهٔ اخیر
+  if (pending.length < 18) {
   while (scanned < SCAN_TOTAL) {
     const take = Math.min(BATCH, SCAN_TOTAL - scanned);
     let batch = [];
@@ -3849,6 +3910,7 @@ export async function listPendingForReviewer(adminId, opts) {
     cursor = lastId;
     if (batch.length < take) break;
   }
+  } // end fallback scan if pending.length < 18
 
   pending.sort(function (a, b) {
     return (Number(a.id) || 0) - (Number(b.id) || 0);
@@ -4287,30 +4349,7 @@ export async function createReviewBatch(adminId) {
           }
         }
         pendingRows = mine;
-        // تکمیل تا اندازه Batch فقط از unclaimed
-        try {
-          if (pendingRows.length < REVIEW_BATCH_SIZE) {
-            const have = Object.create(null);
-            for (const r of pendingRows) have[Number(r.id)] = 1;
-            const extra = (await selectReviewablePending(adminId, REVIEW_BATCH_SIZE * 2)) || [];
-            for (const m of extra) {
-              if (pendingRows.length >= REVIEW_BATCH_SIZE) break;
-              const mid = Number(m && m.id);
-              if (!mid || have[mid]) continue;
-              if (String(m.status || '') !== 'pending') continue;
-              try {
-                const held = await getReviewClaim(mid);
-                if (held && Number(held.adminId) !== Number(adminId)) continue;
-              } catch (_e) {}
-              const cl = await tryClaimReviewMessage(mid, adminId, (pruned.batch && pruned.batch.batchNumber) || 1);
-              if (!cl.ok) continue;
-              have[mid] = 1;
-              pendingRows.push(m);
-            }
-          }
-        } catch (eFill) {
-          console.error('incomplete topup', eFill);
-        }
+        // عضویت Batch در حالت incomplete گسترش داده نمی‌شود (جلوگیری از ادغام صف جدید در batch جاری)
         if (!pendingRows.length) {
           await clearReviewBatch(adminId);
         } else {
@@ -4321,27 +4360,42 @@ export async function createReviewBatch(adminId) {
             periodDate: periodDateStr(),
           };
           batch.ids = pendingRows.map((r) => Number(r.id));
-          // delivered را فقط روی idهای باقی‌مانده نگه دار
-          if (Array.isArray(batch.delivered)) {
-            const idset = Object.create(null);
-            for (const id of batch.ids) idset[Number(id)] = 1;
-            batch.delivered = batch.delivered.filter(function (id) {
-              return idset[Number(id)];
+          const idset = Object.create(null);
+          for (const id of batch.ids) idset[Number(id)] = 1;
+          // delivered را فقط برای idهای هنوز در batch نگه دار — پاک‌سازی delivered باعث ارسال تکراری می‌شود
+          batch.delivered = (Array.isArray(batch.delivered) ? batch.delivered : [])
+            .map(Number)
+            .filter(function (id) {
+              return idset[id];
             });
+          batch.failed = (Array.isArray(batch.failed) ? batch.failed : [])
+            .map(Number)
+            .filter(function (id) {
+              return idset[id];
+            });
+          if (!batch.channelKeys || !batch.channelKeys.length) {
+            try {
+              const chSet = Object.create(null);
+              for (const r of pendingRows) {
+                const raw = String((r.channelKey ?? r.channel_key) || '');
+                const nk = normalizeChannelKey(raw) || raw;
+                if (nk) chSet[nk] = 1;
+              }
+              batch.channelKeys = Object.keys(chSet);
+            } catch (_eCh) {}
           }
-          // deliveredهای هنوز pending را از delivered بردار تا resume واقعاً دوباره بفرستد
-          try {
-            const pendingSet = Object.create(null);
-            for (const r of pendingRows) pendingSet[Number(r.id)] = 1;
-            batch.delivered = (batch.delivered || []).filter(function (id) {
-              return !pendingSet[Number(id)];
-            });
-            batch.failed = (batch.failed || []).filter(function (id) {
-              return idset[Number(id)];
-            });
-          } catch (_eDel) {}
           await saveReviewBatch(adminId, batch);
-          return { status: 'incomplete', batch, messages: pendingRows };
+          const delSet = Object.create(null);
+          for (const d of batch.delivered) delSet[Number(d)] = 1;
+          const toSend = pendingRows.filter(function (r) {
+            return !delSet[Number(r.id)];
+          });
+          return {
+            status: 'incomplete',
+            batch: batch,
+            messages: toSend.length ? toSend : [],
+            remainingUndelivered: toSend.length,
+          };
         }
       }
       await clearReviewBatch(adminId);
@@ -4488,10 +4542,14 @@ export async function createReviewBatch(adminId) {
       }
       return { status: 'empty', diag: diag };
     }
+    const batchChannelKeys = (pool && pool.allowed && pool.allowed.length)
+      ? pool.allowed.slice()
+      : [];
     const batch = normalizeBatchState({
       ids: claimed.map(function (m) { return Number(m.id); }),
       delivered: [],
       failed: [],
+      channelKeys: batchChannelKeys,
       batchNumber: batchNumber,
       createdAt: Date.now(),
       periodDate: periodDateStr(),
@@ -4532,44 +4590,71 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
           })
           .filter(Boolean);
 
+  // عضویت Batch ثابت است؛ روی ادامه فقط پیام‌های تحویل‌نشده ارسال می‌شوند
   for (const id of idOrder) {
     if (!id || seen[id]) continue;
     if (live.length >= REVIEW_BATCH_SIZE) break;
+    // ادامه Batch: هرگز پیام قبلاً تحویل‌شده را دوباره نفرست
+    if (resumed && alreadyDelivered[id] && !(opts && opts.forceResend)) {
+      seen[id] = 1;
+      continue;
+    }
     try {
       const fresh = await getMessageById(Number(id));
       if (!fresh || String(fresh.status || '') !== 'pending') {
         seen[id] = 1;
         continue;
       }
-      // اگر هنوز pending است، دوباره بفرست — حتی اگر قبلاً delivered علامت خورده
-      // (ادمین پیام را ندیده / UI پاک شده / batch گیر کرده)
-      if (resumed && alreadyDelivered[id] && !(opts && opts.forceResend)) {
-        // فقط اگر forceResend نیست و این id واقعاً در messages ورودی هست، skip نکن
-        // پیام pending را دوباره تحویل بده
+      // اگر batch کانال ثابت دارد، فقط همان کانال
+      if (batch.channelKeys && batch.channelKeys.length) {
+        const raw = String((fresh.channelKey ?? fresh.channel_key) || '');
+        const nk = normalizeChannelKey(raw) || raw;
+        let okCh = false;
+        for (let ci = 0; ci < batch.channelKeys.length; ci++) {
+          const ck = String(batch.channelKeys[ci] || '');
+          const cn = normalizeChannelKey(ck) || ck;
+          if (ck === raw || ck === nk || cn === raw || cn === nk) {
+            okCh = true;
+            break;
+          }
+        }
+        if (!okCh) {
+          seen[id] = 1;
+          continue;
+        }
       }
       seen[id] = 1;
       live.push(fresh);
     } catch (_e) {}
   }
 
-  if (adminId && live.length < REVIEW_BATCH_SIZE) {
+  // top-up فقط برای Batch تازه — هرگز روی continuation عضویت را بزرگ نکن
+  if (!resumed && adminId && live.length < REVIEW_BATCH_SIZE) {
     try {
       const more = (await selectReviewablePending(adminId, REVIEW_BATCH_SIZE)) || [];
       for (const m of more) {
         if (live.length >= REVIEW_BATCH_SIZE) break;
         const id = Number(m && m.id);
-        if (!id || seen[id]) continue;
+        if (!id || seen[id] || alreadyDelivered[id]) continue;
         if (String(m.status || '') !== 'pending') continue;
+        if (batch.channelKeys && batch.channelKeys.length) {
+          const raw = String((m.channelKey ?? m.channel_key) || '');
+          const nk = normalizeChannelKey(raw) || raw;
+          let okCh = false;
+          for (let ci = 0; ci < batch.channelKeys.length; ci++) {
+            const ck = String(batch.channelKeys[ci] || '');
+            const cn = normalizeChannelKey(ck) || ck;
+            if (ck === raw || ck === nk || cn === raw || cn === nk) {
+              okCh = true;
+              break;
+            }
+          }
+          if (!okCh) continue;
+        }
         const cl = await tryClaimReviewMessage(id, adminId, batch.batchNumber);
         if (!cl.ok) continue;
         seen[id] = 1;
         live.push(m);
-        // از delivered بردار تا دوباره شمارش/skip نشود
-        try {
-          batch.delivered = (batch.delivered || []).filter(function (x) {
-            return Number(x) !== id;
-          });
-        } catch (_e) {}
         if (!(batch.ids || []).map(Number).includes(id)) {
           batch.ids = (batch.ids || []).concat([id]);
         }
