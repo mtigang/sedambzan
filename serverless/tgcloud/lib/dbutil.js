@@ -3916,16 +3916,26 @@ export async function listPendingForReviewer(adminId, opts) {
     return (Number(a.id) || 0) - (Number(b.id) || 0);
   });
 
-  // تفکیک claim: فقط پیام‌های آزاد یا مال خودم available هستند
+  // تفکیک claim — فقط روی کاندیدهای ابتدای صف (FIFO) تا از timeout جلوگیری شود
+  // نیاز واقعی batch حداکثر REVIEW_BATCH_SIZE است؛ claim-check کل صف = صدها خواندن settings
   const available = [];
   let heldByOthers = 0;
+  let claimChecked = 0;
   const skipClaimCheck = !!opts.skipClaimCheck;
+  const claimBudget = Math.max(
+    24,
+    Math.min(Number(opts.claimBudget) || Math.max(REVIEW_BATCH_SIZE * 4, 48), 80)
+  );
+  const stopAfterAvailable = Number(opts.stopAfterAvailable) > 0 ? Number(opts.stopAfterAvailable) : 0;
   if (skipClaimCheck) {
     for (let i = 0; i < pending.length; i++) available.push(pending[i]);
   } else {
     for (let i = 0; i < pending.length; i++) {
+      if (claimChecked >= claimBudget) break;
+      if (stopAfterAvailable > 0 && available.length >= stopAfterAvailable) break;
       const m = pending[i];
       const mid = Number(m.id);
+      claimChecked += 1;
       let held = null;
       try {
         held = await getReviewClaim(mid);
@@ -3947,6 +3957,9 @@ export async function listPendingForReviewer(adminId, opts) {
     matched: pending.length,
     available: available.length,
     held: heldByOthers,
+    claimChecked: claimChecked,
+    claimBudget: claimBudget,
+    usedDirect: !!usedDirect,
   });
 
   return {
@@ -3956,6 +3969,9 @@ export async function listPendingForReviewer(adminId, opts) {
     heldByOthers: heldByOthers,
     byChannel: byChannel,
     scanned: scanned,
+    claimChecked: claimChecked,
+    claimExhausted: !skipClaimCheck && claimChecked >= claimBudget && available.length === 0 && pending.length > claimChecked,
+    usedDirect: !!usedDirect,
   };
 }
 
@@ -3963,7 +3979,11 @@ export async function listPendingForReviewer(adminId, opts) {
 async function selectReviewablePending(adminId, limit) {
   const need = Math.min(Math.max(Number(limit) || REVIEW_BATCH_SIZE, 1), 80);
   try {
-    const list = await listPendingForReviewer(adminId, { scanTotal: 5000 });
+    const list = await listPendingForReviewer(adminId, {
+      scanTotal: 5000,
+      claimBudget: Math.max(need * 4, 48),
+      stopAfterAvailable: need,
+    });
     return (list.available || []).slice(0, need);
   } catch (e) {
     console.error('selectReviewablePending', e);
@@ -3973,10 +3993,19 @@ async function selectReviewablePending(adminId, limit) {
 
 export async function hasEligiblePending(adminId) {
   try {
-    const rows = await selectReviewablePending(adminId, 1);
-    return !!(rows && rows.length);
+    const list = await listPendingForReviewer(adminId, {
+      scanTotal: 5000,
+      claimBudget: 40,
+      stopAfterAvailable: 1,
+    });
+    if ((list.available || []).length > 0) return true;
+    // اگر هنوز pending در پنجره هست ولی claim-budget پر شده → محتاطانه true
+    if (list.claimExhausted && (list.all || []).length > 0) return true;
+    if ((list.heldByOthers || 0) > 0 && (list.all || []).length > 0) return true;
+    return false;
   } catch (e) {
     console.error('hasEligiblePending', e);
+    // در خطا خوش‌بینانه true تا صف کاذب خالی اعلام نشود
     return true;
   }
 }
@@ -4004,7 +4033,8 @@ export async function finishReviewBatchIfComplete(adminId, messageId) {
       try {
         hasMore = await hasEligiblePending(adminId);
       } catch (_e) {
-        hasMore = false;
+        // خطا در تشخیص → دکمه بعدی را نشان بده تا صف کاذب خالی نماند
+        hasMore = true;
       }
     }
     return { inBatch: inBatch || complete, complete, hasMore, batch };
@@ -4404,7 +4434,11 @@ export async function createReviewBatch(adminId) {
     // منبع حقیقت واحد: listPendingForReviewer (اسکن ۵۰۰۰ + کانال مجاز + claim)
     let pool = null;
     try {
-      pool = await listPendingForReviewer(adminId, { scanTotal: 5000 });
+      pool = await listPendingForReviewer(adminId, {
+        scanTotal: 5000,
+        claimBudget: Math.max(REVIEW_BATCH_SIZE * 5, 60),
+        stopAfterAvailable: REVIEW_BATCH_SIZE * 3,
+      });
     } catch (ePool) {
       console.error('createReviewBatch pool', ePool);
       pool = { all: [], available: [], heldByOthers: 0, byChannel: {}, allowed: [], scanned: 0 };
@@ -4510,10 +4544,10 @@ export async function createReviewBatch(adminId) {
         held: heldN,
       });
       // اگر pending در پنجره هست ولی همه claim دیگران‌اند → held
-      if (candidates.length || heldN > 0) {
+      if (candidates.length || heldN > 0 || (pool && pool.claimExhausted)) {
         return {
           status: 'held',
-          pendingCount: candidates.length || heldN || allN,
+          pendingCount: candidates.length || heldN || allN || 1,
         };
       }
       let diag = null;
@@ -4528,6 +4562,8 @@ export async function createReviewBatch(adminId) {
           available: 0,
           heldByOthers: heldN,
           scanned: (pool && pool.scanned) || 0,
+          claimExhausted: !!(pool && pool.claimExhausted),
+          usedDirect: !!(pool && pool.usedDirect),
           nowHm: (tehranNow() && tehranNow().hm) || '',
           date: (tehranNow() && tehranNow().date) || '',
         };
