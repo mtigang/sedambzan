@@ -6766,7 +6766,9 @@ if (data === 'ann_continue') {
             )
           )
           .all()) || [];
+      // فقط تداخل با شیفت‌های خودِ همین ادمین مسدود است؛ ادمین دیگر می‌تواند هم‌زمان باشد
       const conflict = taken.filter((s) => {
+        if (Number(s.adminId ?? s.admin_id) !== Number(userId)) return false;
         const sameDate = String(s.shiftDate) === String(pdate);
         if (!sameDate) return false;
         if (String(s.startHm) === String(s.endHm)) return false;
@@ -6787,7 +6789,7 @@ if (data === 'ann_continue') {
       if (conflict.length) {
         await api.answerCallbackQuery({
           callback_query_id: cq.id,
-          text: 'این بازه در این کانال پر است.',
+          text: 'این بازه با شیفت خودتان تداخل دارد.',
           show_alert: true,
         });
         await refreshAllShiftBoards(channelKey, pdate);

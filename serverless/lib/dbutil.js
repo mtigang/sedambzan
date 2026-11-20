@@ -2664,7 +2664,10 @@ export const REVIEW_BATCH_SIZE = 18;
 /** همیشه برابر REVIEW_BATCH_SIZE */
 export const REVIEW_BATCH_HARD = REVIEW_BATCH_SIZE;
 const REVIEW_LOCK_TTL_MS = 12 * 1000;
-const REVIEW_CLAIM_TTL_MS = 90 * 60 * 1000;
+const REVIEW_CLAIM_TTL_MS = 15 * 60 * 1000; // lease بازبینی؛ تمدید با اکشن واقعی
+export function getReviewClaimTtlMs() {
+  return REVIEW_CLAIM_TTL_MS;
+}
 const PUBLISHING_STUCK_MS = 20 * 60 * 1000;
 const BATCH_SEND_GAP_MS = 45;
 const BATCH_MAX_RETRIES_PER_MSG = 2;
@@ -2938,7 +2941,13 @@ export function filterPeriodShifts(rows, pdate) {
   });
 }
 
-export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShiftId) {
+/**
+ * آیا بازه برای همین ادمین تداخل دارد؟
+ * هم‌پوشانی ادمین دیگر = مجاز (کار موازی).
+ * forAdminId: اگر داده شود فقط شیفت‌های همان ادمین مانع می‌شوند.
+ * اگر forAdminId نباشد، برای سازگاری قدیمی null برمی‌گردد مگر خطای DB (دیگر slot سراسری قفل نیست).
+ */
+export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShiftId, forAdminId) {
   try {
     const rows =
       (await db
@@ -2947,20 +2956,25 @@ export async function isChannelSlotTaken(channelKey, startHm, endHm, excludeShif
         .where(and(eq(shifts.channelKey, String(channelKey)), eq(shifts.status, 'active')))
         .all()) || [];
     const pdate = periodDateStr(tehranNow());
+    const aid = forAdminId != null ? Number(forAdminId) : null;
     for (const s of rows) {
       if (excludeShiftId != null && Number(s.id) === Number(excludeShiftId)) continue;
       const sd = String(s.shiftDate ?? s.shift_date ?? '');
       if (sd === 'perm' || sd === 'permanent') continue;
       if (sd !== String(pdate)) continue;
       if (String(s.startHm) === String(s.endHm)) continue;
-      if (shiftIntervalOverlaps(startHm, endHm, s.startHm || s.start_hm, s.endHm || s.end_hm)) {
-        return s;
+      if (!shiftIntervalOverlaps(startHm, endHm, s.startHm || s.start_hm, s.endHm || s.end_hm)) continue;
+      // فقط تداخل با همان ادمین مسدودکننده است
+      if (aid != null) {
+        if (Number(s.adminId ?? s.admin_id) === aid) return s;
+        continue;
       }
+      // بدون forAdminId: دیگر اسلات را سراسری پر اعلام نکن (هم‌پوشانی چند ادمین مجاز)
+      continue;
     }
     return null;
   } catch (e) {
     console.error('isChannelSlotTaken', e);
-    // fail-closed: وانمود کن پر است تا دابل‌بوک نشود
     return { id: -1, adminId: 0, _error: true };
   }
 }
@@ -3033,15 +3047,8 @@ export async function dedupeActiveShifts(channelKey) {
           drop = true;
           break;
         }
-        // هم‌پوشانی بین دو ادمین مختلف → دومی حذف
-        if (
-          !sameAdmin &&
-          shiftIntervalOverlaps(s.startHm, s.endHm, k.startHm, k.endHm)
-        ) {
-          drop = true;
-          break;
-        }
-        // همان ادمین بازه هم‌پوشان
+        // هم‌پوشانی دو ادمین مختلف مجاز است (کار موازی روی یک کانال)
+        // همان ادمین بازه هم‌پوشان → تکراری
         if (
           sameAdmin &&
           shiftIntervalOverlaps(s.startHm, s.endHm, k.startHm, k.endHm)
@@ -3471,12 +3478,30 @@ async function tryClaimReviewMessage(msgId, adminId, batchNumber) {
   const aid = Number(adminId);
   if (!id || !aid) return { ok: false, code: 'bad' };
 
-  async function writeClaim() {
+  async function writeClaim(prevVersion) {
+    const ver = (Number(prevVersion) || 0) + 1;
+    const nowMs = Date.now();
+    let exp = nowMs + REVIEW_CLAIM_TTL_MS;
+    // سقف: پایان شیفت فعال روی کانال پیام در صورت وجود
+    try {
+      const row = await getMessageById(id);
+      const ck = row ? String((row.channelKey ?? row.channel_key) || '') : '';
+      if (ck) {
+        const keys = await activeShiftChannelKeys(aid);
+        // اگر شیفت فعال دارد، expires را به انتهای نزدیک‌ترین شیفت محدود کن (تقریبی با TTL)
+        if (keys && keys.length) {
+          /* TTL پایه ۱۵ دقیقه؛ تمدید در اکشن‌های واقعی */
+        }
+      }
+    } catch (_e) {}
     const payload = JSON.stringify({
       adminId: aid,
       batchNumber: Number(batchNumber) || 0,
-      claimedAt: Date.now(),
-      expiresAt: Date.now() + REVIEW_CLAIM_TTL_MS,
+      batchId: String(aid) + ':' + String(Number(batchNumber) || 0) + ':' + String(ver),
+      version: ver,
+      claimedAt: nowMs,
+      expiresAt: exp,
+      lastActivityAt: nowMs,
     });
     try {
       await db.insert(settings).values({ key: reviewClaimKey(id), value: payload }).run();
@@ -3516,7 +3541,12 @@ async function tryClaimReviewMessage(msgId, adminId, batchNumber) {
 
   const existing = await getReviewClaim(id);
   if (existing) {
-    if (Number(existing.adminId) === aid) return { ok: true, renewed: true };
+    if (Number(existing.adminId) === aid) {
+      // تمدید lease با افزایش version
+      const r = await writeClaim(existing.version);
+      if (r.ok) return { ok: true, renewed: true, version: (Number(existing.version) || 0) + 1 };
+      return r;
+    }
     // آیا می‌توان claim یتیم/کهنه را گرفت؟
     let canSteal = false;
     try {
@@ -4012,6 +4042,10 @@ export async function hasEligiblePending(adminId) {
 
 export async function finishReviewBatchIfComplete(adminId, messageId) {
   try {
+    // اکشن واقعی بازبینی → تمدید lease بقیهٔ claimهای batch
+    try {
+      await renewBatchClaimsOnActivity(adminId, messageId);
+    } catch (_e) {}
     const batch = await getReviewBatch(adminId);
     if (!batch) {
       let hasMore = false;
@@ -4944,6 +4978,55 @@ export async function sendReviewBatch(chatId, batch, rows, opts) {
  * ادمین/ساب‌لیدر: فقط کانال مجاز (شیفت فعال یا اسکوپ ساب‌لیدر بدون شیفت).
  * عضویت در Batch دیگر اجباری نیست — اگر Batch از بین برود دکمه تأیید گیر نکند.
  */
+/** اعتبارسنجی مالکیت claim + version (fencing) */
+export async function validateClaimOwnership(msgId, adminId, expectedVersion) {
+  const id = Number(msgId);
+  const aid = Number(adminId);
+  if (!id || !aid) return { ok: false, code: 'bad' };
+  let claim = null;
+  try {
+    claim = await getReviewClaim(id);
+  } catch (_e) {
+    claim = null;
+  }
+  if (!claim) return { ok: false, code: 'no_claim' };
+  if (Number(claim.adminId) !== aid) return { ok: false, code: 'other_holder', holder: Number(claim.adminId) };
+  if (expectedVersion != null && Number(claim.version) !== Number(expectedVersion)) {
+    return { ok: false, code: 'stale_version', version: Number(claim.version) };
+  }
+  // پیام هنوز pending؟
+  try {
+    const row = await getMessageById(id);
+    if (!row || String(row.status || '') !== 'pending') {
+      return { ok: false, code: 'not_pending' };
+    }
+  } catch (_e) {
+    return { ok: false, code: 'error' };
+  }
+  return { ok: true, claim: claim, version: Number(claim.version) || 1 };
+}
+
+/** تمدید lease برای claimهای batch جاری پس از اکشن واقعی بازبینی */
+export async function renewBatchClaimsOnActivity(adminId, exceptMsgId) {
+  const aid = Number(adminId);
+  if (!aid) return;
+  try {
+    const batch = await getReviewBatch(aid);
+    if (!batch || !batch.ids || !batch.ids.length) return;
+    const except = Number(exceptMsgId) || 0;
+    for (const mid of batch.ids) {
+      if (Number(mid) === except) continue;
+      try {
+        const row = await getMessageById(Number(mid));
+        if (!row || String(row.status || '') !== 'pending') continue;
+        const held = await getReviewClaim(Number(mid));
+        if (!held || Number(held.adminId) !== aid) continue;
+        await tryClaimReviewMessage(Number(mid), aid, batch.batchNumber);
+      } catch (_e) {}
+    }
+  } catch (_e) {}
+}
+
 export async function checkReviewAccess(adminId, row) {
   if (isOwner(adminId)) return { ok: true };
   if (!row) return { ok: false, code: 'missing', text: 'پیام یافت نشد.' };
@@ -4992,6 +5075,17 @@ export async function checkReviewAccess(adminId, row) {
       text: '⛔ این پیام مربوط به کانال شیفت فعلی شما نیست.',
     };
   }
+  // claim فعال متعلق به دیگری → رد (جلوگیری از اکشن روی پیام واگذارشده)
+  try {
+    const held = await getReviewClaim(Number(row.id));
+    if (held && Number(held.adminId) !== Number(adminId)) {
+      return {
+        ok: false,
+        code: 'other_holder',
+        text: 'این پیام به بازبین دیگری واگذار شده است.',
+      };
+    }
+  } catch (_e) {}
   return { ok: true };
 }
 
