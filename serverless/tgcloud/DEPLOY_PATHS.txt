@@ -1,0 +1,1 @@
+Authoritative deploy paths: tgcloud/handlers/* and tgcloud/lib/*

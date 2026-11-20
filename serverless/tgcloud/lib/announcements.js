@@ -449,6 +449,7 @@ export function announceManageKeyboard() {
   return sanitizeMarkup({
     inline_keyboard: [
       [{ text: '➕ ایجاد اطلاعیه جدید', callback_data: 'ann_m:new', style: 'success' }],
+      [{ text: '👮 اطلاعیه به ادمین‌ها', callback_data: 'ann_m:admins', style: 'primary' }],
       [{ text: '🟢 اطلاعیه‌های فعال', callback_data: 'ann_m:active', style: 'primary' }],
       [{ text: '🔴 لغوشده‌ها / تاریخچه', callback_data: 'ann_m:hist', style: 'primary' }],
       [{ text: 'بستن', callback_data: 'ann_m:close', style: 'danger' }],

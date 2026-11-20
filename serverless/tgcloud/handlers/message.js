@@ -1115,20 +1115,87 @@ export default async function (message) {
         try {
           const delRes = await deleteChannelMessageSafe(chatIdCh, chMid);
           if (!delRes.ok) {
+            // حذف ناموفق → فقط همان پیام کانال را با متن جایگزین ویرایش کن
+            let edited = false;
+            let editErr = '';
+            try {
+              await api.editMessageText({
+                chat_id: chatIdCh,
+                message_id: chMid,
+                text: 'محتوا حذف شده است',
+              });
+              edited = true;
+            } catch (eEdit) {
+              editErr = String((eEdit && (eEdit.description || eEdit.message)) || eEdit || '').slice(0, 180);
+              console.error('user_del fallback edit', eEdit);
+            }
+            if (edited) {
+              try {
+                await settingSet('user_del_ok:' + userId, String(delCount + 1));
+              } catch (_e) {}
+              await clearState(userId);
+              await api.sendMessage({
+                chat_id: chatId,
+                text:
+                  'حذف مستقیم ممکن نشد؛ محتوای پیام #' +
+                  mid +
+                  ' در کانال با «محتوا حذف شده است» جایگزین شد.\n' +
+                  'سهمیه باقی‌مونده: ' +
+                  (5 - (delCount + 1)) +
+                  ' از ۵',
+                reply_markup: sanitizeMarkup(backKeyboard()),
+              });
+              return;
+            }
             await api.sendMessage({
               chat_id: chatId,
-              text: 'حذف از کانال ممکن نشد 🌬\n' + String(delRes.error || '').slice(0, 250),
+              text:
+                'حذف از کانال ممکن نشد و ویرایش جایگزین هم ناموفق بود 🌬\n' +
+                String(delRes.error || '').slice(0, 120) +
+                (editErr ? '\nویرایش: ' + editErr : ''),
               reply_markup: sanitizeMarkup(backKeyboard()),
             });
             return;
           }
         } catch (eDel) {
           console.error('user_del direct', eDel);
+          let edited = false;
+          let editErr = '';
+          try {
+            await api.editMessageText({
+              chat_id: chatIdCh,
+              message_id: chMid,
+              text: 'محتوا حذف شده است',
+            });
+            edited = true;
+          } catch (eEdit) {
+            editErr = String((eEdit && (eEdit.description || eEdit.message)) || eEdit || '').slice(0, 180);
+            console.error('user_del fallback edit catch', eEdit);
+          }
+          if (edited) {
+            try {
+              await settingSet('user_del_ok:' + userId, String(delCount + 1));
+            } catch (_e) {}
+            await clearState(userId);
+            await api.sendMessage({
+              chat_id: chatId,
+              text:
+                'حذف مستقیم ممکن نشد؛ محتوای پیام #' +
+                mid +
+                ' در کانال با «محتوا حذف شده است» جایگزین شد.\n' +
+                'سهمیه باقی‌مونده: ' +
+                (5 - (delCount + 1)) +
+                ' از ۵',
+              reply_markup: sanitizeMarkup(backKeyboard()),
+            });
+            return;
+          }
           await api.sendMessage({
             chat_id: chatId,
             text:
-              'حذف از کانال ممکن نشد.\n' +
-              String((eDel && (eDel.description || eDel.message)) || eDel).slice(0, 150),
+              'حذف از کانال ممکن نشد و ویرایش جایگزین هم ناموفق بود.\n' +
+              String((eDel && (eDel.description || eDel.message)) || eDel).slice(0, 120) +
+              (editErr ? '\nویرایش: ' + editErr : ''),
             reply_markup: sanitizeMarkup(backKeyboard()),
           });
           return;
@@ -4255,6 +4322,67 @@ let note =
         text: '✅ پاسخ برای مالک ارسال شد.',
         reply_markup: await roleKb(userId),
       });
+      return;
+    }
+
+    if (owner && state?.kind === 'announce_wait_text_admins' && text) {
+      try {
+        await clearState(userId);
+        const ads = (await db.select().from(channelAdmins).all()) || [];
+        const seen = {};
+        const ids = [];
+        for (const a of ads) {
+          const id = Number(a.userId || a.user_id);
+          if (id && !seen[id]) {
+            seen[id] = true;
+            ids.push(id);
+          }
+        }
+        if (!ids.length) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'هیچ ادمینی در channel_admins ثبت نشده است.',
+            reply_markup: await roleKb(userId),
+          });
+          return;
+        }
+        let annEntities = null;
+        try {
+          const raw = message.entities || null;
+          if (Array.isArray(raw) && raw.length) {
+            annEntities = raw.map(function (e) {
+              const o = { type: e.type, offset: e.offset, length: e.length };
+              if (e.url) o.url = e.url;
+              return o;
+            });
+          }
+        } catch (_e) {}
+        let ok = 0;
+        let fail = 0;
+        const body = '📣 اطلاعیه مالک به ادمین‌ها\n\n' + String(text).slice(0, 3500);
+        for (let i = 0; i < ids.length; i++) {
+          try {
+            const payload = { chat_id: ids[i], text: body };
+            if (annEntities) payload.entities = annEntities;
+            await api.sendMessage(payload);
+            ok++;
+          } catch (_e) {
+            fail++;
+          }
+        }
+        await api.sendMessage({
+          chat_id: chatId,
+          text: '✅ ارسال اطلاعیه به ادمین‌ها تمام شد.\nمخاطب: ' + ids.length + '\nموفق: ' + ok + ' / ناموفق: ' + fail,
+          reply_markup: await roleKb(userId),
+        });
+      } catch (e) {
+        console.error('announce_wait_text_admins', e);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'خطا در ارسال به ادمین‌ها: ' + String((e && e.message) || e).slice(0, 120),
+          reply_markup: await roleKb(userId),
+        });
+      }
       return;
     }
 

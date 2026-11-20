@@ -2658,16 +2658,32 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
           await clearReviewBatch(userId);
         } catch (_e2) {}
       }
-      // want فقط هشدار دکمه خیلی قدیمی — مانع ساخت Batch جدید نشود
+      // اعتبارسنجی callback کهنه: اگر Batch فعال با شماره دیگر هنوز pending دارد → فقط resume
       if (want != null) {
         try {
           const cur = await getReviewBatch(userId);
-          if (cur && Number(cur.batchNumber) && Number(cur.batchNumber) !== want) {
-            // نادیده بگیر و Batch تازه بساز
+          if (cur && Array.isArray(cur.ids) && cur.ids.length && Number(cur.batchNumber) && Number(cur.batchNumber) !== want) {
+            const stillMsgs = [];
+            for (const mid of cur.ids) {
+              try {
+                const rows = await db.select().from(messages).where(eq(messages.id, Number(mid))).all();
+                if (rows && rows[0] && String(rows[0].status || '') === 'pending') stillMsgs.push(rows[0]);
+              } catch (_e) {}
+            }
+            if (stillMsgs.length) {
+              try { await clearReviewUiMessages(userId, cq.message.chat.id); } catch (_e) {}
+              await sendReviewBatch(cq.message.chat.id, cur, stillMsgs, {
+                adminId: userId,
+                resumed: true,
+              });
+              return;
+            }
+            // batch شماره‌دار کهنه بدون pending → پاک و ادامه برای batch جدید
+            try { await clearReviewBatch(userId); } catch (_e) {}
           }
         } catch (_e) {}
       }
-                  try {
+      try {
         await clearReviewUiMessages(userId, cq.message.chat.id);
       } catch (_e) {}
       try {
@@ -2676,7 +2692,7 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
           message_id: cq.message.message_id,
         });
       } catch (_e) {}
-const res = await createReviewBatch(userId);
+      const res = await createReviewBatch(userId);
       if (res.status === 'no_shift') {
         await api.sendMessage({ chat_id: cq.message.chat.id, text: '❌ شیفت شما تمام شده است.' });
         return;
@@ -5919,6 +5935,40 @@ if (data.startsWith('sl_setch:')) {
 
 
     // —— مدیریت اطلاعیه کاربران (ذخیره‌محور) ——
+    if (data === 'ann_m:admins') {
+      if (!isOwner(userId)) {
+        await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });
+        return;
+      }
+      await setState(userId, 'announce_wait_text_admins');
+      await api.answerCallbackQuery({ callback_query_id: cq.id });
+      let adminN = 0;
+      try {
+        adminN = await countAnnounceAudience('admins');
+      } catch (_e) {
+        try {
+          const ads = (await db.select().from(channelAdmins).all()) || [];
+          const seen = {};
+          for (const a of ads) {
+            const id = Number(a.userId || a.user_id);
+            if (id) seen[id] = 1;
+          }
+          adminN = Object.keys(seen).length;
+        } catch (_e2) {}
+      }
+      await api.sendMessage({
+        chat_id: cq.message.chat.id,
+        text:
+          '👮 اطلاعیه به ادمین‌ها\n\n' +
+          'تعداد ادمین یکتا (از channel_admins): ' +
+          adminN +
+          ' نفر\n\n' +
+          'متن اطلاعیه را بفرستید. پس از ارسال، مستقیماً برای ادمین‌ها ارسال می‌شود (نه کاربران عادی).',
+        reply_markup: sanitizeMarkup({ keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true }),
+      });
+      return;
+    }
+
     if (data === 'ann_m:new') {
       if (!isOwner(userId)) {
         await api.answerCallbackQuery({ callback_query_id: cq.id, text: 'فقط مالک', show_alert: true });

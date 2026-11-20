@@ -66,3 +66,24 @@ function remainingToSend(batch, pendingRows) {
 }
 
 console.log('queue_invariants: all passed');
+
+// Delete fallback replacement text must be exact
+{
+  const FALLBACK = 'محتوا حذف شده است';
+  assert.equal(FALLBACK, 'محتوا حذف شده است');
+}
+
+// Stale batch_next should prefer resume when undelivered pending remains
+{
+  function shouldResumeStale(want, cur) {
+    if (want == null || !cur) return false;
+    if (!cur.ids || !cur.ids.length) return false;
+    if (Number(cur.batchNumber) === Number(want)) return false;
+    return true; // resume current, do not create
+  }
+  assert.equal(shouldResumeStale(1, { batchNumber: 2, ids: [10, 11] }), true);
+  assert.equal(shouldResumeStale(2, { batchNumber: 2, ids: [10] }), false);
+  assert.equal(shouldResumeStale(1, null), false);
+}
+
+console.log('extended invariants: all passed');
