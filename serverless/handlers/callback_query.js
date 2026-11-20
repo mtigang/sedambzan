@@ -3794,9 +3794,10 @@ if (data === 'review_next' || data.startsWith('review_next:')) {
     }
 
     if (data.startsWith('shift_full|') || data.startsWith('shift_full:')) {
+      // کیبورد قدیمی ممکن است هنوز shift_full بفرستد — دیگر مسدود نیست
       await api.answerCallbackQuery({
         callback_query_id: cq.id,
-        text: 'این شیفت پر است',
+        text: 'این بازه توسط ادمین دیگری هم برداشته شده؛ شما هم می‌توانید بردارید. لیست را یک‌بار رفرش کنید.',
         show_alert: true,
       });
       return;

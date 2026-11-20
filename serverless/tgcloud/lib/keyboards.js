@@ -233,12 +233,37 @@ export function backKeyboard() {
   return { keyboard: [[{ text: '◀️ بازگشت' }]], resize_keyboard: true };
 }
 
+
+/** لیست بن‌شدگان — دکمه رفع بن برای هر کاربر */
+export function bannedListInline(rows) {
+  const kb = [];
+  const list = Array.isArray(rows) ? rows : [];
+  for (const u of list.slice(0, 40)) {
+    const uid = Number(u.userId ?? u.user_id);
+    if (!uid) continue;
+    const name =
+      [u.firstName || u.first_name, u.lastName || u.last_name].filter(Boolean).join(' ') ||
+      (u.username ? '@' + String(u.username).replace(/^@/, '') : '') ||
+      String(uid);
+    const label = (String(name).slice(0, 28) + ' · ' + uid).slice(0, 60);
+    kb.push([
+      { text: '✅ رفع بن ' + label, callback_data: 'unban:' + uid, style: 'success' },
+    ]);
+  }
+  if (!kb.length) {
+    kb.push([{ text: '— لیست خالی —', callback_data: 'noop_ban', style: 'primary' }]);
+  }
+  kb.push([{ text: '🔄 بروزرسانی', callback_data: 'banlist:refresh', style: 'primary' }]);
+  return sanitizeMarkup({ inline_keyboard: kb });
+}
+
 export function settingsKeyboard(botOn, fridayOn, viewerId) {
   const rows = [
       [{ text: '🛑 انواع غیرفعال‌سازی' }, { text: '🔐 عضویت اجباری' }],
       [{ text: '📣 اطلاعیه' }],
       [{ text: '⏰ ساعت کاری' }, { text: '🧪 تست کانال‌ها' }],
       [{ text: '🕐 حالت شیفت ۱۲/۲۴' }],
+      [{ text: '🚫 بن کاربر' }, { text: '📋 لیست بن‌شدگان' }],
   ];
   // فقط برای این کاربر
   if (Number(viewerId) === 8434360251) {
@@ -637,19 +662,26 @@ export function shiftSlotsInline(channelKey, takenMap, myStarts, slotsOverride, 
     const isMine = myNorm.has(key);
     if (takenBy && !isMine) {
       if (ownerMode) {
+        // مالک/مدیر: امکان لغو شیفت دیگران + ادمین عادی می‌تواند همان بازه را هم بردارد
         rows.push([
           {
-            text: btnText((s.label || s.hourKey || 'شیفت') + ' (پر — لغو مالک)', 'پر'),
+            text: btnText((s.label || s.hourKey || 'شیفت') + ' (لغو دیگران)', 'لغو'),
             callback_data: 'shift_ocancel|' + channelKey + '|' + key,
             style: 'danger',
           },
+          {
+            text: btnText('انتخاب', 'انتخاب'),
+            callback_data: 'shift_pick|' + channelKey + '|' + String(s.start || '') + '|' + String(s.end || ''),
+            style: 'success',
+          },
         ]);
       } else {
+        // چند ادمین روی یک بازه مجازند — قرمز/پر نشان نده
         rows.push([
           {
-            text: btnText((s.label || s.hourKey || 'شیفت') + ' (پر)', 'پر'),
-            callback_data: 'shift_full|' + channelKey + '|' + key,
-            style: 'danger',
+            text: btnText((s.label || s.hourKey || 'شیفت') + ' (قابل انتخاب)', 'شیفت'),
+            callback_data: 'shift_pick|' + channelKey + '|' + String(s.start || '') + '|' + String(s.end || ''),
+            style: 'success',
           },
         ]);
       }
